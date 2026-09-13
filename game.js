@@ -38,6 +38,9 @@ const wrapA = d => { while (d > PI) d -= TAU; while (d < -PI) d += TAU; return d
 /* ---- 2. THE WORLD: one tile = one unit, sea level y 0. macroHeight is the expensive field (sampled per tile),
    microRelief is cheap sub-tile detail. ---- */
 let S = 0;
+/* M7: 1 while the world is Gielinor, the curated 2007 map (section 46, map07.js). Every proc field below answers "nothing
+   here" for it — no settlement, site, ruin or ditch — and the ground, the walls and the spawns come off the map instead. */
+let M7 = 0;
 const SETTLE_CELL = 250, INV_CELL = 1 / SETTLE_CELL;
 let villageCache = new Map(), nbrCache = new Map();
 
@@ -176,6 +179,7 @@ function siteInfo(cx, cz) {
   return s;
 }
 function villageAt(cx, cz) {
+  if (M7) return null;
   const k = (cx * 8191 + cz) * 2;
   let v = villageCache.get(k);
   if (v !== undefined) return v;
@@ -205,6 +209,7 @@ function nbrs(cx, cz) {
 let _lcx = 1e9, _lcz = 1e9, _llist = [];   // one-entry cell cache
 let _nvx = 1e9, _nvz = 1e9, _nvr = null;   // and a one-entry answer per integer tile: finish() asks four times per tile
 function nearVillage(x, z) {
+  if (M7) return null;
   const ix = Math.floor(x), iz = Math.floor(z);
   if (ix === _nvx && iz === _nvz) return _nvr;
   _nvx = ix; _nvz = iz;
@@ -343,7 +348,7 @@ function finish(x, z, m) {
   }
   return h;
 }
-const heightAt = (x, z) => finish(x, z, macroHeight(x, z));
+const heightAt = (x, z) => M7 ? m7Y(x, z) : finish(x, z, macroHeight(x, z));
 
 /* ---- 2b. REGIONS: a jittered Voronoi of kingdoms ~1500 tiles across. Everything discrete hangs off the cell —
    palette, species, monsters, roofs, the music of the names — so crossing a border is arriving somewhere different.
@@ -528,7 +533,7 @@ const POI_T = [
   { k: 14, f: 'X Keep', sp: ['blackknight', 'blackknight'], wild: 1 }
 ];
 function siteAt(gx, gz) {
-  if (gz * SITE_CELL > 499000) return null;   // hoisted above the key: the band's null used to be cached under a key a real cell shares
+  if (M7 || gz * SITE_CELL > 499000) return null;   // hoisted above the key: the band's null used to be cached under a key a real cell shares
   if (siteCache.S !== S) { siteCache.clear(); siteCache.S = S; }
   const key = gx * 8191 + gz;
   let s = siteCache.get(key);
@@ -655,11 +660,11 @@ function wildD(x, z) {   // signed tiles into (+) or short of (−) the nearest 
   }
   return _wld = best;
 }
-const wildLvAt = (x, z) => { const dp = wildD(x, z); return dp > 0 ? clamp(Math.ceil(dp / 26), 1, 99) : 0; };   // one level per 26 tiles: a level is a RUN, not a step
-const wildBlend = (x, z) => clamp((wildD(x, z) + 40) / 80, 0, 1);   // the ash creeps in over ~40 tiles each side; the LAW changes at the middle
+const wildLvAt = (x, z) => { if (M7) return m7Wild(x, z); const dp = wildD(x, z); return dp > 0 ? clamp(Math.ceil(dp / 26), 1, 99) : 0; };   // one level per 26 tiles: a level is a RUN, not a step
+const wildBlend = (x, z) => M7 ? 0 : clamp((wildD(x, z) + 40) / 80, 0, 1);   // the ash creeps in over ~40 tiles each side; the LAW changes at the middle
 let _dtx = 1e9, _dtz = 1e9, _dtv = 99;
 function ditchT(x, z) {   // distance from the law's line in TILES: the field's own slope normalises it, so the trench keeps one width everywhere
-  if (z > 500000) return 99;
+  if (M7 || z > 500000) return 99;   // Gielinor's ditch is a real loc, crossed from its own menu (46.)
   const ix = Math.floor(x), iz = Math.floor(z);
   if (ix === _dtx && iz === _dtz) return _dtv;
   _dtx = ix; _dtz = iz;
@@ -766,6 +771,7 @@ function colorAt(x, z, h, slope) {
   return out;
 }
 function biomeName(h, x, z) {
+  if (M7) return m7Place(x, z);
   if (inDunPlane(z)) { const d = dunFor(x, z); return d ? d.name : 'the deep dark'; }
   const wl0 = wildLvAt(x, z);
   if (wl0) return h < -0.3 ? 'a lake of lava, the Wilderness' : 'the Wilderness, level ' + wl0;
@@ -850,7 +856,8 @@ const TIERS = [
 ];
 const TIER = Object.create(null); TIERS.forEach((t, i) => { t.i = i; TIER[t.k] = t; });
 /* [key, name, glyph, slot, atk, str, def, extras]; extras: spd, two, reach, stab, tool, gate. The a/s/d columns only price the
-   piece and scale the few invented ladders (tools, boots, gauntlets) — real combat numbers come from WV/AV below. */
+   piece and scale the few invented ladders (boots, gauntlets) — real combat numbers come from /out via stat07 (STATS07),
+   except the two tool ladders (hatchet, pickaxe) still in WV below. */
 const PIECES = [
   ['hatchet', 'hatchet', 'axe', 'weapon', 4, 5, 0, { tool: 'woodcutting' }], ['pickaxe', 'pickaxe', 'pick', 'weapon', 3, 4, 0, { tool: 'mining' }],
   ['dagger', 'dagger', 'dagger', 'weapon', 5, 4, 0, { spd: 4, stab: 1 }], ['sword', 'sword', 'sword', 'weapon', 7, 6, 1, { spd: 4, stab: 1 }],
@@ -865,35 +872,32 @@ const PIECES = [
   ['kiteshield', 'kiteshield', 'shield', 'shield', 0, 0, 8], ['sq_shield', 'sq shield', 'sqshield', 'shield', 0, 0, 6],
   ['defender', 'defender', 'defender', 'shield', 3, 2, 3], ['boots', 'boots', 'boot', 'feet', 0, 0, 2], ['gauntlets', 'gauntlets', 'glove', 'hands', 0, 0, 2]
 ].map(([k, n, g, slot, a, s, d, x]) => Object.assign({ k, n, g, slot, a, s, d }, x));
-/* the wiki's own ladder, indexed by tier (bronze iron steel black mithril adamant rune white dragon).
-   WV: [attack, strength] per weapon class — the single attack scalar is the class's best style's bonus.
-   AV: armour defence — the rounded mean of the wiki's stab/slash/crush. Tools, boots and gauntlets stay formula-scaled. */
+/* WV: the two TOOL wield ladders (hatchet, pickaxe) indexed by tier — these are NOT in STATS07 (gathering tools stay
+   hardcoded), so they still supply hatchet/pickaxe atk/str here. The weapon atk/str ladder and the AV armour def ladder
+   that used to live here are gone: every metal weapon and every metal armour piece now takes its atk/str/def from /out
+   via stat07 (STATS07). Boots and gauntlets have no ladder and stay formula-scaled (p.a/p.s/p.d × tier). */
 const WV = {
-  hatchet: [[4, 5, 8, 10, 12, 17, 26, , 38], [5, 7, 9, 12, 13, 19, 29, , 42]], pickaxe: [[4, 5, 8, 10, 12, 17, 26, , 38], [5, 7, 9, 11, 13, 19, 29, , 42]],
-  dagger: [[4, 5, 8, 10, 11, 15, 25, , 40], [3, 4, 7, 7, 10, 14, 24, , 40]],
-  sword: [[4, 6, 11, 14, 16, 23, 38, , 65], [5, 7, 12, 12, 17, 24, 39, , 63]],
-  scimitar: [[7, 10, 15, 19, 21, 29, 45, , 67], [6, 9, 14, 14, 20, 28, 44, , 66]],
-  longsword: [[5, 8, 14, 18, 20, 29, 47, , 69], [7, 10, 16, 16, 22, 31, 49, , 71]],
-  mace: [[6, 9, 13, 16, 18, 25, 39, , 60], [5, 7, 11, 13, 16, 23, 36, , 55]],
-  battleaxe: [[6, 8, 16, 20, 22, 31, 48, , 70], [9, 13, 20, 24, 29, 41, 64, , 85]],
-  warhammer: [[10, 11, 18, 22, 25, 35, 53, , 95], [8, 11, 18, 22, 27, 39, 62, , 85]],
-  claws: [[4, 6, 11, 14, 16, 23, 38, , 57], [5, 7, 12, 14, 17, 24, 39, , 56]],
-  '2h_sword': [[9, 13, 21, 27, 30, 43, 69, , 92], [10, 14, 22, 26, 31, 44, 70, , 93]],
-  halberd: [[8, 12, 19, 25, 28, 41, 67, , 95], [8, 12, 20, 20, 29, 42, 68, , 89]],
-  spear: [[5, 8, 12, 15, 17, 24, 36, , 55], [6, 10, 12, 16, 18, 28, 42, , 60]],
-  hasta: [[5, 8, 12, , 17, 24, 36, , 55], [6, 10, 12, , 18, 28, 42, , 60]],
-  defender: [[3, 5, 7, 9, 10, 13, 20, , 25], [0, 0, 1, 2, 3, 4, 5, , 6]]
-};
-const AV = {
-  med_helm: [3, 4, 7, 9, 10, 14, 22, 9, 33], full_helm: [4, 6, 9, 12, 13, 19, 30, 12, 45],
-  platebody: [13, 18, 29, 37, 43, 61, 78, 37, 104], chainbody: [10, 15, 24, 31, 34, 49, 71, 31, 91],
-  platelegs: [7, 10, 16, 20, 22, 31, 49, 20, 66], plateskirt: [7, 10, 16, 20, 22, 31, 49, 20, 66],
-  kiteshield: [6, 9, 14, 18, 20, 29, 46, 18, 58], sq_shield: [5, 8, 12, 15, 17, 24, 38, 15, 50],
-  defender: [2, 4, 6, 8, 9, 12, 19, , 24]
+  hatchet: [[4, 5, 8, 10, 12, 17, 26, , 38], [5, 7, 9, 12, 13, 19, 29, , 42]], pickaxe: [[4, 5, 8, 10, 12, 17, 26, , 38], [5, 7, 9, 11, 13, 19, 29, , 42]]
 };
 
 const ITEMS = Object.create(null);
-const defItem = o => ITEMS[o.id] = o;
+/* /out-derived combat stats (data07-stats.js, loaded before game.js) flow through this single choke point.
+   Every item is built and then written to ITEMS here — procedural families, ARM rows and W() all end up in defItem —
+   so stat07 is the one place /out overwrites the hardcoded numbers. It writes ONLY the fields STATS07 supplies
+   (atk/str/def/mag/mdmg/pb/spd/rat/rst/rng and, when the cache carries a wield gate, req); every field STATS07 omits
+   is left exactly as authored, which is how ammo/thrown rat-rst, reach, val, armour spd, low-tier metal reqs, the
+   boots/gauntlet/tool formula ladders and the unresolved items all keep their hardcoded values. STATS07_PIN wins last. */
+const S7F = ['atk', 'str', 'def', 'mag', 'mdmg', 'pb', 'spd', 'rat', 'rst', 'rng'];
+const stat07 = o => {
+  const n = o.name && o.name.toLowerCase(), s = STATS07[n];
+  if (s) {
+    for (const k of S7F) if (s[k] !== undefined) o[k] = s[k];
+    if (s.reqSkill) { const r = { [s.reqSkill]: s.reqLvl }; if (s.reqSkill2) r[s.reqSkill2] = s.reqLvl2; o.req = r; }   // cache wield gate wins; else keep the seedworld req + its key order
+  }
+  const ov = STATS07_PIN[n]; if (ov) Object.assign(o, ov);   // hand-authored pins win over /out
+  return o;
+};
+const defItem = o => ITEMS[o.id] = stat07(o);
 /* wearable with zeroed bonuses and an empty requirement unless given */
 const defWear = o => defItem(Object.assign({ equip: 1, atk: 0, str: 0, def: 0, req: {} }, o));
 /* compact wearable row: W(id, name|0 derive from id, glyph, 'c.c2'|0 (0 = TINT07 paints it at load), slot, val, req?|0, rest?).
@@ -910,11 +914,11 @@ for (const t of TIERS) for (const p of PIECES) {
   if (t.k === 'black' && (p.k === 'pickaxe' || p.k === 'hasta')) continue;   // neither exists in 2007
   if (t.armourOnly && (p.slot === 'weapon' || p.k === 'defender')) continue;
   if (t.k === 'bronze' && p.k === 'boots') continue;   // boots start at iron
-  const w = WV[p.k], av = AV[p.k];
+  const w = WV[p.k];   // WV now holds only the two tool ladders; weapon atk/str + armour def come from stat07 (STATS07)
   defItem({
     id: t.k + '_' + p.k, name: t.n + ' ' + p.n, g: p.g, c: t.c, c2: t.c2, slot: p.slot, tier: t.i, spd: p.spd || 5, equip: 1,
     two: p.two || 0, reach: p.reach || 0, stab: p.stab || 0, tool: p.tool || null,
-    atk: w ? w[0][t.i] || 0 : p.a * t.m, str: w ? w[1][t.i] || 0 : p.s * t.m, def: av ? av[t.i] || 0 : p.d * t.m,
+    atk: w ? w[0][t.i] || 0 : p.a * t.m, str: w ? w[1][t.i] || 0 : p.s * t.m, def: p.d * t.m,   // atk/str: tools from WV, all else formula → stat07 overwrites weapons/armour; def formula → stat07 overwrites armour, weapons/boots/gauntlets keep it
     req: p.tool ? { [p.tool]: t.tool, attack: t.req } : p.slot === 'weapon' ? (p.k === 'halberd' ? { attack: t.req, strength: Math.max(1, t.req >> 1) } : { [t.k === 'dragon' && p.k === 'warhammer' ? 'strength' : 'attack']: t.req }) : { defence: t.req },   // only the dragon warhammer asks strength; halberds ask half again in strength
     val: Math.round((p.a + p.s + p.d * 1.6 + 6) * t.m * t.m * 1.2)   // price climbs with the square of the tier
   });
@@ -1292,8 +1296,11 @@ const prayHas = (f, v) => PRAYERS.some(p => (P.prayers & p.bit) && (v === undefi
 const TASKS = Object.create(null), USE_ON = Object.create(null), onKill = [], tickHooks = [], poolHooks = [], structHooks = [];
 /* settings, shared by the options tab and the dev console */
 const OPT = { camSpeed: 2.0, viewRadius: 7, fog: 1, timers: 1, xpDrops: 1, roofs: 1, hideRoofs: 0, brightness: 1, runMul: 1, retaliate: 1, stuck: 0, pvpWarn: 1, budget: 0, osrs: 1, osrsDist: 99 };
+/* the 2007 client's own interface (section 48): on while Gielinor plays with "2007 models" on; declared this early because
+   applyOpts, which switches it, runs while the options load */
+const OS = { on: 0, ready: 0 };
 
-/* ---- 6c. ICONS: drawn, not loaded; one 32x32 canvas per (glyph, colours), cached as a data URL ---- */
+/* ---- 6c. ICONS: glyphs drawn on one 32x32 canvas; the 07 art (item models, cache sprites) made on the device from /out ---- */
 const _iconCache = new Map();
 const _ic = document.createElement('canvas'); _ic.width = _ic.height = 32;
 const _ix = _ic.getContext('2d');
@@ -1307,30 +1314,105 @@ function drawIcon(glyph, c, c2) {
   _iconCache.set(k, u = _ic.toDataURL());
   return u;
 }
-/* 07 icons: wiki-true sprites served from assets/i07/ (items) and assets/c07/ (UI). The generated lookup maps (ICON07 item->sprite,
-   SK07/PR07/SP07 by k, US07 by display name, MK07 by MK_ART key, TINT07 worn tints) live in icons07.js — regenerate with
-   node icons07-genmap.mjs / node icons07-tint.mjs after editing icons07-map.csv; drawn glyphs remain the fallback. */
-if (typeof ICON07 === 'undefined') for (const k of ['ICON07', 'SK07', 'PR07', 'SP07', 'US07', 'MK07', 'TINT07']) globalThis[k] = {};   // lone-file boot: sprites/tints degrade to glyphs
+/* 07 art. An item's picture is its cache model drawn the way the client draws inventory sprites (osrs.js, OSRSK.icon:
+   rendered on the device, once, then kept in IndexedDB); a skill, prayer, spell or map picture is the cache's own sprite
+   (out/<rev>/s), trimmed to its outline; the handful with no counterpart in /out are files in assets/i07 and assets/c07.
+   The generated maps in icons07.js say which — icons07-genmap.mjs off icons07-map.csv: ICON07 item -> cache id (a number)
+   | 's'+sprite | file, SK07/PR07/SP07 by k and US07 by display name -> sprite (a number) | c07 file, MK07 by MK_ART key ->
+   sprite | 'o'+cache id | file, SPR07 sprite -> its trim rect, TINT07 worn tints (icons07-tint.mjs). A roster item
+   (THE FULL ROSTER) has no row: its c7 is its cache id. Wherever a picture is still coming, or there is none, the drawn
+   glyph stands in. */
+if (typeof ICON07 === 'undefined') for (const k of ['ICON07', 'SK07', 'PR07', 'SP07', 'US07', 'MK07', 'SPR07', 'TINT07']) globalThis[k] = {};   // lone-file boot: sprites/tints degrade to glyphs
 const i07p = f => 'assets/' + (f.indexOf('/') < 0 ? 'i07/' + f : f) + '.png', c07p = n => 'assets/c07/' + n + '.png';
-const mk07p = n => n.indexOf('/') < 0 ? c07p(n) : 'assets/' + n + '.png';   // markers default to the c07 map set; a folder means an item sprite stands in
-/* The "2007 models" setting arms the sprites as well as the meshes: with it off every lookup misses and the drawn
-   glyph underneath takes over, so one toggle really does undress the whole 07 layer. Every read of a sprite map
+/* The "2007 models" setting arms the pictures as well as the meshes: with it off every lookup misses and the drawn
+   glyph underneath takes over, so one toggle really does undress the whole 07 layer. Every read of an art map
    goes through here — icons07Apply (settings) forgets the caches the misses would otherwise be stuck in. */
 const g07 = (m, k) => OPT.osrs ? m[k] : 0;
-function icon(id) {
-  let u = _iconCache.get(id);
+/* the cache's UI sprites: fetched once each, trimmed by SPR07 into a data URL and remembered in localStorage under the cache
+   revision, so every session after the first paints the skills grid in sprites on its first frame. A batch that lands
+   repaints everything built from glyphs meanwhile (icons07Apply). Map values: undefined unasked, 0 coming, null none. */
+const SPR_KEY = 'seedworld.spr07', sprArts = new Map();
+let sprT = 0, sprSaveT = 0;
+try { const j = JSON.parse(localStorage[SPR_KEY] || 'null'); if (j && j.rev === OSRSK.OUT) for (const k in j.m) sprArts.set(+k, j.m[k]); } catch (e) { /* no store: fetched below */ }
+function sprArt(id) {
+  const u = sprArts.get(id);
   if (u) return u;
-  const it = ITEMS[id], f = g07(ICON07, id);
-  _iconCache.set(id, u = f ? i07p(f) : it ? drawIcon(it.g, it.c, it.c2) : drawIcon('lock', '#6a6258', '#3a3630'));
-  return u;
+  if (u === undefined) {
+    sprArts.set(id, 0);
+    const im = new Image();
+    im.onload = () => {
+      const r = SPR07[id] || [0, 0, im.naturalWidth, im.naturalHeight], cv = document.createElement('canvas');
+      cv.width = r[2]; cv.height = r[3];
+      cv.getContext('2d').drawImage(im, r[0], r[1], r[2], r[3], 0, 0, r[2], r[3]);
+      sprArts.set(id, cv.toDataURL());
+      if (!sprT) sprT = setTimeout(sprLanded, 60);
+    };
+    im.onerror = () => sprArts.set(id, null);
+    im.src = OSRSK.OUT + '/s/' + id + '.png';
+  }
+  return '';
+}
+function sprLanded() {
+  sprT = 0;
+  if (OPT.osrs) icons07Apply(1);
+  clearTimeout(sprSaveT);
+  sprSaveT = setTimeout(() => {
+    const m = {};
+    for (const [k, v] of sprArts) if (v) m[k] = v;
+    try { localStorage[SPR_KEY] = JSON.stringify({ rev: OSRSK.OUT, m }); } catch (e) { /* storage full: fetched again next session */ }
+  }, 1500);
+}
+function sprWarm() { for (const m of [SK07, PR07, SP07, US07, MK07]) for (const k in m) if (typeof m[k] === 'number') sprArt(m[k]); }   // boot asks for the lot at once: one repaint, one save
+const uiArt = v => typeof v === 'number' ? sprArt(v) : c07p(v);
+function mkArt(v) {   // a map marker: a sprite, an item model ('o' + cache id), or a file (bare = c07, a folder keeps its own)
+  if (typeof v === 'number') return sprArt(v);
+  if (/^o\d+$/.test(v)) { const c = +v.slice(1), u = OSRSK.iconNow(c); if (u === undefined) icAsk(c); return u || ''; }
+  return v.indexOf('/') < 0 ? c07p(v) : 'assets/' + v + '.png';
+}
+/* an item's picture; n, where the caller knows the stack, picks the cache's stack variant (the coin piles, the five arrows);
+   look paints only what is already drawn and leaves a missing sprite unasked (the dev list asks once typing pauses) */
+const itemArt = id => { const a = ICON07[id]; return a !== undefined ? a : ITEMS[id] && ITEMS[id].c7; };
+function icon(id, n, look) {
+  const it = ITEMS[id];
+  if (!it) return drawIcon('lock', '#6a6258', '#3a3630');
+  const a = OPT.osrs ? itemArt(id) : undefined;
+  if (typeof a === 'number') {
+    const u = OSRSK.iconNow(a, n);
+    if (u) return u;
+    if (u === undefined && !look) icAsk(a, n);
+  } else if (a) {
+    if (/^s\d+$/.test(a)) { const u = sprArt(+a.slice(1)); if (u) return u; }
+    else { let u = _iconCache.get(id); if (!u) _iconCache.set(id, u = i07p(a)); return u; }
+  }
+  return drawIcon(it.g, it.c, it.c2);
+}
+/* a model sprite still drawing: asked once, and every picture of it on screen (img[data-ic], see img()) swapped in when it lands */
+const icAsked = new Set(), icLanded = new Set();
+let icSwapT = 0;
+function icAsk(cid, n) {
+  const k = cid + '|' + (n > 1 ? n : 1);
+  if (icAsked.has(k)) return;
+  icAsked.add(k);
+  OSRSK.icon(cid, n).then(() => {
+    icAsked.delete(k); icLanded.add(cid);
+    if (!icSwapT) icSwapT = setTimeout(icSwap, 30);
+  });
+}
+function icSwap() {
+  icSwapT = 0;
+  for (const c of icLanded) for (const e of document.querySelectorAll('img[data-ic="' + c + '"]')) {
+    const u = OSRSK.iconNow(c, +e.dataset.n);
+    if (u === undefined) continue;
+    if (u) e.src = u;
+    e.removeAttribute('data-ic');
+  }
+  icLanded.clear();
 }
 /* skillcapes: the 2007 price, and the only requirement that matters */
 SKILLS.forEach((s, i) => { if (!s.locked) defWear({ id: 'skillcape_' + s.k, name: s.f + ' cape', g: 'cape', c: SK_C[i], c2: '#2a2620', slot: 'cape', def: 9, req99: s.k, val: 99000 }); });
 function skIcon(i) {
-  const key = 'sk:' + i, s = SKILLS[i];
-  let u = _iconCache.get(key);
-  if (!u) _iconCache.set(key, u = g07(SK07, s.k) ? c07p(SK07[s.k]) : drawIcon(s.g, SK_C[i], '#f0e6c8'));
-  return u;
+  const s = SKILLS[i], a = g07(SK07, s.k);
+  return (a && uiArt(a)) || drawIcon(s.g, SK_C[i], '#f0e6c8');
 }
 const hexInt = h => parseInt(h.slice(1), 16);
 /* ---- 8. RENDERER ---- */
@@ -1890,6 +1972,8 @@ NPC_TYPES.forEach((t, i) => {
   t.mag = m ? m[0] : 1; t.mdb = m ? m[1] : 0;
   t.psn = { poisonspider: 6, kalphitesoldier: 4, scorpia: 20 }[t.k] || 0;   // wiki starting poison damage
   if (t.fire) t.bones = 'dragon_bones';   // dragonkind leave dragon bones; everything else keeps the big/small split
+  const ns = NPCSTATS[t.k];   // LIGHT /out source: overwrite ONLY the 7 present fields (lv/hp/atk/str/def/mag/sbon); abon/db/mdb/sz/spd + all design fields stay. Bosses/variants carry no key. hp drives maxhp at spawn.
+  if (ns) for (const f of ['lv', 'hp', 'atk', 'str', 'def', 'mag', 'sbon']) if (ns[f] !== undefined) t[f] = ns[f];
   t.i = i;
 });
 const NPC_BY = Object.create(null); NPC_TYPES.forEach(t => NPC_BY[t.k] = t);
@@ -3018,9 +3102,10 @@ function instance(geo, rows, cols, rec, tag, broad) {
   }
   return inst;
 }
-const hideInst = o => { if (o.inst) { o.inst.setMatrixAt(o.slot, ZERO); o.inst.instanceMatrix.needsUpdate = true; } };
+const hideInst = o => { if (o.vis) o.vis(1); if (o.inst) { o.inst.setMatrixAt(o.slot, ZERO); o.inst.instanceMatrix.needsUpdate = true; } };   // vis: a Gielinor piece swaps to its own spent look
 /* the inverse: re-lay the proc instance from the tile's own dice (the same rolls scatterResources made) */
 function showInst(o) {
+  if (o.vis) o.vis(0);
   if (!o.inst) return;
   const y = tileH(o.x, o.z), h = hash2(o.x, o.z, S + 101), s = o.t === 0 ? treeScale(o.k, h) : rockScale(h);
   const sy = o.t === 0 ? s * (0.84 + ((h >>> 4) & 31) / 31 * 0.42) : s * 0.85;
@@ -3154,25 +3239,28 @@ function disposeChunk(rec) {
 let indoors = null;
 const roofShown = b => !OPT.hideRoofs && !(OPT.roofs && indoors === b);
 function tileH(x, z) {
+  if (M7) return m7Y(x, z);
   const rec = chunks.get(ck(Math.floor(x / CHUNK), Math.floor(z / CHUNK)));
   return rec && rec.near ? recH(rec, x, z) : heightAt(x, z);
 }
-function walkY(x, z) { const b = floorMap.get(tk(x, z)); return b ? b.y + FLOOR_TOP : tileH(x, z); }
+function walkY(x, z) { if (M7) return m7Y(x, z); const b = floorMap.get(tk(x, z)); return b ? b.y + FLOOR_TOP : tileH(x, z); }
 function groundY(x, z) {
+  if (M7) return m7Y(x, z);   /* Gielinor's heights are continuous already: the map interpolates its own corners */
   const b = floorMap.get(tk(Math.round(x), Math.round(z)));
   if (b) return b.y + FLOOR_TOP;
   const x0 = Math.floor(x), z0 = Math.floor(z), fx = x - x0, fz = z - z0;
   const a = tileH(x0, z0), b1 = tileH(x0 + 1, z0), c = tileH(x0, z0 + 1), d = tileH(x0 + 1, z0 + 1), t = a + (b1 - a) * fx;
   return t + (c + (d - c) * fx - t) * fz;
 }
-const isWater = h => h < SEA;
+const isWater = h => !M7 && h < SEA;   // Gielinor's water is tile flags, not a sea level: nobody rows it
 const STUCK_CLIMB = 8.5;   // stuck mode clears the 6.5-unit ledges; masonry stays shut
 /* a doorway is a step, not a cliff: a house floor sits on the lot's high corner, so on sloping ground the
    threshold can stand further above the grass than an ordinary stride. The doorstep budget covers the
    worst lot the claim allows (2.2 of fall plus the floor's own 0.2) so a door is never a one-way trip. */
 const DOORSTEP = 2.6;
-function canStep(fx, fz, tx, tz, own) {
+function canStep(fx, fz, tx, tz, own, pl) {
     if (shut(tk(tx, tz), own) && !shut(tk(fx, fz), own)) return false;   // already inside something that isn't ours: walk out through it
+  if (M7) return MAP07.canMove(pl === undefined ? P.plane : pl, fx, -fz, tx - fx, fz - tz);   // the map's own walls and floors, on the walker's plane
   const a = walkY(fx, fz), b = walkY(tx, tz), aw = isWater(a), bw = isWater(b);
   if (aw !== bw) return Math.abs(a - b) < 8;
   if (bw) return true;
@@ -3181,7 +3269,7 @@ function canStep(fx, fz, tx, tz, own) {
   if (!ra !== !rb && (fl.house !== undefined || fl.sill)) return Math.abs(a - b) <= Math.max(DOORSTEP, OPT.stuck ? STUCK_CLIMB : CLIMB);
   return Math.abs(a - b) <= (OPT.stuck ? STUCK_CLIMB : CLIMB);
 }
-const dry = (x, z) => !isWater(walkY(x, z)) && !blocked.has(tk(x, z));
+const dry = (x, z) => M7 ? MAP07.openTile(P.plane, x, -z) && !blocked.has(tk(x, z)) : !isWater(walkY(x, z)) && !blocked.has(tk(x, z));
 const dryOpen = (x, z) => dry(x, z) && !floorMap.has(tk(x, z));
 
 /* ---- LINE OF SIGHT: a walk down the tile line, not a ray. A tile hides what is behind it when something opaque stands on it
@@ -3192,9 +3280,10 @@ const dryOpen = (x, z) => dry(x, z) && !floorMap.has(tk(x, z));
    at MAGIC_RANGE, and returns before touching the ground at all when the pair are adjacent, which is every melee swing. Never
    memoise it: the map and the footprints move every tick, and a stale answer is the divergence this exists to avoid. ---- */
 const LOS_RISE = 3.2;   // half a ledge: taller than any rise the open field rolls up, shorter than anything you would hide behind
-function hasLos(ax, az, bx, bz) {
+function hasLos(ax, az, bx, bz, pl) {
   if (bx < ax || (bx === ax && bz < az)) { let t = ax; ax = bx; bx = t; t = az; az = bz; bz = t; }
   const dx = bx - ax, dz = bz - az, n = Math.max(Math.abs(dx), Math.abs(dz));
+  if (M7) return MAP07.los(pl === undefined ? P.plane : pl, ax, -az, bx, -bz);   // projectile flags: a wall between hides, a counter does not
   if (n < 2) return true;   // adjacent, diagonals included: nothing fits between
   const ay = walkY(ax, az), by = walkY(bx, bz), sx = dx / n, sz = dz / n;
   for (let i = 1; i < n; i++) {
@@ -3215,6 +3304,7 @@ function stepFor(d, cur) {
 /* delete the oldest half of a memo once it outgrows its cap: an infinite world must not grow them without bound */
 const capMap = (m, cap) => { if (m.size > cap) { let n = m.size - (cap >> 1); for (const k of m.keys()) { if (n-- <= 0) break; m.delete(k); } } };
 function refresh() {
+  if (M7) { m7Stream(); return; }   // Gielinor streams whole map squares instead of chunks (46.)
   const pcx = Math.floor(focus.x / CHUNK), pcz = Math.floor(focus.z / CHUNK);
   pending.length = 0;
   for (let a = -RADIUS; a <= RADIUS; a++) for (let b = -RADIUS; b <= RADIUS; b++) {
@@ -3230,6 +3320,7 @@ function refresh() {
 }
 const popQueue = [];
 function pump(budgetMs, maxChunks) {
+  if (M7) return;
   const t0 = performance.now();
   while (popQueue.length && performance.now() - t0 < budgetMs) {   // finish grounds already laid before laying more
     const rec = popQueue.shift();
@@ -3260,13 +3351,15 @@ function closeList() {
 }
 function rebuildNear() {
   nearDirty = 0; nearObjs.length = 0;
+  if (M7) { m7Near(); rebuildClose(); return; }
   const pcx = Math.floor(focus.x / CHUNK), pcz = Math.floor(focus.z / CHUNK);
   for (let a = -3; a <= 3; a++) for (let b = -3; b <= 3; b++) { const rec = chunks.get(ck(pcx + a, pcz + b)); if (rec && rec.near) nearObjs.push(...rec.objs); }
   rebuildClose();
 }
-/* move the player and the world around them in one go; ms is the chunk-build budget */
-function teleport(x, z, ms) {
+/* move the player and the world around them in one go; ms is the chunk-build budget; pl a Gielinor floor (0 when omitted there) */
+function teleport(x, z, ms, pl) {
   P.atkT = Math.max(P.atkT, tickN + 5);   // the room stays the blade for WARP_LOCK after a jump: never spend a swing it will silently drop
+  if (M7) { P.plane = pl === undefined ? 0 : clamp(pl | 0, 0, 3); P.snap7 = 1; }   // snap7: step off whatever the landing tile turns out to hold once its square is up
   focus.set(x, 0, z); refresh(); pump(ms);
   while (popQueue.length) { const r = popQueue.shift(); if (!r.pop && r.mesh.parent) populateChunk(r); }   // arrival ground must be fully furnished
   placePlayer(x, z); rebuildNear(); refreshNpcs();
@@ -3297,9 +3390,9 @@ function heapPop() {
   return top;
 }
 /* tiles to walk, nearest first; [] if already there, null if nothing was reachable; otherwise the closest partial leg */
-function findPath(sx, sz, gx, gz, reach) {
+function findPath(sx, sz, gx, gz, reach, goal) {   // goal: an optional (x, z) => bool standing in for the reach test (a Gielinor loc's footprint)
   reach = reach || 0;
-  const hit = (x, z) => Math.max(Math.abs(x - gx), Math.abs(z - gz)) <= reach;
+  const hit = goal || ((x, z) => Math.max(Math.abs(x - gx), Math.abs(z - gz)) <= reach);
   if (hit(sx, sz)) return [];
   _hf.length = 0; _hi.length = 0;
   const came = new Map(), gs = new Map(), px = new Map(), pz = new Map(), sKey = tk(sx, sz);
@@ -3357,6 +3450,7 @@ function rayGround(ray) {
 }
 const pickLists = [];   // fires, traps, campsite furniture: anything a player leaves on the ground besides drops
 function pickObject(ray) {
+  if (M7) return m7Pick(ray);
   const o = ray.origin, d = ray.direction;
   let bestT = 1e9, best = null;
   const test = (x, y, z, r, obj) => {
@@ -3610,7 +3704,10 @@ function npcLod(n) {
   const dx = n.rx - camera.position.x, dy = n.ry - camera.position.y, dz = n.rz - camera.position.z;
   n.k07 = (dx * dx + dy * dy + dz * dz <= OSRS_CAM2 * s * s
     || Math.abs(n.tx - P.tx) + Math.abs(n.tz - P.tz) <= OSRS_NEAR * s) ? 1 : 0;
-  if (n.k07 && !n.o7) { n.o7 = OSRSK.npcMesh(n.t.n, (n.kh >>> 0) % n.o7v, npcH(n.t), npcPlan(n.t)); scene.add(n.o7); }   // >>>: a dev spawn's private seed can be negative
+  if (n.k07 && !n.o7) {   // >>>: a dev spawn's private seed can be negative
+    const m = OSRSK.npcMesh(n.t.n, (n.kh >>> 0) % n.o7v, npcH(n.t), npcPlan(n.t));
+    if (m) { n.o7 = m; scene.add(m); } else n.k07 = 0;   // null: atoms still fetching — the box rig stays this frame
+  }
   return n.k07;
 }
 const npcFree7 = n => { if (n.o7) { scene.remove(n.o7); OSRSK.npcFree(n.o7); n.o7 = null; } };
@@ -3663,6 +3760,7 @@ const P = {
   path: [], goal: null, task: null, actT: 0, atkT: 0, acting: 0, actSpan: 2, walkPhase: 0, bobPhase: 0, swingPhase: 0,
   run: 1, energy: 100, hp: 10, maxhp: 10, style: 0, rstyle: 1, cstyle: 0, ammoN: 0, pose: 0, spell: null, prayers: 0, pray: 10, maxpray: 10, foodT: 0, potT: 0, spec: 100, specArm: 0, psn: 0, psnN: 0, psnT: 0, psnImm: 0,
   afloat: 0, moved: 0, dead: 0, stuckT: 0, stun: 0, afire: 0, clue: null, slay: null, farm: Object.create(null), look: { skin: 0, shirt: 0, legs: 0, face: 0 }, home: { x: 0, z: 0 }, regionK: '', regionT: 0,
+  plane: 0,   // Gielinor's floor (0-3); every proc world stands on 0
   turn: player, rig: avatar, boat, oarL, oarR
 };
 let tickN = 0;
@@ -3786,7 +3884,7 @@ function stepsThisTick(E) {
 }
 /* the town's peace caps the beasts on its commons; PvP itself answers only to the wilderness rings now */
 const SAFE_RM = 1.75, TOWN_CAP = [20, 26, 32, 40, 48];   // spawn-level ceiling inside the belt, by rank (wire format)
-function townCore(x, z) { const n = nearVillage(x, z); return !!(n && n.d < n.v.r * 1.05); }
+function townCore(x, z) { if (M7) return m7InTown(x, z); const n = nearVillage(x, z); return !!(n && n.d < n.v.r * 1.05); }
 let pvpAck = 0, pvpHold = 0;
 function askPvp(onGo) {
   pvpHold = 1;
@@ -3901,9 +3999,10 @@ function dropStack(id, n, x, z) {   // merge into the heap already on that tile,
   if (d) { d.n += n; d.until = Math.max(d.until, tickN + 200); return; }
   dropItem(id, n, x, z);
 }
-function dropItem(id, n, x, z, life, pub) {
+function dropItem(id, n, x, z, life, pub, pl) {   // pl: the Gielinor floor it lies on (yours when omitted)
   while (drops.length >= DROP_CAP) drops.shift();   // roomy enough that a boss pile can't evict a death pile
-  drops.push({ drop: 1, id, n: n || 1, x, z, y: Math.max(walkY(x, z), 0), name: ITEMS[id].name, until: tickN + (life || 200), pub: pub || 0 });   // a deadline on the shared clock: a per-tick countdown stalls whenever the tab is backgrounded
+  pl = pl === undefined ? P.plane : pl;
+  drops.push({ drop: 1, id, n: n || 1, x, z, pl, y: M7 ? m7Y(x, z, pl) : Math.max(walkY(x, z), 0), name: ITEMS[id].name, until: tickN + (life || 200), pub: pub || 0 });   // a deadline on the shared clock: a per-tick countdown stalls whenever the tab is backgrounded
 }
 /* A spill announced over the wire is mirrored by every client in earshot, and nothing announced the pickup — so each
    mirror stayed lootable on its own and one death fed two or three full copies. Only broadcast piles carry `pub`;
@@ -3968,7 +4067,7 @@ const npcCap = () => Math.min(28, 16 + Math.floor(Math.max(0, powerAt(P.tx, P.tz
 const ORIGIN = { x: 0, z: 0 };   // the seed's canonical spawn anchors the danger gradient
 /* how far into the world this ground is: distance does most of the work, altitude and noise season it, and the
    wilderness stacks its level on top — deep rings breed monsters, rune seams and magic groves alike (wire format) */
-const powerAt = (x, z) => z > 500000 ? dunPower(x, z)
+const powerAt = (x, z) => M7 ? m7Wild(x, z) / 26 : z > 500000 ? dunPower(x, z)
   : Math.hypot(x - ORIGIN.x, z - ORIGIN.z) / 1000 + Math.max(0, (heightAt(x, z) - 30) / 40) + fbm(x * 0.00055, z * 0.00055, S + 111, 2) * 0.35
     + wildLvAt(x, z) / 26;
 /* the spawn lottery: every type weighted by log-distance from the ground's target level, heavy-tailed, asymmetric.
@@ -4051,7 +4150,7 @@ function nearTown(x, z) {
   return false;
 }
 function bossAt(gx, gz) {
-  if (gz * BOSS_CELL > 499000 - BOSS_CELL) return null;   // the dungeon band raises its own bosses
+  if (M7 || gz * BOSS_CELL > 499000 - BOSS_CELL) return null;   // the dungeon band raises its own bosses; Gielinor's stand in its own lairs
   const h = hash2(gx * 7, gz * 13, S + 200);
   if (h % 100 >= 40) return null;   // lairs rise only in the wilderness now, so more cells try their luck
   for (let i = 0; i < 12; i++) {
@@ -4117,9 +4216,11 @@ function removeNpc(n) {
   if (n._bar && !n.dead) { const i = bars.indexOf(n._bar); if (i >= 0) bars.splice(i, 1); fxFree(n._bar.f); n._bar = null; }   // culled alive (teleport, despawn): no ghost bar; a kill keeps its linger
   if (n.fpK) { for (const k of n.fpK) unblock(k, 1); n.fpK = null; }
   npcFree7(n);
+  if (n.c7 !== undefined) { if (n.fig) n.fig.ent.dispose(); n.fig = null; m7Live.delete(n.key); }   // a Gielinor figure owns its own geometry
   scene.remove(n.mesh); const i = npcs.indexOf(n); if (i >= 0) npcs.splice(i, 1);
 }
 function refreshNpcs() {
+  if (M7) return m7Npcs();
   for (let i = npcs.length - 1; i >= 0; i--) { const n = npcs[i]; if (Math.abs(n.tx - P.tx) > 92 || Math.abs(n.tz - P.tz) > 92) removeNpc(n); }
   spawnBosses();
   const CAP = npcCap();
@@ -4196,7 +4297,8 @@ function spawnNpc(t, x, z, key, pw) {
   scene.add(mesh);
   const n = { npc: 1, t, key, name: t.n, tx: x, tz: z, px: x, pz: z, rx: x, rz: z, ry: walkY(x, z), home: { x, z }, hp: t.hp, maxhp: t.hp, face: 0, faceT: 0, mesh,
     atkT: 0, atkStyle: 'm', limbs: mesh.limbs || null, walkPhase: 0, styleIx: 0, styleN: 0, cd: 2 + (hash2(x, z, S) & 3), target: null, dead: 0, mv: 0,
-    pw: pw !== undefined ? pw : powerAt(x, z), kh, dest, owner: null, lastNet: 0, netAct: 0 };
+    pw: pw !== undefined ? pw : powerAt(x, z), kh, dest, owner: null, lastNet: 0, netAct: 0, pl: P.plane };
+  if (M7) mesh.scale.multiplyScalar(M7_FIG);   // a seedworld beast summoned into Gielinor stands at the map's scale
   npcs.push(n);
   npcFoot(n);
 }
@@ -4228,7 +4330,7 @@ function npcBolt(n, style, tgt) {
 /* one banked step toward (tx, tz). Chasing: the diagonal needs dry ground, orthogonals do not. Wandering (strict): every step does,
    and a zero axis is never tried. Returns 0 when walled in. */
 /* the oversized claim their ground: a 3x3 footprint (5x5 for the truly vast) blocks walking, so fights happen at the hide, not the heart */
-const npcFp = t => t.big ? (t.sz >= 3 ? 2 : 1) : 0;
+const npcFp = t => t.fp7 !== undefined ? t.fp7 : t.big ? (t.sz >= 3 ? 2 : 1) : 0;   // fp7: a Gielinor body's own size, centred
 const npcReach = t => t.big ? Math.max(npcFp(t) + 1, Math.round(t.sz)) : 1;   // melee reach to a big thing, and from it: the same tiles either way
 function npcFoot(n) {
   const fp = npcFp(n.t);
@@ -4240,7 +4342,7 @@ function npcFoot(n) {
 }
 function npcStep(n, tx, tz, strict) {
   const dx = Math.sign(tx - n.tx), dz = Math.sign(tz - n.tz);
-  const ok = (x, z, wet) => canStep(n.tx, n.tz, x, z, n.fpK) && (!wet || !isWater(walkY(x, z)));
+  const ok = (x, z, wet) => canStep(n.tx, n.tz, x, z, n.fpK, n.pl) && (!wet || !isWater(walkY(x, z)));
   const corner = !(dx && dz) || (ok(n.tx + dx, n.tz, 0) && ok(n.tx, n.tz + dz, 0));   // findPath's rule: a diagonal needs both orthogonals, so nothing slips through a wall's staircase
   if ((!strict || (dx && dz)) && corner && ok(n.tx + dx, n.tz + dz, 1)) { n.tx += dx; n.tz += dz; }
   else if (dx && (!strict || dx) && ok(n.tx + dx, n.tz, strict)) n.tx += dx;   // dx guarded: a zero delta made this canStep(from, from), a step onto its own tile that always "succeeded"
@@ -4259,7 +4361,7 @@ function npcTick(n) {
   if (n.dead) return;
   n.px = n.tx; n.pz = n.tz;
   if (n.owner && n.owner !== PID) { if (tickN - n.lastNet > 5) { n.owner = null; n.dest = { x: n.home.x, z: n.home.z }; } return; }   // owner's frames stopped: orphan it wounds intact — only a deliberate release leashes and heals
-  const near = chebDist(n.tx, n.tz, P.tx, P.tz);
+  const near = M7 && n.pl !== P.plane ? 99 : chebDist(n.tx, n.tz, P.tx, P.tz);   // another floor is out of reach, whatever the tiles say
   if (n.target && (near > 12 || P.dead)) { n.target = null; releaseMon(n); }
   // 2007 aggression: the mean ones start it within a few tiles, unless outgrown or overstayed; the deep wilds never get used to you
   // (deliberate deviation: 2007 forgets you after a flat ~10 minutes anywhere; here tolerance stretches with the ground's power)
@@ -4323,7 +4425,7 @@ function npcTick(n) {
       retaliate(n);
     }
   } else {
-    const d = n.heldT > tickN ? null : wanderAt(n.kh, tickN, n.home.x, n.home.z);   // un-aggroed monsters mill about deterministically, unless rooted
+    const d = n.heldT > tickN || n.still ? null : wanderAt(n.kh, tickN, n.home.x, n.home.z);   // un-aggroed monsters mill about deterministically, unless rooted (or a Gielinor figure that never walks)
     if (d) n.dest = d;
     if (n.heldT > tickN) n.dest = null;
     if (n.dest && (n.dest.x !== n.tx || n.dest.z !== n.tz)) {
@@ -4390,7 +4492,7 @@ function killNpc(n) {
   if (n.key) { npcDead.set(n.key, due); netWorld([22, n.key, due]); }   // keyless spawns (events, dev) leave no timer behind
   removeNpc(n);
   const p = Math.max(0, n.pw || 0), x = n.tx, z = n.tz, q = 1 + Math.min(1, p * 0.15);   // only coin stacks swell with the ground's power (capped 2x): authored quantities stay wiki-exact
-  const drop = (id, k) => { const nq = id === 'coins' ? Math.max(1, Math.round((k || 1) * q)) : (k || 1); if (id === 'coins') gpMade += nq; clogAdd(id); dropItem(id, nq, x, z); };
+  const drop = (id, k) => { const nq = id === 'coins' ? Math.max(1, Math.round((k || 1) * q)) : (k || 1); if (id === 'coins') gpMade += nq; clogAdd(id); dropItem(id, nq, x, z, 0, 0, n.pl); };
   const T = LOOT[n.t.k + '@' + n.t.lv] || LOOT[n.t.k];   // a rung can carry its own wiki table; otherwise the family shares one (a missing table throws at startup)
   if (!T.nb) drop(n.t.bones || (n.t.big ? 'big_bones' : 'bones'), 1);
   if (n.t.meat) drop(n.t.meat, 1);
@@ -4440,8 +4542,9 @@ function hurtPlayer(dmg, byPlayer) {
     const ring = eq.ring === 'ring_of_life';
     if (ring) { eq.ring = null; dirty.eq = 1; }
     P.task = null; stopWalk();
-    const rlf = tpFrom(), v = nearestVillageTo(rlf.x, rlf.z, 12);
+    const rlf = tpFrom(), v = M7 ? null : nearestVillageTo(rlf.x, rlf.z, 12), tw = M7 && m7Town(P.tx, P.tz, 0);
     if (v) { const sp = safeSpotIn(v); sfx(200); teleport(sp.x, sp.z, 200); }
+    else if (tw) { sfx(200); teleport(tw.x, -tw.y, 200, 0); }
     say(ring ? 'Your ring of life flares, carries you to safety, and crumbles to dust.' : 'Your cape flares and carries you to safety.', 'lv');
     markDirty(2); healthBar(P);
     return;
@@ -4542,14 +4645,15 @@ function die(byPlayer) {
   }
   P.skull = 0; pvpFoes.clear(); sendEquip();   // death lifts the skull and settles every grudge; the wire hears the bare corpse
   markDirty(2);
-  setTimeout(() => {   // any death sends you to the nearest settlement — measured from the dungeon door if you fell below
-    const rf = tpFrom(), v = nearestVillageTo(rf.x, rf.z, 12);
+  setTimeout(() => {   // any death sends you to the nearest settlement — measured from the dungeon door if you fell below; Gielinor's dead wake in Lumbridge
+    const rf = tpFrom(), v = M7 ? null : nearestVillageTo(rf.x, rf.z, 12);
     let sx = P.home.x, sz = P.home.z;
+    if (M7) { sx = M7_HOME[0]; sz = -M7_HOME[1]; }
     if (v) { const s = safeSpotIn(v); sx = s.x; sz = s.z; }
-    teleport(sx, sz, 200);
+    teleport(sx, sz, 200, 0);
     P.hp = P.maxhp = lvl[SK.hitpoints]; P.dead = 0; P.energy = 100; P.psn = 0; P.spec = 100; P.specArm = 0; P.souls = 0; pvpOn = 0; dirty.orb = 1;
     P.prayers = 0; P.pray = 0; bst.fill(0); drawPrayers(); drawStyles(); drawSk();   // you do not get up with the overheads still lit, quietly burning prayer on the walk back
-    const where = v ? villageName(v) : 'where you started';
+    const where = M7 ? 'Lumbridge' : v ? villageName(v) : 'where you started';
     say('You wake up in ' + where + '.');
     markDirty(2);
     refresh(); pump(80);
@@ -4818,8 +4922,8 @@ function taskTick() {
     const edge = o.npc ? npcFp(o.t) + 1 : 1;
     const gap = chebDist(P.tx, P.tz, ox, oz);
     const blind = reach > 1 && gap <= reach && gap > edge && !hasLos(P.tx, P.tz, ox, oz);
-    if (blind || gap > reach) {
-      if (!P.path.length) {
+    if (M7 ? m7TaskReach(t, o, ox, oz, reach, edge) : blind || gap > reach) {   // Gielinor: a footprint's edge, and never through a wall — 46. walks there itself
+      if (!M7 && !P.path.length) {
         const p = findPath(P.tx, P.tz, ox, oz, blind ? edge : reach);
         if (!p) { say(blind ? 'You have no line of sight to that.' : "You can't reach that.", 'bad'); P.task = null; return; }
         if (!p.length) return;
@@ -4991,8 +5095,11 @@ function eat(slotIdx) {
 }
 /* ---- 25. SHOPS, BANK, BARBER ---- */
 let openShop = null, bankOpen = 0;
-const img = id => '<img src="' + icon(id) + '" alt="">';
-const mkRow = (attr, id, name, sub, extra, cls) => '<div class="mk' + (cls || '') + '" ' + attr + '>' + img(id) + '<span>' + name + '<u>' + sub + '</u></span>' + (extra || '') + '</div>';
+function img(id, n, look) {   // data-ic/data-n: a model sprite still drawing, swapped in by icSwap when it lands
+  const u = icon(id, n, look), a = OPT.osrs ? itemArt(id) : undefined;
+  return '<img src="' + u + '" alt=""' + (typeof a === 'number' && OSRSK.iconNow(a, n) === undefined ? ' data-ic="' + a + '" data-n="' + (n > 1 ? n : 1) + '"' : '') + '>';
+}
+const mkRow = (attr, id, name, sub, extra, cls, n) => '<div class="mk' + (cls || '') + '" ' + attr + '>' + img(id, n) + '<span>' + name + '<u>' + sub + '</u></span>' + (extra || '') + '</div>';
 const gridOf = rows => '<div class="grid">' + rows.join('') + '</div>';
 /* paint the centred modal with the pack beside it */
 function paintModal(title, html, foot) {
@@ -5016,7 +5123,7 @@ function drawBank() {   // the search box filters the grid in place, so typing n
   const xin = el('bankXin');
   xin.oninput = () => { bankX = clamp(Math.floor(+xin.value) || 1, 1, 1e9); };
   const q = el('bankQ'), fill = () => { const f = bankQ.toLowerCase(); el('bankGrid').innerHTML = bank.map((s, i) => ITEMS[s.id].name.toLowerCase().includes(f)
-    ? mkRow('data-wd="' + i + '"', s.id, ITEMS[s.id].name, fmt(s.n) + ' banked', '<b class="gp" data-wall="' + i + '">ALL</b>') : '').join('') || '<p style="opacity:.7">' + (bank.length ? 'Nothing matches.' : 'Your vault is empty.') + '</p>'; };
+    ? mkRow('data-wd="' + i + '"', s.id, ITEMS[s.id].name, fmt(s.n) + ' banked', '<b class="gp" data-wall="' + i + '">ALL</b>', '', s.n) : '').join('') || '<p style="opacity:.7">' + (bank.length ? 'Nothing matches.' : 'Your vault is empty.') + '</p>'; };
   q.value = bankQ; q.oninput = () => { bankQ = q.value; fill(); }; fill();
 }
 function bankDeposit(id, n) {
@@ -5144,10 +5251,10 @@ function gePickList() {
   const V = geView, buy = V.kind === 0, list = [];
   if (buy) {
     const q = (V.q || '').trim().toLowerCase();
-    for (const id in ITEMS) { if (id === 'coins' || (q && ITEMS[id].name.toLowerCase().indexOf(q) < 0)) continue; list.push(id); if (list.length >= 36) break; }
-  } else {
+    for (const id in ITEMS) { if (id === 'coins' || ITEMS[id].nge || (q && ITEMS[id].name.toLowerCase().indexOf(q) < 0)) continue; list.push(id); if (list.length >= 36) break; }
+  } else {   // nge: a roster item the cache keeps off the exchange (quest pieces, minigame rewards) is never listed
     const seen = new Set();
-    for (let i = 0; i < INV_N; i++) if (inv[i] && inv[i].id !== 'coins' && !seen.has(inv[i].id)) { seen.add(inv[i].id); list.push(inv[i].id); }
+    for (let i = 0; i < INV_N; i++) if (inv[i] && inv[i].id !== 'coins' && !ITEMS[inv[i].id].nge && !seen.has(inv[i].id)) { seen.add(inv[i].id); list.push(inv[i].id); }
   }
   if (!list.length) return '<p class="gesEmpty">' + (buy ? 'Nothing by that name.' : 'Nothing in your pack to sell.') + '</p>';
   return list.map(id => '<div class="di' + (V.item === id ? ' on' : '') + '" data-gepick="' + id + '">' + img(id) + '<span>' + ITEMS[id].name + '<u>' +
@@ -5297,6 +5404,7 @@ const el = id => document.getElementById(id);
 const on = (t, evs, fn, o) => { for (const e of evs.split(' ')) t.addEventListener(e, fn, o); };
 const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(0) + 'k' : n | 0;
 const chatEl = el('chat');
+let osCh = null;   // the 2007 chatbox (section 48); say() copies each line to it once it stands
 function trouble(playerText, devText) { say(playerText, 'bad'); if (devText) console.warn('[seedworld] ' + devText); }
 function say(msg, cls) {
   const stick = chatEl.scrollTop + chatEl.clientHeight >= chatEl.scrollHeight - 14;   // follow the tail only if already there
@@ -5305,6 +5413,7 @@ function say(msg, cls) {
   chatEl.appendChild(d);
   while (chatEl.childNodes.length > 120) chatEl.removeChild(chatEl.firstChild);
   if (stick) chatEl.scrollTop = chatEl.scrollHeight;
+  if (osCh) osChatAdd(msg, cls);
 }
 const div = (parent, cls, html) => { const d = document.createElement('div'); d.className = cls; if (html) d.innerHTML = html; parent.appendChild(d); return d; };
 const invGrid = el('invGrid'), slotEls = [];
@@ -5317,11 +5426,12 @@ function drawInv() {
     const s = inv[i], e = slotEls[i], use = !!(useSel && useSel.i === i);
     e.classList.toggle('use', use);
     if (!s) { if (e.dataset.id) { e.innerHTML = ''; e.className = 'slot'; e.dataset.id = ''; } continue; }
-    const sig = s.id + ':' + s.n;
+    const sig = s.id + ':' + s.n + (OS.on ? ':os' + (use ? 2 : 1) : '');   // the 2007 frame rings the Use source, so its picture changes with it
     if (e.dataset.id === sig) continue;
     e.dataset.id = sig;
     e.className = 'slot has' + (use ? ' use' : '');
-    e.innerHTML = img(s.id) + stackLbl(s.n);
+    if (OS.on) { e.textContent = ''; e.appendChild(osItemEl(s.id, s.n, 0x333333, use ? 2 : 1)); }
+    else e.innerHTML = img(s.id, s.n) + stackLbl(s.n);
   }
   if (openShop) drawShop();
   if (bankOpen) drawBank();
@@ -5334,9 +5444,10 @@ function drawEq() {
     const s = d.dataset.s; if (!s) continue;
     const id = eq[s];
     d.className = 'eqslot' + (id ? ' f' : '');
-    d.innerHTML = (id ? img(id) : '') + '<span>' + s + '</span>' + (s === 'ammo' && id ? '<em>' + P.ammoN + '</em>' : '');
+    d.innerHTML = (id ? img(id, s === 'ammo' ? P.ammoN : 1) : '') + '<span>' + s + '</span>' + (s === 'ammo' && id ? '<em>' + P.ammoN + '</em>' : '');
   }
   if (statsOpen) showStats();
+  if (OS.on) osEquip();   // the 2007 frame's worn equipment (section 48)
 }
 let statsOpen = 0;
 const stRow = (n, v) => '<div class="stRow"><i>' + n + '</i><b>' + v + '</b></div>';
@@ -5353,7 +5464,7 @@ function showStats() {   // the full ledger: bonuses, worn pieces and the levels
     if (!eq[s]) continue;
     worn++;
     const it = ITEMS[eq[s]];
-    h.push('<div class="stWorn">' + img(it.id) + '<span>' + it.name + (s === 'ammo' ? ' × ' + P.ammoN : '') + '<u>' + s + '</u></span></div>');
+    h.push('<div class="stWorn">' + img(it.id, s === 'ammo' ? P.ammoN : 1) + '<span>' + it.name + (s === 'ammo' ? ' × ' + P.ammoN : '') + '<u>' + s + '</u></span></div>');
   }
   if (!worn) h.push('<p class="gesEmpty">Nothing worn.</p>');
   h.push('</div></div>');
@@ -5361,7 +5472,7 @@ function showStats() {   // the full ledger: bonuses, worn pieces and the levels
   statsOpen = 1;
 }
 el('eqMore').onclick = showStats;
-const examineOpt = it => ({ t: 'Examine', o: it.name, cls: 'itm', f: () => say(examine(it)) });
+const examineOpt = it => ({ t: 'Examine', o: it.name, cls: 'itm', f: () => it.c7 !== undefined ? examine07(it) : say(examine(it)) });
 on(eqWrap, 'contextmenu', e => {
   e.preventDefault();
   const d = e.target.closest('.eqslot');
@@ -5395,6 +5506,7 @@ function drawSk() {
     e.title = skName(i) + ' ' + L + '  ·  ' + Math.floor(xp[i]).toLocaleString() + ' xp' + (L < MAXL ? '  ·  ' + Math.ceil(b - xp[i]).toLocaleString() + ' to ' + (L + 1) : '');
   }
   el('skTotal').textContent = totalLevel();
+  if (OS.on) osSkills();   // the 2007 frame's own skills tab (section 48)
 }
 /* touch has no hover: a long press pops the skill's title in a floating tip */
 const skTip = div(document.body, ''); skTip.id = 'skTip'; skTip.style.display = 'none';
@@ -5419,6 +5531,7 @@ on(window, 'pointerdown', e => { if (skTip.style.display === 'block' && e.target
 const orb = (id, txt, w, onCls) => { const o = el(id); o.querySelector('b').textContent = txt; o.querySelector('.fill').style.width = w + '%'; if (onCls !== undefined) o.classList.toggle('on', onCls); };
 function drawOrbs() {
   dirty.orb = 0;
+  if (OS.on) { if (osPr) osPrayers(); osOrbs(); }   // the 2007 frame's orbs and its prayer book's points strip follow the drain
   orb('orbHp', P.hp, P.hp / P.maxhp * 100);
   orb('orbPray', Math.ceil(P.pray), P.pray / Math.max(1, P.maxpray) * 100, !!P.prayers);
   orb('orbRun', Math.round(P.energy), P.energy, !!P.run);
@@ -5449,14 +5562,14 @@ function startShop(o) {
   clearUse(); P.uspell = null;
   bankOpen = 0;
   const n = nearVillage(o.x, o.z), k = SHOP_KINDS[o.k];
-  openShop = { kind: k.k, name: k.n, tier: n ? n.v.tier : 0 };
+  openShop = { kind: k.k, name: o.shopN || k.n, tier: o.tier !== undefined ? o.tier : n ? n.v.tier : 0 };   // a Gielinor shopkeeper carries its own sign and stock tier (46.)
   openShop.stock = shopStock(openShop.kind, openShop.tier);
-  say('You browse the ' + openShop.name.toLowerCase() + '.');
+  say(o.browse || 'You browse the ' + openShop.name.toLowerCase() + '.');
   drawShop();
 }
 function drawShop() {
   if (!openShop) return;
-  const rows = openShop.stock.map(s => { const it = ITEMS[s.id], p = buyPrice(it); return mkRow(s.n > 0 ? 'data-buy="' + s.id + '"' : '', s.id, it.name, s.n > 0 ? s.n + ' in stock' : 'out of stock', '<b class="gp">' + p + '</b>', s.n > 0 && coins() >= p ? '' : ' no'); });
+  const rows = openShop.stock.map(s => { const it = ITEMS[s.id], p = buyPrice(it); return mkRow(s.n > 0 ? 'data-buy="' + s.id + '"' : '', s.id, it.name, s.n > 0 ? s.n + ' in stock' : 'out of stock', '<b class="gp">' + p + '</b>', s.n > 0 && coins() >= p ? '' : ' no', s.n); });
   paintModal(openShop.name + ' — ' + coins() + ' gp', gridOf(rows), 'Click to buy. Click anything in your pack to sell it here.');
 }
 on(modalBody, 'click', e => {
@@ -5499,6 +5612,7 @@ const PANES = ['inv', 'eq', 'sk', 'wd', 'cb', 'mg', 'pr', 'op'], PANE_DRAW = { c
 function showTab(k) {
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.dataset.p === k);
   for (const p of PANES) el('pane-' + p).classList.toggle('on', p === k);
+  if (OS.on) { osTabNow = k; osStones(); }   // the 2007 frame lights its stone (section 48)
   if (PANE_DRAW[k]) PANE_DRAW[k]();
 }
 for (const t of document.querySelectorAll('.tab')) t.onclick = () => showTab(t.dataset.p);
@@ -5518,6 +5632,7 @@ function drawStyles() {
   const sw = SPEC[eq.weapon], b = el('cbSpec');
   b.style.display = sw ? '' : 'none';
   if (sw) { b.textContent = (P.specArm ? 'Special armed — ' : 'Special attack (' + sw.cost + '%) — ') + (sw.souls ? (P.souls || 0) + ' soul' + (P.souls === 1 ? '' : 's') : Math.floor(P.spec) + '%'); b.classList.toggle('on', !!P.specArm); }
+  if (OS.on) osCombat();   // the 2007 frame's combat options (section 48)
 }
 on(el('cbSpec'), 'click', () => {
   const sw = SPEC[eq.weapon]; if (!sw) return;
@@ -5546,6 +5661,7 @@ const SPF = ['combat', 'utility', 'teleport'];
 let spFilter = { combat: 1, utility: 1, teleport: 1, castable: 0 };
 const usKind = s => s.grp === 4 ? 'teleport' : 'utility';
 function drawSpells() {
+  if (OS.on) return osMagic();   // Gielinor in the 2007 frame: the client's own book (section 48)
   bookTabs.innerHTML = BOOKS.map((b, i) =>
     '<b data-book="' + i + '" class="' + (P.book === i ? 'on' : bookHas(i) ? '' : 'no') + '">' + b.n + '</b>').join('');
   spellFilters.innerHTML = SPF.map(k => '<b data-spf="' + k + '" class="' + (spFilter[k] ? 'on' : '') + '">' + cap(k) + '</b>').join('')
@@ -5560,11 +5676,18 @@ function drawSpells() {
   if (spFilter.combat && combat.length) h += sec('Combat') + combat.map(s => {
     const ok = lvl[SK.magic] >= s.lv;
     return liRow('data-sp="' + s.i + '" title="' + s.need.map(n => n[1] + ' ' + ITEMS[n[0]].name).join(', ') + (s.fx ? ' — ' + fxNote(s.fx) : '') + '"', P.spell === s.i, !ok,
-      g07(SP07, s.k) ? c07p(SP07[s.k]) : drawIcon('rune', '#' + s.tint.toString(16).padStart(6, '0'), '#f0e6c8'), s.n,
+      (g07(SP07, s.k) && uiArt(SP07[s.k])) || drawIcon('rune', '#' + s.tint.toString(16).padStart(6, '0'), '#f0e6c8'), s.n,
       '<u>' + (ok ? (spellReady(s) ? 'ready' : 'no runes') : 'level ' + s.lv) + '</u>');
   }).join('');
+  const m7tp = M7 ? (m7SpellBooks() || [])[P.book] : null;   // Gielinor's books carry the client's own teleports (47.), not this world's
   for (const kind of ['utility', 'teleport']) {
     if (!spFilter[kind]) continue;
+    if (kind === 'teleport' && M7) {
+      const rows = (m7tp || []).filter(s => s.cast && shown(s)).sort((a, b) => a.lv - b.lv);
+      if (rows.length) h += sec('Teleports') + rows.map(s => liRow('data-m7="' + m7tp.indexOf(s) + '" title="' + s.need.map(n => n[1] + ' ' + (ITEMS[n[0]] ? ITEMS[n[0]].name : '?')).concat(s.d).join(', ') + '"',
+        0, lvl[SK.magic] < s.lv, drawIcon('rune', '#' + s.cast.tint.toString(16).padStart(6, '0'), '#f0e6c8'), s.n, '<u>' + (lvl[SK.magic] < s.lv ? 'level ' + s.lv : spellReady(s) ? 'ready' : 'no runes') + '</u>')).join('');
+      continue;
+    }
     const rows = util.filter(s => usKind(s) === kind);
     if (rows.length) h += sec(kind === 'utility' ? 'Utility' : 'Teleports') + rows.map(usRow).join('');
   }
@@ -5590,19 +5713,20 @@ on(spellGrid, 'click', e => {
 const prayList = el('prayList');
 function drawPrayers() {
   prayList.innerHTML = PRAYERS.slice().sort((a, b) => a.lv - b.lv).map(p => { const ok = lvl[SK.prayer] >= p.lv && lvl[SK.defence] >= p.dl;
-    return liRow('data-pr="' + p.k + '"', P.prayers & p.bit, !ok, g07(PR07, p.k) ? c07p(PR07[p.k]) : drawIcon(p.g, '#c9b45a', '#efe4c4'), p.n, '', '<u>' + (ok ? 'level ' + p.lv : 'needs level ' + p.lv) + (p.dl ? ', Defence ' + p.dl : '') + '</u>'); }).join('');
+    return liRow('data-pr="' + p.k + '"', P.prayers & p.bit, !ok, (g07(PR07, p.k) && uiArt(PR07[p.k])) || drawIcon(p.g, '#c9b45a', '#efe4c4'), p.n, '', '<u>' + (ok ? 'level ' + p.lv : 'needs level ' + p.lv) + (p.dl ? ', Defence ' + p.dl : '') + '</u>'); }).join('');
   el('prPts').textContent = Math.ceil(P.pray) + '/' + P.maxpray;
+  if (OS.on) osPrayers();   // the 2007 frame's own prayer book (section 48)
 }
-on(prayList, 'click', e => {
-  const d = e.target.closest('[data-pr]'); if (!d) return;
-  const p = PRAYERS.find(x => x.k === d.dataset.pr);
+on(prayList, 'click', e => { const d = e.target.closest('[data-pr]'); if (d) prayToggle(d.dataset.pr); });
+function prayToggle(k) {   // both frames' prayer books click through here
+  const p = PRAYERS.find(x => x.k === k);
   if (lvl[SK.prayer] < p.lv || lvl[SK.defence] < p.dl) return say('You need Prayer level ' + p.lv + (p.dl ? ' and Defence level ' + p.dl : '') + ' for that.', 'bad');
   if (P.pray <= 0 && !(P.prayers & p.bit)) return say('You have run out of prayer points.', 'bad');
   P.prayers ^= p.bit;
   if (!(P.prayers & p.bit)) sfx(2673);
   if (P.prayers & p.bit) for (const q of PRAYERS) if (q !== p && q.fx.some(x => p.fx.includes(x))) P.prayers &= ~q.bit;   // prayers sharing an effect share a slot
   markDirty(); drawPrayers();
-});
+}
 const OPT_ROWS = [
   { k: 'camSpeed', n: 'Camera speed', min: 0.6, max: 5, step: 0.4, fmt: v => v.toFixed(1) + 'x' },
   { k: 'viewRadius', n: 'View distance', min: 3, max: 9, step: 1, fmt: v => v + ' chunks', apply: 1 },
@@ -5644,14 +5768,15 @@ function icons07Apply(panes) {
 }
 function applyOpts(r) {
   setOsrsDist(OPT.osrsDist);
-  scene.fog = OPT.fog ? new THREE.Fog(SKY, 120, OPT.viewRadius * CHUNK * 0.95) : null;
+  scene.fog = OPT.fog ? (M7 ? new THREE.Fog(SKY, m7Reach() * 0.55, m7Reach()) : new THREE.Fog(SKY, 120, OPT.viewRadius * CHUNK * 0.95)) : null;   // Gielinor fogs out where its squares stop
   renderer.setClearColor(new THREE.Color(SKY).multiplyScalar(OPT.brightness));
-  mat.color.setScalar(OPT.brightness); tintMat.color.setScalar(OPT.brightness); OSRSK.brightness(OPT.brightness);
+  mat.color.setScalar(OPT.brightness); tintMat.color.setScalar(OPT.brightness); OSRSK.brightness(OPT.brightness); MAP07.setBrightness(OPT.brightness);
   if (r && r.apply) { RADIUS = OPT.viewRadius; refresh(); }
   for (const rec of chunks.values()) for (const b of rec.roofs) if (b.roof) b.roof.visible = roofShown(b);
   document.body.classList.toggle('budget', !!OPT.budget);
   const db = el('devBudget'); if (db) db.classList.toggle('on', !!OPT.budget);
   store.set('seedworld.opt', JSON.stringify(OPT));
+  osuiApply();   // Gielinor with the 2007 layer wears the 2007 frame (section 48)
 }
 /* floating combat text, health bars, respawn clocks, xp drops */
 const fxEl = el('fx'), fxPool = [];
@@ -5767,11 +5892,19 @@ el('devX').onclick = closeDev;
 devEl.onclick = e => { if (e.target === devEl) closeDev(); };
 const diRow = (attr, src, name, sub) => '<div class="di" ' + attr + '><img src="' + src + '" alt=""><span>' + name + (sub || '') + '</span></div>';
 const NO_MATCH = '<div class="di no"><span>no match</span></div>';
+const devSort = new Intl.Collator('en').compare;
+/* the roster made this list twelve thousand long: it shows the first 300 matches in their 2007 pictures, like the pack.
+   A row paints what is already drawn and the rest are asked for once typing pauses, so a burst of keystrokes never
+   queues sprites for lists already gone; each lands in place (icSwap) and is kept for good (IndexedDB). */
+let devAskT = 0;
 function drawDevItems() {
   const q = devFind.value.trim().toLowerCase(), hits = [];
   for (const id in ITEMS) { const it = ITEMS[id]; if (!q || it.name.toLowerCase().indexOf(q) >= 0 || id.indexOf(q) >= 0) hits.push(it); }
-  hits.sort((a, b) => a.name.localeCompare(b.name));
-  devItems.innerHTML = hits.map(it => diRow('data-i="' + it.id + '"', icon(it.id), it.name)).join('') || NO_MATCH;
+  hits.sort((a, b) => devSort(a.name, b.name));
+  const shown = hits.slice(0, 300).map(it => '<div class="di" data-i="' + it.id + '">' + img(it.id, 1, 1) + '<span>' + it.name + '</span></div>');
+  devItems.innerHTML = shown.join('') + (hits.length > 300 ? '<div class="di no"><span>' + (hits.length - 300) + ' more — narrow the search</span></div>' : '') || NO_MATCH;
+  clearTimeout(devAskT);
+  devAskT = setTimeout(() => { for (const e of devItems.querySelectorAll('img[data-ic]')) icAsk(+e.dataset.ic, +e.dataset.n); }, 250);
 }
 on(devFind, 'input', drawDevItems);
 const rgbHex = c => [0, 1, 2].map(i => Math.round(clamp(c[i], 0, 1) * 255).toString(16).padStart(2, '0')).join('');
@@ -5882,17 +6015,17 @@ const DEV = {
   kitm() { devKit('m'); }, kitg() { devKit('g'); }, kitr() { devKit('r'); },
   clear() { inv.fill(null); dirty.inv = 1; say('Pack emptied.', 'lv'); },
   budget() { OPT.budget = OPT.budget ? 0 : 1; applyOpts(); say('World state panel ' + (OPT.budget ? 'shown' : 'hidden') + '.', 'lv'); },
-  here() { el('devTx').value = P.tx; el('devTz').value = P.tz; },
+  here() { el('devTx').value = P.tx; el('devTz').value = M7 ? -P.tz : P.tz; },
   run() {
     OPT.runMul = clamp(+el('devRun').value || 1, 0.25, 8);
     el('devRunNow').textContent = OPT.runMul + 'x · ' + stepsThisTick() + ' tiles/tick';
     say('Run speed set to ' + OPT.runMul + 'x.', 'lv');
   },
   tp() {
-    const x = Math.round(+el('devTx').value || 0), z = Math.round(+el('devTz').value || 0);
+    const x = Math.round(+el('devTx').value || 0), z = Math.round(+el('devTz').value || 0) * (M7 ? -1 : 1);   // Gielinor's y runs north
     if (Math.abs(x) > 2e6 || Math.abs(z) > 2e6) return say('Those coordinates are off the lattice.', 'bad');
     teleport(x, z, 400);
-    say('Teleported to ' + x + ', ' + z + ' — ' + biomeName(walkY(x, z), x, z) + '.', 'lv');
+    say('Teleported to ' + x + ', ' + (M7 ? -z : z) + ' — ' + biomeName(walkY(x, z), x, z) + '.', 'lv');
   }
 };
 on(el('devBody'), 'click', e => { const b = e.target.closest('[data-d]'); if (b && DEV[b.dataset.d]) DEV[b.dataset.d](); });
@@ -5938,6 +6071,9 @@ function optionsFor(o) {
     if (!pvpGate(o)) opts.push({ t: 'Attack', o: o.name + (remoteCb(o) ? ' <span class="lvl">(level ' + remoteCb(o) + ')</span>' : ''), f: act(o, 'attack', 1) });
   }
   else if (o.npc && o.t.k === 'genie') opts.push({ t: 'Talk to', o: 'Genie', f: act(o, o2 => { if (!invAdd('genie_lamp', 1)) return say(FULL, 'bad'); say('"Rub it well, master." The genie folds back into smoke.', 'lv'); removeNpc(o2); }) });
+  else if (o.npc && o.c7 !== undefined) opts.push(...m7NpcOpts(o));   // a Gielinor figure's own menu, off its cache def (46.)
+  else if (o.m7loc) opts.push(...m7LocOpts(o));
+  else if (o.m7item) opts.push(...m7ItemOpts(o));
   else if (o.npc) { opts.push({ t: 'Attack', o: o.name + ' <span class="lvl">(level ' + o.t.lv + ')</span>', f: act(o, 'attack', 1) }); if (o.t.pick) opts.push({ t: 'Pickpocket', o: o.name, f: act(o, 'pick') }); }
   else if (o.drop) {   // a death spills a whole pack onto one tile: list the heap, this one first
     if (P.teleG) return [{ t: 'Grab', o: (o.n > 1 ? o.n + ' x ' : '') + o.name, cls: 'itm', f: () => teleGrab(o) }];
@@ -5998,6 +6134,8 @@ function examine(it) {
 const optLabel = o => o.t + ' <span class="' + (o.cls === 'itm' ? 'itm' : 'obj') + '">' + o.o + '</span>';
 function openCtx(x, y, opts) {
   if (!opts.length) return;
+  if (OS.on && osMenu(x, y, opts)) return;   // the 2007 frame's own menu (section 48)
+  ctxEl.classList.remove('osMenu');
   ctxEl.innerHTML = '<h3>Choose Option</h3>';
   const add = (html, f) => { const a = document.createElement('a'); a.innerHTML = html; a.onclick = f; ctxEl.appendChild(a); };
   for (const o of opts) add(optLabel(o), () => { closeCtx(); o.f(); });
@@ -6035,12 +6173,13 @@ function mapPixel(data, p, x, z, h, grad, tpp, k, lo) {
 }
 function mapTick() {
   if (mapRow >= MW) {
-    if (Math.abs(P.rx - mapOX) + Math.abs(P.rz - mapOZ) < MSTEP * 7) return;
+    if (Math.abs(P.rx - mapOX) + Math.abs(P.rz - mapOZ) < MSTEP * 7 && !(M7 && m7MapStale())) return;
     mapOX = P.rx; mapOZ = P.rz; mapRow = 0;
   }
   const ox = mapOX - MSPAN / 2, oz = mapOZ - MSPAN / 2;
   for (let r = 0; r < 3 && mapRow < MW; r++, mapRow++) {   // three rows a frame: the old picture holds, rescaled, while the repaint walks down
     const j = mapRow, z = oz + j * MSTEP;
+    if (M7) { m7MapRow(mimg.data, j, ox, z); continue; }   // Gielinor paints its own tiles and walls (46.)
     for (let i = 0; i <= MW; i++) MROW[i] = macroHeight(ox + i * MSTEP, z);
     for (let i = 0; i < MW; i++) mapPixel(mimg.data, (j * MW + i) * 4, ox + i * MSTEP, z, MROW[i], MROW[i + 1] - MROW[i], MSTEP, 0.085, 0.4);
   }
@@ -6222,7 +6361,9 @@ on(invGrid, 'pointermove', e => {
   if (!dgOn) {
     if (Math.abs(e.clientX - dgX) + Math.abs(e.clientY - dgY) < 8) return;
     dgClearLong(); dgOn = 1;
-    dgEl.innerHTML = img(inv[dgFrom].id); dgEl.style.display = 'block';
+    if (OS.on) { dgEl.textContent = ''; dgEl.appendChild(osItemEl(inv[dgFrom].id, inv[dgFrom].n, 0x333333, 1)); }   // the client drags the slot's own picture
+    else dgEl.innerHTML = img(inv[dgFrom].id, inv[dgFrom].n);
+    dgEl.style.display = 'block';
     slotEls[dgFrom].classList.add('drag');
   }
   dgEl.style.transform = 'translate(' + (e.clientX - 16) + 'px,' + (e.clientY - 16) + 'px)';
@@ -6276,7 +6417,7 @@ on(eqWrap, 'click', e => {
 el('orbRun').onclick = () => { P.run = P.run ? 0 : 1; dirty.orb = 1; };
 /* the pack and the chat log fold away to their handles */
 el('chatmin').onclick = () => { const c = document.body.classList.toggle('chatmin'); el('chatmin').textContent = c ? '+' : '–'; if (!c) chatEl.scrollTop = chatEl.scrollHeight; };
-el('invmin').onclick = () => { const c = document.body.classList.toggle('invmin'); el('invmin').textContent = c ? '+' : '–'; el('invmin').title = c ? 'open the pack' : 'minimise the pack'; };
+el('invmin').onclick = () => { const c = document.body.classList.toggle('invmin'); el('invmin').textContent = c ? '+' : '–'; el('invmin').title = c ? 'open the pack' : 'minimise the pack'; if (OS.on) osStones(); };
 on(chatEl, 'touchstart touchmove wheel', e => e.stopPropagation(), { passive: true });   // the log claims its own scrolls
 const chatIn = el('chatin');
 on(chatIn, 'keydown', e => {   // Enter focuses the bar, Enter again sends
@@ -6286,7 +6427,7 @@ on(chatIn, 'keydown', e => {   // Enter focuses the bar, Enter again sends
   const t = chatIn.value.trim().slice(0, 120);
   chatIn.value = '';
   if (!t) return chatIn.blur();
-  say((NAME || 'You') + ': ' + t);
+  say((NAME || 'You') + ': ' + t, 'pc');
   if (ws && ws.readyState === 1) wsSend([4, t]); else say('(offline — nobody heard that)', 'bad');
 });
 on(window, 'keydown', e => { if (e.key === 'Enter' && document.activeElement !== chatIn && document.activeElement.tagName !== 'INPUT') { e.preventDefault(); chatIn.focus(); } }, true);
@@ -6339,9 +6480,11 @@ function discIcon(g, glyph, c, d, x, y, R, tx, ty, sc) {
 for (const s of SHOP_KINDS) MK_ART['shop_' + s.k] = [s.g, s.c, '#f0e6c8', s.n];   // shop doors carry their 07 shop sprites; the glyph stays the fallback
 for (const g of GUILDS) MK_ART['guild_' + g.k] = ['lock', '#d8b04a', '#6b4e22', g.n];   // each skill guild wears its own skill's 07 icon; WM_KEY below reads these at load
 const wmImgs = new Map();
-function wmPng(n) {   // the 07 map sprites, fetched once; a late arrival repaints the map
-  let i = wmImgs.get(n);
-  if (!i) { i = new Image(); i.onload = () => { wmDirty = 1; }; i.src = mk07p(n); wmImgs.set(n, i); }
+function wmPng(v) {   // the 07 map sprites, decoded once a picture; a late arrival repaints the map
+  const u = mkArt(v);
+  if (!u) return null;
+  let i = wmImgs.get(u);
+  if (!i) { i = new Image(); i.onload = () => { wmDirty = 1; }; i.src = u; wmImgs.set(u, i); }
   return i.complete && i.naturalWidth ? i : null;
 }
 function wmIcon(k, x, y, r) {
@@ -6367,7 +6510,8 @@ function buildWmKey() {   // every row 20px: the 07 sprites a shade smaller than
   key.innerHTML = '';   // re-run when the 2007 setting flips: the rows are sprites or glyphs, never both
   const row = (n, label) => { const d = document.createElement('div'); d.appendChild(n); d.appendChild(document.createTextNode(label)); key.appendChild(d); };
   for (const [k, a, label] of WM_KEY) {
-    if (k !== null && g07(MK07, k)) { const im = new Image(S, S); im.src = mk07p(MK07[k]); im.style.imageRendering = 'pixelated'; row(im, label); continue; }
+    const u = k !== null && g07(MK07, k) && mkArt(MK07[k]);
+    if (u) { const im = new Image(S, S); im.src = u; im.style.imageRendering = 'pixelated'; row(im, label); continue; }
     const c = document.createElement('canvas'); c.width = c.height = S;
     discIcon(c.getContext('2d'), a[0], a[1], a[2], S / 2, S / 2, S / 2 - 1, 2.3, 2.3, 26 / 32 * S / 32); row(c, label);
   }
@@ -6382,6 +6526,7 @@ function wmResize() {
   wmCv.width = wmW; wmCv.height = wmH;
 }
 function wmDraw() {
+  if (M7) return m7WmDraw();   // the 2007 world map, its composite and its squares (46.)
   const W = wmW, H = wmH, s = wmZoom / WM_TPP, px = wx => (wx - wmCx) * s + W / 2, pz = wz => (wz - wmCz) * s + H / 2;
   wmCtx.imageSmoothingEnabled = false;
   wmCtx.fillStyle = '#141c26'; wmCtx.fillRect(0, 0, W, H);
@@ -6480,12 +6625,12 @@ function wmLoop() {
   if (wmDirty) { wmDirty = 0; wmDraw(); }
   requestAnimationFrame(wmLoop);
 }
-function openWorldMap() { if (wmOpen) return; wmOpen = 1; wmDirty = 1; wmEl.classList.add('on'); wmCx = P.rx; wmCz = P.rz; wmResize(); wmLoop(); }
+function openWorldMap() { if (wmOpen) return; wmOpen = 1; wmDirty = 1; wmEl.classList.add('on'); el('wmKey').style.display = M7 ? 'none' : ''; wmCx = P.rx; wmCz = P.rz; wmResize(); wmLoop(); }   // Gielinor's map carries its own icons
 function closeWorldMap() { wmOpen = 0; wmEl.classList.remove('on'); }
 el('wmX').onclick = closeWorldMap;
 function wmZoomAt(sx, sy, f) {   // the tile under the cursor stays under it
   const s0 = wmZoom / WM_TPP, wx = wmCx + (sx - wmW / 2) / s0, wz = wmCz + (sy - wmH / 2) / s0;
-  wmZoom = clamp(wmZoom * f, 0.5, 10);
+  wmZoom = clamp(wmZoom * f, M7 ? 0.35 : 0.5, M7 ? 40 : 10);   // Gielinor zooms out to the whole continent and in to its walls
   const s1 = wmZoom / WM_TPP;
   wmCx = wx - (sx - wmW / 2) / s1; wmCz = wz - (sy - wmH / 2) / s1;
   wmDirty = 1;
@@ -6506,7 +6651,7 @@ on(wmCv, 'pointerdown', e => {
 on(wmCv, 'pointermove', e => {
   const r = wmCv.getBoundingClientRect(), s = wmZoom / WM_TPP;
   const wx = Math.round(wmCx + (e.clientX - r.left - wmW / 2) / s), wz = Math.round(wmCz + (e.clientY - r.top - wmH / 2) / s);
-  wmPos.textContent = wx + ', ' + wz + ' — ' + biomeName(heightAt(wx, wz), wx, wz);
+  wmPos.textContent = (M7 ? wx + ', ' + -wz : wx + ', ' + wz) + ' — ' + biomeName(heightAt(wx, wz), wx, wz);
   const prev = wmPtr.get(e.pointerId);
   if (!prev) return;
   wmPtr.set(e.pointerId, { x: e.clientX, y: e.clientY, b: prev.b });
@@ -6535,6 +6680,7 @@ const resetLookups = () => { _lcx = _lcz = 1e9; _llist = []; _nvx = _nvz = 1e9; 
 function loadSeed(str) {
   tickN = globalTick() - 1;   // join the world's clock, not a fresh one
   S = hashSeed(str) | 0;
+  m7Mode(isMapSeed(str));   // before anything below asks the world a question: Gielinor answers them all differently
   villageCache = new Map(); nbrCache = new Map(); resetLookups(); _bx = _bz = 1e9;
   for (const [, rec] of chunks) disposeChunk(rec);
   chunks.clear(); pending.length = 0; tilesGenerated = 0;
@@ -6548,6 +6694,7 @@ function loadSeed(str) {
   for (const n of npcs) scene.remove(n.mesh);
   npcs.length = 0;
   closeOverlays();
+  if (M7) return m7Arrive();   // Lumbridge, as every 2007 account began
   // spawn inside the settlement nearest the origin: town ground is truce ground
   let bx = 0, bz = 0;
   const sv = homeVillage();
@@ -6571,17 +6718,18 @@ const wxEl = el('wx'), wzEl = el('wz');
 const offMap = (x, z) => !isFinite(x) || !isFinite(z) || Math.abs(x) > 2e6 || Math.abs(z) > 2e6;
 function travelTo(x, z) {
   x = Math.round(x); z = Math.round(z);
-  if (offMap(x, z)) return say('Those coordinates are off the map.', 'bad');
+  if (offMap(x, z) || (M7 && !MAP07.manifest().has(((x >> 6) << 8) | (-z >> 6)))) return say('Those coordinates are off the map.', 'bad');
   // the World tab is the admin debug teleport: no wilderness cap here — the spells and items keep theirs (tpTo)
   closeOverlays();
   teleport(x, z, 400);
-  wxEl.value = P.tx; wzEl.value = P.tz;
-  say('You travel to ' + P.tx + ', ' + P.tz + ' — ' + biomeName(walkY(P.tx, P.tz), P.tx, P.tz) + '.', 'lv');
+  wxEl.value = P.tx; wzEl.value = M7 ? -P.tz : P.tz;
+  say('You travel to ' + P.tx + ', ' + (M7 ? -P.tz : P.tz) + ' — ' + biomeName(walkY(P.tx, P.tz), P.tx, P.tz) + '.', 'lv');
   markDirty();
 }
-el('go').onclick = () => travelTo(parseInt(wxEl.value, 10) || 0, parseInt(wzEl.value, 10) || 0);
+el('go').onclick = () => travelTo(parseInt(wxEl.value, 10) || 0, (parseInt(wzEl.value, 10) || 0) * (M7 ? -1 : 1));   // Gielinor reads its own north-up y
 for (const b of [wxEl, wzEl]) b.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') el('go').click(); };
 el('rnd').onclick = () => {   // somewhere else in the same world, judged on macro height alone
+  if (M7) { const tw = M7_TOWNS[(Math.random() * M7_TOWNS.length) | 0]; return travelTo(tw[1], -tw[2]); }   // Gielinor rolls a town
   let best = null, bs = -1e9, judged = 0;
   for (let i = 0; i < 400 && judged < 24; i++) {
     const a = Math.random() * TAU, r = 300 + Math.random() * 5200, x = Math.round(P.tx + Math.cos(a) * r), z = Math.round(P.tz + Math.sin(a) * r), h = macroHeight(x, z);
@@ -6614,7 +6762,7 @@ function updateZoneTags() {
   t.style.display = wl ? 'flex' : 'none';
   if (wl && t._lv !== wl) { t._lv = wl; t.querySelector('span').textContent = 'Wilderness · level ' + wl; }
 }
-function drawPvpTag() { el('pvpTag').querySelector('img').src = g07(MK07, 'pvp') ? mk07p(MK07.pvp) : drawIcon('skull', '#ff5a3a', '#ffd9c9'); }
+function drawPvpTag() { el('pvpTag').querySelector('img').src = (g07(MK07, 'pvp') && mkArt(MK07.pvp)) || drawIcon('skull', '#ff5a3a', '#ffd9c9'); }
 drawPvpTag();
 
 /* ---- 33. THE GAME TICK: everything with consequences, ten times per six seconds; frames only interpolate ---- */
@@ -6747,13 +6895,14 @@ function updatePools(t) {
   const wideLoc = LOC7_OUT > 52 ? nearObjs : null;   // closeList only promises ~52 tiles between rebuilds: a dev-widened ring must read the whole near set
   if (wideLoc) for (const o of wideLoc) if (o.t <= 1) loc7Frame(o);
   for (const o of closeList()) {
+    if (o.m7) continue;   // Gielinor's objects wear the map's own models, stumps and all (46.)
     if (!wideLoc && o.t <= 1) loc7Frame(o);
     if (o.t === 0) { if (depleted.has(o.key) && !o.l7s) poolPut(POOL_STUMP, o.x, o.y - 0.18, o.z, o.x * 0.7, 1); }
     else if (o.t === 2) { if (!depleted.has(o.key)) { const w = 0.85 + Math.sin(t * 2.2 + o.x * 0.7 + o.z * 0.4) * 0.16; poolPut(POOL_SPOT, o.x, 0.08, o.z, t * 0.5 + o.x, w, 1, w); } }
     else if (KEEP_TINT[o.t]) poolPut(POOL_KEEP, o.kx !== undefined ? o.kx : o.x, o.y, o.kz !== undefined ? o.kz : o.z, o.dir !== undefined ? o.dir : o.b ? o.b.door * (PI / 2) : 0, 1, 1, 1, KEEP_TINT[o.t]);
   }
   for (const f of fires) poolPut(POOL_FIRE, f.x, f.y, f.z, t * 1.7, 1, 0.86 + Math.sin(t * 9 + f.x) * 0.14, 1);
-  for (const d of drops) poolPut(POOL_DROP, d.x, d.y + 0.3 + Math.sin(t * 2 + d.x) * 0.06, d.z, t * 0.9, 1, 1, 1, hexInt(ITEMS[d.id].c));
+  for (const d of drops) if (!d.m7m) poolPut(POOL_DROP, d.x, d.y + 0.3 + Math.sin(t * 2 + d.x) * 0.06, d.z, t * 0.9, 1, 1, 1, hexInt(ITEMS[d.id].c));   // m7m: lying in its cache model instead
   for (const f of poolHooks) f(t);
   POOLS.forEach(poolFlush);
 }
@@ -6762,13 +6911,13 @@ function updatePools(t) {
 let frames = 0, tLast = performance.now();
 function hud() {
   const a = document.activeElement;
-  if (a !== wxEl && a !== wzEl) { wxEl.value = P.tx; wzEl.value = P.tz; }
+  if (a !== wxEl && a !== wzEl) { wxEl.value = P.tx; wzEl.value = M7 ? -P.tz : P.tz; }
   updateZoneTags();
   if (pvpAck && !wildLvAt(P.tx, P.tz)) pvpAck = 0;
-  el('pos').textContent = el('posr').textContent = P.tx + ', ' + P.tz;
+  el('pos').textContent = el('posr').textContent = M7 ? P.tx + ', ' + -P.tz + (P.plane ? ' · floor ' + P.plane : '') : P.tx + ', ' + P.tz;   // Gielinor speaks the 2007 client's own coordinates
   el('elev').textContent = P.ry.toFixed(1);
   el('biome').textContent = P.afloat ? 'open water' : biomeName(P.ry, P.tx, P.tz);
-  el('resident').textContent = chunks.size;
+  el('resident').textContent = M7 ? MAP07.regions.size : chunks.size;
   el('tilecount').textContent = fmt(tilesGenerated);
   const b = tilesGenerated * 5;
   el('baked').textContent = b > 1e6 ? (b / 1e6).toFixed(1) + ' MB' : (b / 1e3).toFixed(0) + ' KB';
@@ -6821,7 +6970,7 @@ function frame(now) {
   const myCombat = combatLevel();
   let npcPlates = 0;
   for (const n of npcs) {
-    n.rx = n.px + (n.tx - n.px) * alpha; n.rz = n.pz + (n.tz - n.pz) * alpha; n.ry = groundY(n.rx, n.rz);
+    n.rx = n.px + (n.tx - n.px) * alpha; n.rz = n.pz + (n.tz - n.pz) * alpha; n.ry = M7 ? m7Y(n.rx, n.rz, n.pl) : groundY(n.rx, n.rz);
     n.face += wrapA(n.faceT - n.face) * Math.min(1, dt * 12);
     if (n.atkT > 0) {   // a merged monster has no limbs to swing: melee is a lunge, a throw rears up
       n.atkT = Math.max(0, n.atkT - dt * 3.2);
@@ -6830,18 +6979,20 @@ function frame(now) {
       else { const lung = k * 0.55; n.mesh.position.set(n.rx + Math.sin(n.face) * lung, n.ry + k * 0.12, n.rz + Math.cos(n.face) * lung); n.mesh.rotation.x = k * 0.28; }
     } else { n.mesh.rotation.x = 0; n.mesh.position.set(n.rx, n.ry, n.rz); }
     n.mesh.rotation.y = n.face;
-    const k07 = npcLod(n);
+    const k07 = n.c7 !== undefined ? 0 : npcLod(n);   // a Gielinor figure is already the cache's own look
     const limbs = k07 ? n.o7.limbs : n.limbs;   // only the rig on show spends its joints; the walk bob comes with them
     if (limbs && limbs.length) animateNpc(n, dt, limbs);
     if (n.o7) {   // after the bob: the 07 mesh rides the box rig's final transform
       n.o7.visible = !!k07;
       if (k07) { n.o7.position.copy(n.mesh.position); n.o7.rotation.copy(n.mesh.rotation); }
     }
-    n.mesh.visible = !k07;
-    if (n.hp < n.maxhp || n.target === P || n.owner || (P.task && P.task.k === 'attack' && P.task.o === n)) healthBar(n, 1.5 + n.t.sz * 1.4);
-    if (npcPlates < 14 && Math.abs(n.rx - P.rx) < 40 && Math.abs(n.rz - P.rz) < 40) {
+    n.mesh.visible = !k07 && (!M7 || m7Shown(n.pl));
+    if (n.fig) m7Figure(n, dt);
+    const nh = n.h7 ? n.h7 + 0.35 : 1.5 + n.t.sz * 1.4;   // a Gielinor figure's bar and plate ride its own measured height
+    if (n.hp < n.maxhp || n.target === P || n.owner || (P.task && P.task.k === 'attack' && P.task.o === n)) healthBar(n, nh);
+    if (npcPlates < 14 && Math.abs(n.rx - P.rx) < 40 && Math.abs(n.rz - P.rz) < 40 && n.mesh.visible && !n.t.peace7) {   // Gielinor's townsfolk go unlabelled, as 2007 left them
       const lbl = '<i style="color:' + lvlColour(n.t.lv, myCombat) + '">' + n.t.n + ' (' + n.t.lv + ')</i>';
-      if (labelAt(n, 'plate', n.rx, n.ry + 1.5 + n.t.sz * 1.5, n.rz, lbl, n.t.boss ? 'plate npc boss' : 'plate npc', 1)) { npcPlates++; n.plate.el._obj = n; }
+      if (labelAt(n, 'plate', n.rx, n.ry + (n.h7 ? n.h7 + 0.55 : 1.5 + n.t.sz * 1.5), n.rz, lbl, n.t.boss ? 'plate npc boss' : 'plate npc', 1)) { npcPlates++; n.plate.el._obj = n; }
     } else if (n.plate) { freePlate(n.plate); n.plate = null; }
   }
   let marks = 0;   // icon markers over the town's plumbing
@@ -6862,19 +7013,19 @@ function frame(now) {
   pump(3, 2);
   if (nearDirty) rebuildNear();
   updatePools(tSec);
+  if (M7) m7Frame(dt, tSec);   // floors above hidden when covered, figures and ground items in the map's own models
   mapTick();
-  water.position.set(P.rx, 0, P.rz);
-  waterPaint();
+  if (!M7) { water.position.set(P.rx, 0, P.rz); waterPaint(); }
   if (markT > 0) { markT -= dt; marker.rotation.y += dt * 2.4; if (markT <= 0) marker.visible = false; }
   ringFrame(dt);
   // the boom collapses fast into a hill and recovers slowly; indoors the roof lifts instead
-  const dunCam = P.tz > 500000;   // below ground the boom never collides: it rides above the walls instead
-  const cp = Math.cos(pitch), sp = Math.sin(pitch), cy = Math.max(P.ry, 0), safe = dunCam ? dist : boomLength(P.rx, cy + 2.2, P.rz, yaw, cp, sp, dist);
+  const dunCam = P.tz > 500000, eye = M7 ? 1.8 : 2.2;   // below ground the boom never collides: it rides above the walls instead; Gielinor's figures stand a fifth shorter
+  const cp = Math.cos(pitch), sp = Math.sin(pitch), cy = Math.max(P.ry, 0), safe = dunCam ? dist : boomLength(P.rx, cy + eye, P.rz, yaw, cp, sp, dist);
   camDist += (safe - camDist) * (safe < camDist ? 0.55 : 0.10);
   const d = clamp(camDist, 3.2, dist);
-  camera.position.set(P.rx - Math.sin(yaw) * cp * d, cy + 2.2 + sp * d, P.rz - Math.cos(yaw) * cp * d);
+  camera.position.set(P.rx - Math.sin(yaw) * cp * d, cy + eye + sp * d, P.rz - Math.cos(yaw) * cp * d);
   if (dunCam) camera.position.y = Math.max(camera.position.y, DUN_FLOOR + 16);
-  camera.lookAt(P.rx, cy + 2.2, P.rz);
+  camera.lookAt(P.rx, cy + eye, P.rz);
   if (spellT > 0) {
     spellT -= dt;
     const k = clamp(spellT / 0.42, 0, 1);
@@ -6887,7 +7038,7 @@ function frame(now) {
   try { fxFrame(dt); } catch (e) { fxRepair(e); }   // bars must outlive any one bad frame
   xpFrame(dt);
   if (OPT.timers) timerFrame(); else clearTimers();
-  if (++hoverFrame % 3 === 0 && mx >= 0 && !drag) {
+  if (++hoverFrame % (M7 ? 6 : 3) === 0 && mx >= 0 && !drag) {   // Gielinor's pick walks real triangles: half as often
     const o = pickObject(rayAt(mx, my));
     if (o !== hoverObj) {
       hoverObj = o;
@@ -6895,7 +7046,7 @@ function frame(now) {
       hoverEl.innerHTML = opts.length ? optLabel(opts[0]) : (o ? '' : '<span style="color:#a2906c">Walk here</span>');
     }
   }
-  if ((hoverFrame & 7) === 0) mapMarks();
+  if (OS.on) osMapFrame(); else if ((hoverFrame & 7) === 0) mapMarks();   // the 2007 frame turns its minimap every frame (48.)
   if (dirty.inv) drawInv();
   if (dirty.eq) drawEq();
   if (dirty.sk) drawSk();
@@ -7073,7 +7224,8 @@ function packSave() {
     clb: clogPack(), cln: CLOG_ORDER.length, pet: P.pet || 0, ins: P.ins, pl: P.petLost, dy: dyPack(), ca: P.ca,
     dr: P.dunRet || 0, cs: P.cstyle, bs: Array.from(bst), sku: P.skull || 0,   // sku: the skull's expiry on the shared clock — one entry, refreshed per initiated attack
     sp: Math.round(P.spec), ht: Math.max(0, P.homeT), ac: Math.max(0, P.agiCapeT || 0), bk: P.book | 0, bks: P.books | 1,   // a relog used to hand back a full spec bar and an off-cooldown home teleport
-    dp: P.dpile || 0 };   // dp: the unclaimed death pile, so a relog cannot cost you your right to it
+    dp: P.dpile || 0,   // dp: the unclaimed death pile, so a relog cannot cost you your right to it
+    fl: P.plane | 0 };   // fl: the Gielinor floor you stood on (always 0 in a seed's world; pl is the lost pets)
 }
 /* What the blob would weigh right now. The bank used to advertise three hundred
    slots against a ceiling that could not hold two hundred of them, and the
@@ -7118,6 +7270,7 @@ function applySave(b) {
   P.energy = b.energy ?? 100; P.run = b.run ?? 1; P.style = b.style | 0; P.prayers = b.prayers | 0; P.rstyle = Math.min(2, Math.max(0, b.rstyle | 0)); P.cstyle = b.cs ? 1 : 0;
   P.ammoN = eq.ammo ? Math.max(1, b.ammoN | 0) : 0;   // an empty quiver with arrows still in the slot would fire forever
   if (b.home) { P.home.x = b.home[0] | 0; P.home.z = b.home[1] | 0; }
+  P.plane = M7 ? clamp(b.fl | 0, 0, 3) : 0;
   P.slay = b.sl && NPC_BY[b.sl[0]] && (b.sl[1] | 0) > 0 ? { k: b.sl[0], n: b.sl[1] | 0, m: b.sl[2] | 0 } : null;
   P.farm = Object.create(null);
   for (const [k, c, t, left] of (b.farm || [])) if (CROPS[c] && t > 0) P.farm[k] = left > 0 ? [c | 0, t | 0, Math.min(left | 0, 12)] : [c | 0, t | 0];   // a v1 row has no count and re-arms once, as it always did
@@ -7503,7 +7656,7 @@ function onNet(m) {
       break;
     }
     case 3: { const R = ensureRemote(m[1]); if (R) { R.eq = m[2] || []; R.eqDirty = 1; } break; }
-    case 4: { const R = ensureRemote(m[1]); say((R ? R.name : 'Someone') + ': ' + m[2]); if (R) { R.bubble = String(m[2] ?? '').slice(0, 60); R.bubbleT = 4; } break; }
+    case 4: { const R = ensureRemote(m[1]); say((R ? R.name : 'Someone') + ': ' + m[2], 'pc'); if (R) { R.bubble = String(m[2] ?? '').slice(0, 60); R.bubbleT = 4; } break; }
     case 5: dropRemote(m[1]); break;
     case 6: {   // enter; a rejoin refreshes rather than discards
       const pid = m[1];
@@ -7534,7 +7687,7 @@ function actCode() {
 }
 function netSend() {
   if (!ws || ws.readyState !== 1) return;
-  const f16 = Math.round(P.faceT / TAU * 16) & 15, flags = (P.afloat ? 1 : 0) | (P.run ? 2 : 0), sig = P.tx + ',' + P.tz + ',' + f16 + ',' + flags;
+  const f16 = Math.round(P.faceT / TAU * 16) & 15, flags = (P.afloat ? 1 : 0) | (P.run ? 2 : 0) | (P.plane << 2), sig = P.tx + ',' + P.tz + ',' + f16 + ',' + flags;   // bits 2-3: the Gielinor floor
   if (sig !== lastMove) { lastMove = sig; wsSend([1, tickN, P.tx, P.tz, f16, flags]); }
   const a = actCode();
   if (a !== lastAct) { lastAct = a; wsSend([2, tickN, a]); }
@@ -7670,7 +7823,9 @@ function markHtml(o) {
        were wired up and then never reached. */
   const mk = o.t === 5 ? 'shop_' + SHOP_KINDS[o.k].k : o.t === 28 && o.gd ? 'guild_' + o.gd.g.k : MK_ART[o.t] ? o.t : o.t === 7 ? 'bank' : o.t === 9 ? 'barber' : o.t === 10 ? 'ge' : 'altar';
   const a = o.t === 5 ? [SHOP_KINDS[o.k].g, SHOP_KINDS[o.k].c, '#f0e6c8'] : MK_ART[mk] || MK_ART[o.t];
-  _markCache.set(key, h = '<img src="' + (mk !== null && g07(MK07, mk) ? mk07p(MK07[mk]) : drawIcon(a[0], a[1], a[2])) + '" alt="">');
+  const u = mk !== null && g07(MK07, mk) && mkArt(MK07[mk]);
+  h = '<img src="' + (u || drawIcon(a[0], a[1], a[2])) + '" alt="">';
+  if (u || !(mk !== null && g07(MK07, mk))) _markCache.set(key, h);   // a sprite still coming is not remembered as its glyph
   return h;
 }
 function labelsBegin() { for (const g of allRigs) g.userData.claim = 0; for (const q of platePool) q.claim = 0; }
@@ -7682,11 +7837,12 @@ let sortedRemotes = [], remoteSort = 1;   // a size test misses the compensating
    stands on top, so that is the one drawn and the rest are hidden entirely. Your own character always holds its own
    tile: being made invisible in your own world would be a bug, however the ordering fell. ---- */
 const stackTop = new Map();
+const stackKey = (x, z, pl) => M7 ? tk(x, z) + (pl | 0) * 68719476736 : tk(x, z);   // Gielinor stacks a floor at a time: the ladder's top is not its foot
 function stackPass() {
   stackTop.clear();
-  stackTop.set(tk(P.tx, P.tz), null);   // null: yours, and no stranger may take it
+  stackTop.set(stackKey(P.tx, P.tz, P.plane), null);   // null: yours, and no stranger may take it
   for (const R of remotes.values()) {
-    const k = tk(R.tx, R.tz), cur = stackTop.get(k);
+    const k = stackKey(R.tx, R.tz, R.pl), cur = stackTop.get(k);
     if (cur === null) continue;
     if (!cur || R.arrT > cur.arrT || (R.arrT === cur.arrT && R.pid > cur.pid)) stackTop.set(k, R);   // pid breaks a tie, so every client hides the same one
   }
@@ -7694,7 +7850,7 @@ function stackPass() {
      or trading with, because a passer-by stepped onto their tile is worse than any stack. Your own tile still
      outranks even that — being made invisible in your own world is never the right answer. */
   const busy = (P.task && P.task.o && P.task.o.remote) ? P.task.o : (trade && remotes.get(trade.pid)) || null;
-  if (busy && stackTop.get(tk(busy.tx, busy.tz)) !== null) stackTop.set(tk(busy.tx, busy.tz), busy);
+  if (busy && stackTop.get(stackKey(busy.tx, busy.tz, busy.pl)) !== null) stackTop.set(stackKey(busy.tx, busy.tz, busy.pl), busy);
 }
 function hideRemote(R) {
   if (R.g) { giveRig(R.g); R.g = null; R.parts = null; }
@@ -7724,12 +7880,12 @@ function updateRemotes(dt, alpha) {
         if (pkt.x !== R.tx || pkt.z !== R.tz) R.arrT = tickN;   // when they stepped onto the tile they are on: the stack order
         R.tx = pkt.x; R.tz = pkt.z;
         if (jump > 3) { R.px = R.tx; R.pz = R.tz; }
-        R.moved = jump; R.faceT = pkt.f / 16 * TAU; R.afloat = pkt.s & 1; R.run = (pkt.s >> 1) & 1; R.lastSeen = tickN;
+        R.moved = jump; R.faceT = pkt.f / 16 * TAU; R.afloat = pkt.s & 1; R.run = (pkt.s >> 1) & 1; R.pl = (pkt.s >> 2) & 3; R.lastSeen = tickN;
       } else R.moved = 0;
     }
-    R.rx = R.px + (R.tx - R.px) * alpha; R.rz = R.pz + (R.tz - R.pz) * alpha; R.ry = R.afloat ? 0 : groundY(R.rx, R.rz);
+    R.rx = R.px + (R.tx - R.px) * alpha; R.rz = R.pz + (R.tz - R.pz) * alpha; R.ry = R.afloat ? 0 : M7 ? m7Y(R.rx, R.rz, R.pl | 0) : groundY(R.rx, R.rz);
     if (R.bubbleT > 0) R.bubbleT -= dt;   // ahead of the stack test: a bubble held frozen under a stack would pop out stale
-    if (stackTop.get(tk(R.tx, R.tz)) !== R) { hideRemote(R); continue; }   // buried in a stack: kept up to date, drawn by nobody
+    if (stackTop.get(stackKey(R.tx, R.tz, R.pl)) !== R || (M7 && !m7Shown(R.pl | 0))) { hideRemote(R); continue; }   // buried in a stack (or on a floor the roof hides): kept up to date, drawn by nobody
     const far = Math.abs(R.rx - P.rx) > cut || Math.abs(R.rz - P.rz) > cut, wantLod = far ? 2 : (i < REMOTE_FULL ? 0 : 1);
     const k07 = wantLod === 0 ? osrsKind(R) : 0;
     const wrongKind = R.g && !!R.g.parts.osrs !== !!k07;   // the camera moved, or the setting did, under a rig already out
@@ -7743,11 +7899,12 @@ function updateRemotes(dt, alpha) {
       R.turn = R.g; R.rig = null;
       R.g.userData.claim = 1;
       R.g.position.set(R.rx, R.ry, R.rz);
+      R.g.scale.setScalar(M7 ? M7_FIG : 1);   // pooled rigs travel between worlds: the map's scale is set every frame
       animate(R, R.parts, dt);
       R.g.rotation.y = R.face;
     } else if (wantLod === 1) {
       R.face += wrapA(R.faceT - R.face) * Math.min(1, dt * 12);
-      poolPut(POOL_FAR, R.rx, R.ry, R.rz, R.face, 1, 1, 1, (R.eq && R.eq[1] && ITEMS[R.eq[1]]) ? hexInt(ITEMS[R.eq[1]].c) : 0x6a5a3f);
+      poolPut(POOL_FAR, R.rx, R.ry, R.rz, R.face, M7 ? M7_FIG : 1, M7 ? M7_FIG : 1, M7 ? M7_FIG : 1, (R.eq && R.eq[1] && ITEMS[R.eq[1]]) ? hexInt(ITEMS[R.eq[1]].c) : 0x6a5a3f);
     }
     if (wantLod !== 2 && plates < 20) {
       const shown = labelAt(R, 'plate', R.rx, R.ry + 2.5, R.rz, R.name, 'plate');
@@ -7762,6 +7919,7 @@ function updateRemotes(dt, alpha) {
 freshCharacter();
 osrsApply();   // the saved setting, now that the rig, the pools and the dresser are all up
 if (!OPT.osrs) icons07Apply();   // the skills grid, the pvp tag and the map legend were all built before loadOpts read the setting
+else { sprWarm(); OSRSK.iconStore(); }   // every UI sprite a pane will want, asked for together (one repaint, one save); the item sprites a past session drew, read in before a pack is painted
 dressAvatar();
 say('Welcome to Seedworld.', 'lv');
 say('This whole world is four bytes. Everything else is arithmetic.');
@@ -7775,6 +7933,7 @@ const welLow = document.createElement('canvas'); welLow.width = welLow.height = 
 const welLowCtx = welLow.getContext('2d'), welLowImg = welLowCtx.createImageData(WPX >> 1, WPX >> 1);
 let welJob = 0;
 function previewSeed(str) {
+  if (isMapSeed(str)) { ++welJob; return m7Preview(); }   // Gielinor is not arithmetic: show its own map
   const job = ++welJob, HPX = WPX >> 1, HT = WTILE * 2;
   const mySeed = hashSeed(str) | 0, myVc = new Map(), myNc = new Map();
   let j = 0, land = 0, keep, vc, nc;
@@ -7846,9 +8005,13 @@ const setGo = (txt, off) => { welGoEl.disabled = !!off; welGoEl.textContent = tx
 async function enterWorld(seed) {
   welJob++;   // abandon any preview mid-paint before the world takes the seed globals
   seed = (seed || 'lumbridge').trim().toLowerCase().slice(0, 32) || 'lumbridge';
-  SEED = seed;
   welSeedEl.blur();
   setGo('Loading…', 1);
+  if (isMapSeed(seed)) {   // Gielinor's catalogs and tables arrive before the world is entered, or it is not entered at all
+    try { setGo('Loading Gielinor…', 1); await m7Ready(); }
+    catch (e) { setGo('Enter this world', 0); el('welPop').textContent = 'Gielinor could not load: ' + e.message; console.warn('[seedworld] map07', e); return; }
+  }
+  SEED = seed;
   let blob = null, isNew = 1, loaded = 0;
   saveArmed = 0; savedOnce = 0; saveFatal = 0;   // a fresh entry starts with a clean slate: last world's refusal must not follow us
   if (!OFFLINE && AUTH) {
@@ -7872,13 +8035,13 @@ async function enterWorld(seed) {
   } else if (readableSave(blob) && !isNew) {
     applySave(blob);
     saveArmed = 1;
-    if (Number.isInteger(blob.tx)) teleport(blob.tx, blob.tz, 300);   // resume where you stood
+    if (Number.isInteger(blob.tx) && m7Resumable(blob)) teleport(blob.tx, blob.tz, 300, P.plane);   // resume where you stood, on the floor you stood on
     say('Welcome back, ' + (NAME || 'Adventurer') + '.', 'lv');
   } else if (OFFLINE) {   // offline: this browser is the database
     let ob = null; try { ob = JSON.parse(store.get('seedworld.off.' + seed) || 'null'); } catch {}
     if (readableSave(ob)) {
       applySave(ob);
-      if (Number.isInteger(ob.tx)) teleport(ob.tx, ob.tz, 300);
+      if (Number.isInteger(ob.tx) && m7Resumable(ob)) teleport(ob.tx, ob.tz, 300, P.plane);
       say('Welcome back. This device remembered your character.', 'lv');
     } else { freshCharacter(); say('A new life begins in ' + seed + ', kept on this device.', 'lv'); }
     saveArmed = 1;
@@ -8006,7 +8169,7 @@ function tradeSettle() {
 const itemName = id => ITEMS[id] ? ITEMS[id].name : id;
 function drawTrade() {
   if (!trade) return;
-  const cell = (e, i, mine) => '<div class="tcell" ' + (mine ? 'data-rm="' + i + '"' : 'data-ex="' + i + '"') + ' title="' + itemName(e[0]) + ' x' + e[1] + '">' + img(e[0]) + stackLbl(e[1]) + '</div>';
+  const cell = (e, i, mine) => '<div class="tcell" ' + (mine ? 'data-rm="' + i + '"' : 'data-ex="' + i + '"') + ' title="' + itemName(e[0]) + ' x' + e[1] + '">' + img(e[0], e[1]) + stackLbl(e[1]) + '</div>';
   const worth = list => list.reduce((a, e) => a + (ITEMS[e[0]] ? (e[0] === 'coins' ? e[1] : sellPrice(ITEMS[e[0]]) * e[1]) : 0), 0);
   el('tradeTitle').textContent = 'Trading with ' + trade.name;
   el('tradeMine').innerHTML = trade.mine.map((e, i) => cell(e, i, 1)).join('') || '<p class="tnone">Click your pack to offer an item. Right-click it for 5, 10 or all.</p>';
@@ -8473,6 +8636,7 @@ for (const row of PEN_K) for (const k2 of row) if (!NPC_BY[k2]) throw new Error(
 /* RUNECRAFT: a ruin per 192-tile lattice cell (half of them; deeper runes on dangerous ground) holds one rune altar; wizard's towers keep three
    essence rocks; the matching talisman or tiara opens the stones and every essence carried is bound at once. RUIN_CELL/ruinCache live in 2c. */
 function ruinAt(gx, gz) {   // pure in (cell, S): every client raises the same ruin; the memo follows the seed
+  if (M7) return null;
   if (ruinCache.S !== S) { ruinCache.clear(); ruinCache.S = S; }
   const key = gx * 8191 + gz;
   let R = ruinCache.get(key);
@@ -8663,7 +8827,7 @@ const slayPool = m => NPC_TYPES.filter(t => !t.boss && !t.town && !t.flee && t.l
 const plural = (s, n) => n === 1 ? s : s.replace(/^(.*?)( of .*)?$/, (_, w, of) => (/[mM]an$/.test(w) ? w.slice(0, -2) + 'en' : /f$/.test(w) ? w.slice(0, -1) + 'ves' : w + (/s$/.test(w) ? 'es' : 's')) + (of || ''));
 let slayO = null;   // the master whose window is open
 function slayerTalk(o) {
-  const m = MASTERS[o.k], s = P.slay, ico = g07(MK07, 12) ? mk07p(MK07[12]) : drawIcon(...MK_ART[12]);
+  const m = MASTERS[o.k], s = P.slay, ico = (g07(MK07, 12) && mkArt(MK07[12])) || drawIcon(...MK_ART[12]);
   const why = s ? 'Finish or give up the task you have before asking for another.' : combatLevel() < m.cb ? m.n + ' only assigns fighters of combat level ' + m.cb + ' or more.' : lvl[SK.slayer] < m.sl ? m.n + ' only serves slayers of level ' + m.sl + ' or more.' : '';
   slayO = o;
   showModal(m.n + ', Slayer Master', stRow('Task', s ? 'Kill ' + s.n + ' more ' + plural(NPC_BY[s.k].n, s.n) + '.' : 'No task assigned.') +
@@ -9016,6 +9180,7 @@ const RS = 8, HGRID = 1;   // room size in tiles; grid runs -1..1 (nine rooms, t
    modified client could park a walled lot over a bank door for everyone else.
    Takes the centre tile; returns a refusal to say aloud, or 0. */
 function hSiteBad(cx, cz) {
+  if (M7) return 'Gielinor holds no free land for a house.';   // every tile of the 2007 map already belongs to someone
   const nv = nearVillage(cx, cz);
   if (nv && nv.d < nv.v.r * 1.6) return 'Too close to town: the guilds keep this land.';
   if (wildLvAt(cx, cz)) return 'The Wilderness holds no ground for a home.';
@@ -9231,6 +9396,7 @@ function applyHouse(pid, h) {
 /* claiming: flat, dry, open ground clear of towns, roads and other holdings; the deed is the estate agent's fee.
    With a house already owned, the deed pays the movers instead: the whole house — rooms, doors, furnishings — at your feet. */
 function claimHouse() {
+  if (M7) return say(hSiteBad(), 'bad');
   if (P.hs) {
     if (hsMoveTo(1)) { invRemove('house_deed', 1); say('The estate agent takes the deed; the movers do the rest.', 'lv'); }
     return;
@@ -9416,6 +9582,7 @@ function hsFit(rm, x0, z0, e, coarse) {   // a refusal string, or { y, felled };
 function hsMoveTo(spin) {   // place the whole house at the player's feet; 1 on success
   const h = P.hs;
   if (!h) { hsBarShow(0); return 0; }
+  if (M7) { say(hSiteBad(), 'bad'); return 0; }
   if (inDunPlane(P.tz)) { say('No deed covers the underworld.', 'bad'); return 0; }
   const nv = nearVillage(P.tx, P.tz);
   if (nv && nv.d < nv.v.r * 1.6) { say('Too close to town: the guilds keep this land.', 'bad'); return 0; }
@@ -9527,6 +9694,7 @@ const WILD_BS = ['callisto', 'venenatis', 'vetion', 'scorpia', 'kbd'];
 for (const k of WILD_BS) if (NPC_BY[k]) NPC_BY[k].wildOnly = 1;   // and nowhere above ground or under a city
 const CAVE_CELL = 288, caveCache = new Map();
 function caveAt(gx, gz) {
+  if (M7) return null;
   if (caveCache.S !== S) { caveCache.clear(); caveCache.S = S; }
   const key = gx * 8191 + gz;
   let c = caveCache.get(key);
@@ -9568,6 +9736,7 @@ function caveDun(c) {
 /* which dungeon owns a plane tile: the mirrored surface cell scan — castles first, then the wilderness doors — memoised per tile */
 let _dfx = 1e9, _dfz = 1e9, _dfd = null;
 function dunFor(x, z) {
+  if (M7) return null;
   const tx = Math.round(x), tz = Math.round(z);
   if (tx === _dfx && tz === _dfz) return _dfd;
   _dfx = tx; _dfz = tz; _dfd = null;
@@ -10105,7 +10274,7 @@ function altarStudy() {
     const known = bookHas(i), can = lvl[SK.magic] >= BOOK_LV[i];
     const note = P.book === i ? 'in hand' : known ? 'open it' : can ? 'learn it' : 'Magic ' + BOOK_LV[i];
     return '<div class="mk' + (known || can ? '' : ' no') + '"' + (known || can ? ' data-bkalt="' + i + '"' : '') + '>'
-      + '<img src="' + (g07(MK07, 'book_' + b.k) ? mk07p(MK07['book_' + b.k]) : OPT.osrs ? c07p('altarIcon') : drawIcon(...MK_ART.altar.slice(0, 3))) + '" alt="">'
+      + '<img src="' + ((g07(MK07, 'book_' + b.k) && mkArt(MK07['book_' + b.k])) || (g07(MK07, 'altar') && mkArt(MK07.altar)) || drawIcon(...MK_ART.altar.slice(0, 3))) + '" alt="">'
       + '<span>' + b.n + '</span><b class="gp">' + note + '</b></div>';
   }).join('');
   showModal('The altar', rows, 'An altar remembers every book you have learned at one.');
@@ -10142,8 +10311,8 @@ function wildLanding(lv) {
   }
   return null;
 }
-const tpAt = (q, what, cap) => q ? tpTo(q.x, q.z, /^(to|into|home)/.test(what) ? what : 'to the nearest ' + what, cap) : say('Nothing like that lies within the scan.', 'bad');   // a bare place name reads as a sentence
-const tpWild = (lv, what) => tpAt(wildLanding(lv), what);
+const tpAt = (q, what, cap) => { if (M7 && !q) q = m7PlaceFor(what); return q ? tpTo(q.x, q.z, M7 && q.n ? 'to ' + q.n : /^(to|into|home)/.test(what) ? what : 'to the nearest ' + what, cap, q.pl) : say('Nothing like that lies within the scan.', 'bad'); };   // a bare place name reads as a sentence; Gielinor answers with its real one
+const tpWild = (lv, what) => tpAt(M7 ? m7WildLanding(lv) : wildLanding(lv), what);
 
 defWear({ id: 'ring_of_dueling', name: 'Ring of dueling', g: 'ring', c: '#3aa05a', c2: '#9a7414', slot: 'ring', val: 1800, opt: ['Rub', () => villageTp(TP_CAP_ITEM)] });
 RING_NOTES.ring_of_dueling = ' Rub it to be carried to the nearest settlement.';
@@ -10164,15 +10333,16 @@ defWear({ id: 'skills_necklace', name: 'Skills necklace', g: 'amulet', c: '#b04a
 RING_NOTES.skills_necklace = ' Rub it to be carried to the nearest guild city.';
 ENCH[0].neck = 'games_necklace'; ENCH[1].neck = 'binding_necklace'; ENCH[2].neck = 'digsite_pendant'; ENCH[3].neck = 'phoenix_necklace'; ENCH[4].neck = 'skills_necklace';
 /* teleports: every one ends what you were doing and lands you on a street tile */
-function tpTo(x, z, where, cap) {
+function tpTo(x, z, where, cap, pl) {
   const wl = wildLvAt(P.tx, P.tz);
   if (wl > (cap || TP_CAP)) return say('A mysterious force blocks your teleport — the Wilderness is too deep here.', 'bad');   // falsy: cast() keeps the runes
-  closeOverlays(); sfx(200); teleport(x, z, 400); say('You teleport ' + where + '.'); return 1;
+  closeOverlays(); sfx(200); teleport(x, z, 400, pl); say('You teleport ' + where + '.'); return 1;
 }
 const tpV = (v, what, cap) => { if (!v) return say('There is no ' + what + ' near enough to reach.', 'bad'); const s = safeSpotIn(v); return tpTo(s.x, s.z, 'to ' + villageName(v), cap); };
 const nearCity = R => nearestOf(SETTLE_CELL, R, (a, b) => { const v = villageAt(a, b); return v && v.rank >= 3 ? v : null; });   // nearest settlement of city rank, R cells out
-function villageTp(cap) { const f = tpFrom(); return tpV(nearestVillageTo(f.x, f.z, 12), 'settlement', cap); }
-function cityTp(cap) { return tpV(nearCity(6), 'city', cap); }
+const tpTown = (city, cap) => { const tw = m7Town(P.tx, P.tz, city); return tw ? tpTo(tw.x, -tw.y, 'to ' + tw.n, cap, 0) : say('There is no ' + (city ? 'city' : 'settlement') + ' near enough to reach.', 'bad'); };   // Gielinor's towns stand where the 2007 map put them
+function villageTp(cap) { if (M7) return tpTown(0, cap); const f = tpFrom(); return tpV(nearestVillageTo(f.x, f.z, 12), 'settlement', cap); }
+function cityTp(cap) { return M7 ? tpTown(1, cap) : tpV(nearCity(6), 'city', cap); }
 function homeTp() {
   const left = 3000 - (tickN - P.homeT);   // half an hour between casts
   if (left > 0) return say('You need to wait another ' + Math.ceil(left / 100) + ' minutes to cast this spell.', 'bad');
@@ -10343,7 +10513,7 @@ function bookSwap() {
   return 1;
 }
 const usRow = s => liRow('data-us="' + USPELLS.indexOf(s) + '" title="' + s.need.map(n => n[1] + ' ' + ITEMS[n[0]].name).concat(s.d).join(', ') + '"', P.uspell === s, lvl[SK.magic] < s.lv,
-  g07(US07, s.n) ? c07p(US07[s.n]) : drawIcon(s.g, '#' + s.tint.toString(16).padStart(6, '0'), '#f0e6c8'), s.n, '<u>' + (lvl[SK.magic] < s.lv ? 'level ' + s.lv : spellReady(s) ? 'ready' : 'no runes') + '</u>');
+  (g07(US07, s.n) && uiArt(US07[s.n])) || drawIcon(s.g, '#' + s.tint.toString(16).padStart(6, '0'), '#f0e6c8'), s.n, '<u>' + (lvl[SK.magic] < s.lv ? 'level ' + s.lv : spellReady(s) ? 'ready' : 'no runes') + '</u>');
 function cast(s, i) {   // runes first; the effect burns them only when it lands
   if (P.dead || P.stun > 0) return;
   if (!spellReady(s)) return say('You do not have the runes for that spell.', 'bad');
@@ -10450,8 +10620,8 @@ recipe('weapon_poison', 'herblore', 60, 137.5, [['kwuarm', 1], ['dragon_scale_du
 (LOOT.venenatis.tert = LOOT.venenatis.tert || []).push(['dark_bow', 512]);   // game-economy: the great spider keeps the dark bow
 (LOOT.hero.tert = LOOT.hero.tert || []).push(['saradomin_sword', 512]);   // game-economy: a hero carries the god's blade
 
-/* ---- ARMOURY II: beyond rune. Barrows, the god wars, and the treasure tiers. Icons ship from i07/ (icons07-map.csv);
-   worn tints are sampled from those sprites. Weapon atk/str follow the wiki's best style, armour def its melee mean.
+/* ---- ARMOURY II: beyond rune. Barrows, the god wars, and the treasure tiers. Icons are cache models (icons07-map.csv);
+   worn tints are sampled from those icons. Weapon atk/str follow the wiki's best style, armour def its melee mean.
    Drops are wired in the ARMOURY II DROPS block below; barrows set effects, mdmg gear and the trident's own spell are live.
    Re-audited against the wiki Aug 27: the rebalance-era channels folded in (small mdmg on the mage sets, gear ranged
    strength on anguish/assembler/pegasians, occult at 5%). Armour attack penalties and weapon shield-hand defence stay
@@ -10515,7 +10685,7 @@ for (const ck of ['lava', 'steam', 'smoke', 'mist', 'dust', 'mud']) if (ITEMS['m
 ENCH[5].amu = 'amulet_of_fury'; ENCH[5].neck = 'berserker_necklace';
 
 /* ---- ARMOURY III: the remaining famous absences, wiki-audited Aug 27 (infoboxes fetched, every stat exact).
-   Absent owners borrow the nearest kin, as ARMOURY II does (each commented). Icons ship from i07/ via the CSV;
+   Absent owners borrow the nearest kin, as ARMOURY II does (each commented). Icons are cache models via the CSV;
    the dead-code sweep had taken the glyph slots these items wear, so their eight draw fns return here as fallbacks. ---- */
 GLYPH.helm = (g, c, d) => { poly(g, [16, 5, 25, 12, 25, 18, 7, 18, 7, 12], c, K); fr(g, d, 6, 18, 20, 3); fr(g, d, 14, 8, 4, 10); };
 GLYPH.fhelm = (g, c, d) => { poly(g, [16, 3, 25, 9, 25, 26, 20, 28, 12, 28, 7, 26, 7, 9], c, K); fr(g, d, 10, 14, 12, 3); fr(g, d, 14, 17, 4, 9); };
@@ -10740,8 +10910,11 @@ const petFree7 = () => { if (petO7) { scene.remove(petO7); OSRSK.npcFree(petO7);
 /* the miniature wears the same setting: exactly while your own rig does, at the miniature's measured height */
 function pet7() {
   if (petV7 < 0 && osrsOn) petV7 = OSRSK.npcVariants(petT7.n);
-  const on = osrsSelf && petV7 > 0 ? 1 : 0;
-  if (on && !petO7) { petO7 = OSRSK.npcMesh(petT7.n, hashSeed(petFor) % petV7, petH7, npcPlan(petT7)); scene.add(petO7); }
+  let on = osrsSelf && petV7 > 0 ? 1 : 0;
+  if (on && !petO7) {
+    const m = OSRSK.npcMesh(petT7.n, hashSeed(petFor) % petV7, petH7, npcPlan(petT7));
+    if (m) { petO7 = m; scene.add(m); } else on = 0;   // null: atoms still fetching — the box pet stays
+  }
   if (petO7) {
     petO7.visible = !!on;
     if (on) { petO7.position.copy(petMesh.position); petO7.rotation.copy(petMesh.rotation); }
@@ -11162,8 +11335,11 @@ for (const p of ['full_helm', 'platebody', 'platelegs', 'plateskirt', 'kiteshiel
 const holdsClue = () => CLUE_T.some((c, i) => invCount('clue_' + i) || bank.some(b => b.id === 'clue_' + i));
 function clueSpot(i, x, z) {   // dry, wild ground a tier's walk from (x, z)
   if (inDunPlane(z)) z -= DUN_Z;   // a scroll found below points at the daylight above the castle
+  if (M7 && -z > 6400) { const tw = m7Town(x, z, 0); if (tw) { x = tw.x; z = -tw.y; } }   // a scroll found underground points at the surface above the nearest town
   for (let k = 0, T = CLUE_T[i]; k < 40; k++) {
-    const a = Math.random() * TAU, r = randInt(T.lo, T.hi), sx = Math.round(x + Math.sin(a) * r), sz = Math.round(z + Math.cos(a) * r), y = heightAt(sx, sz);
+    const a = Math.random() * TAU, r = randInt(T.lo, T.hi), sx = Math.round(x + Math.sin(a) * r), sz = Math.round(z + Math.cos(a) * r);
+    if (M7) { if (MAP07.isLand(sx, -sz) && !m7Wild(sx, sz) && !m7InTown(sx, sz)) return [sx, sz, i]; continue; }   // Gielinor: land by the world map's own colour, outside towns and the Wilderness
+    const y = heightAt(sx, sz);
     if (y > 1.5 && y < 45 && !nearTown(sx, sz)) return [sx, sz, i];
   }
   return null;
@@ -11178,7 +11354,7 @@ function readClue(i) {   // a scroll without a spot (an old save) is given one f
   const c = P.clue && P.clue[2] === i ? P.clue : (P.clue = clueSpot(i, P.tx, P.tz));
   if (!c) return say('The ink has run; you cannot make the scroll out here.');
   const dx = c[0] - P.tx, dz = c[1] - P.tz;
-  say('The scroll reads: "Dig at ' + c[0] + ', ' + c[1] + '" — about ' + Math.round(Math.hypot(dx, dz)) + ' tiles ' + COMPASS[Math.round(Math.atan2(dx, -dz) / (PI / 4)) & 7].split(' ')[0] + ' of here.', 'lv');
+  say('The scroll reads: "Dig at ' + c[0] + ', ' + (M7 ? -c[1] : c[1]) + '" — about ' + Math.round(Math.hypot(dx, dz)) + ' tiles ' + COMPASS[Math.round(Math.atan2(dx, -dz) / (PI / 4)) & 7].split(' ')[0] + ' of here.', 'lv');
   if (!invCount('spade') && !bank.some(b => b.id === 'spade')) say('You will need a spade to dig it up — any General Store sells one.', 'lv');
 }
 function dig() {
@@ -11213,10 +11389,11 @@ function tpNear(p, what) {
   say('Warped to the nearest ' + what + ' at ' + P.tx + ', ' + P.tz + '.', 'lv');
 }
 Object.assign(DEV, {
-  city() { tpV(nearCity(40), 'city'); },
-  ge() { tpNear(nearestOf(SETTLE_CELL, 40, vFind(v => v.ge)), 'Grand Exchange'); },
-  place() { const [n, fn, cell, rings] = PLACES[+el('devTpPlace').value]; tpNear(nearestOf(cell || SETTLE_CELL, rings || 40, fn), n.toLowerCase()); },
+  city() { if (M7) return tpTown(1, 99); tpV(nearCity(40), 'city'); },
+  ge() { if (M7) return tpTo(3164, -3486, 'to the Grand Exchange', 99, 0); tpNear(nearestOf(SETTLE_CELL, 40, vFind(v => v.ge)), 'Grand Exchange'); },
+  place() { if (M7) return say('The place finder reads the seeded worlds; in Gielinor use the World tab or the map.', 'bad'); const [n, fn, cell, rings] = PLACES[+el('devTpPlace').value]; tpNear(nearestOf(cell || SETTLE_CELL, rings || 40, fn), n.toLowerCase()); },
   npc() {   // wild packs, settlements and boss lairs each answer with their nearest; the closest wins
+    if (M7) return say('The spawn finder reads the seeded worlds; Gielinor keeps the 2007 map\'s own.', 'bad');
     const k = el('devTpNpc').value, t = NPC_BY[k];
     let best = [nearestOf(WILD_CELL, 64, (a, b) => { const pk = wildPack(a, b); if (!pk || pk.t.k !== k) return null; for (let i = 0; i < pk.n; i++) { const o = wildSpot(a, b, i); if (heightAt(o.x, o.z) >= SEA) return o; } return null; }),
       nearestOf(SETTLE_CELL, 16, (a, b) => { const v = villageAt(a, b); for (let i = 0, n = v ? villageSpawnN(v) : 0; i < n; i++) { const o = villageSpawn(v, i); if (o.t.k === k) return o; } return null; }),
@@ -11254,10 +11431,1886 @@ function skillGuide(i) {
 }
 on(skGrid, 'click', e => { const d = e.target.closest('.sk.live'); if (d) skillGuide(skEls.indexOf(d)); });
 
-/* worn/drop tints sampled per-part from the 07 sprites (a staff's c is its orb, a blade's its edge) so the model
-   matches the icon; the TINT07 data lives in icons07.js — `node icons07-tint.mjs` after changing sprites, map, or glyphs csv */
+/* worn/drop tints sampled per-part from the 07 pictures (a staff's c is its orb, a blade's its edge) so the model
+   matches the icon; the TINT07 data lives in icons07.js — `node icons07-tint.mjs` fills in any item that has none */
 for (const id in TINT07) { const it = ITEMS[id]; if (it) { const [a, b] = TINT07[id].split('.'); it.c = '#' + a; it.c2 = '#' + b; } }
 dressAvatar();
+
+/* ---- THE FULL ROSTER: every item the cache lets a player carry, from /out — the partyhats in all six colours, every quest
+   trinket, minigame reward and cosmetic. data07-items.js (tools/bake-items.mjs) holds one row per distinct cache name,
+   appended here after every hand-built item and the tints, so this game's own rows always win: a name it already carries
+   (directly, or in the cache spelling osrs.js's ALIASES give it) is skipped, its generated id folding into the hand-built
+   one through OLD_IDS should a save ever hold it. A new item's id is 'o' + its cache id: short, because the 8 KB save
+   carries a whole bank, and permanent across re-bakes. It does what the cache says and no more — name, price, stacking,
+   the Grand Exchange flag (the exchange lists only tradeable ones), the worn slot with its bonuses and requirements, the
+   launcher / quiver / thrown kind. Its icon is the inventory model drawn the client's way, as every item's is (icon() in
+   6c reads c7 where ICON07 has no row; the baked glyph and colours stand in with "2007 models" off) and its examine text
+   the cache's own, fetched on the first look. Nothing here reaches a drop table, a shop, a recipe or a skill: those stay
+   hand-built. ---- */
+{
+  const have = new Map();
+  for (const id in ITEMS) {
+    const k = ITEMS[id].name.toLowerCase(), a = OSRSK.aliasName(k);
+    if (!have.has(k)) have.set(k, id);
+    if (a && !have.has(a)) have.set(a, id);
+  }
+  for (const [cid, name, val, g, c, c2, fl, slot, st] of ITEMS07) {   // fl: 1 stack, 2 not on the exchange, 4 two-handed, 8 launcher, 16 thrown, 32 quiver, 64 stab
+    const id = 'o' + cid, k = name.toLowerCase(), own = have.get(k);
+    if (own) { if (!OLD_IDS[id]) OLD_IDS[id] = own; continue; }
+    if (ITEMS[id]) continue;
+    const o = { id, name, g, c: '#' + c, c2: '#' + c2, val, c7: cid };
+    if (fl & 1) o.stack = 1;
+    if (fl & 2) o.nge = 1;
+    if (slot) {
+      const s = st || {};
+      Object.assign(o, { equip: 1, slot, atk: s.a || 0, str: s.s || 0, def: s.d || 0, req: s.rq ? Object.assign({}, s.rq) : {} });
+      if (s.m) o.mag = s.m; if (s.md) o.mdef = s.md; if (s.r) o.rat = s.r; if (s.rs) o.rst = s.rs; if (s.dm) o.mdmg = s.dm; if (s.p) o.pb = s.p;
+      if (s.sp) o.spd = s.sp; if (s.rg) o.rng = s.rg; if (s.rc) o.reach = s.rc;
+      if (fl & 4) o.two = 1;
+      if (fl & 8) o.bow = 1;
+      if (fl & 16) o.thrown = 1;
+      if (fl & 32) o.ammo = 1;
+      if (fl & 64) o.stab = 1;
+      if (s.at) { if ((fl & 8) && !(fl & 16)) o.ammoT = s.at; else o.aT = s.at; }   // what a launcher draws; what a quiver item is
+    }
+    defItem(o);
+    have.set(k, id);
+  }
+}
+function examine07(it) {   // the cache's own words, fetched with the item's config shard on the first look
+  if (it.ex !== undefined) return say(it.ex || examine(it));
+  OSRSK.itemDef(it.c7).then(d => { it.ex = (d && d.examine) || ''; say(it.ex || examine(it)); }, () => say(examine(it)));
+}
+
+/* ---- 46. GIELINOR: the curated 2007 map, played as a world of its own (the "gielinor" seed, beside the seeded ones).
+   map07.js holds the map: terrain, scenery, collision, figures, whole map squares streamed round you. This section is
+   the wiring. The scenery is sorted into this game's own object kinds, so a tree is a tree to woodcutting and a booth
+   is a bank; the spawn tables become monsters (a name the bestiary knows keeps its loot, slayer family and behaviour,
+   with the cache's own stats) and townsfolk with their cache menus; the towns and teleport landings are the wiki's; the
+   minimap and world map paint the map's own tiles. What differs there is only what the map itself says: floors, the
+   Wilderness by coordinates, walls between tiles, Lumbridge's respawn. Combat, skills, interfaces and the save are the
+   game's, untouched. Keys: an object is keyed by its tile AND floor (m7Key), a spawn by its row in spawns.json ('g' + i),
+   so every client agrees on both and depletion and monster sync ride the existing wire ops. ---- */
+function isMapSeed(s) { return String(s || '').trim().toLowerCase() === 'gielinor'; }
+const M7_FIG = 103 / 128;   // osrs.js sizes a figure at 1/103 to match the box rig; the map stands at the cache's own 1/128
+const M7_HOME = [3222, 3218];   // Lumbridge castle courtyard: where every 2007 account began, and where the dead wake
+const M7_SPAWN_R = 36, M7_DESPAWN_R = 52, M7_CAP = 160;   // monsters come up this near and go this far; 2007 towns are crowded
+function m7Y(x, z, pl) { return MAP07.yAt(pl === undefined ? P.plane : pl, x, z); }
+const m7Key = (gx, gy, pl) => tk(gx, -gy) + pl * 68719476736;   // the floor rides above the tile key: a ladder's top is not its foot
+const m7Reach = () => clamp(OPT.viewRadius * 13, 64, 144);   // squares within this many tiles stream in (91 at the default view distance); the fog closes there
+let m7ViewPlane = 3, m7PlaneWas = -1, m7MapDirty = 0, m7Inited = 0;
+const m7Live = new Set(), m7Props = [], m7DropMeshes = new Map(), m7ItemState = new Map();
+const m7Shown = pl => (pl | 0) <= m7ViewPlane;
+/* the towns: [name, x, y, radius, city], the wiki's coordinates — the respawn, the settlement and city teleports, the
+   town-core rules (no traps, no campfires) and the area names all read this one table */
+const M7_TOWNS = [['Lumbridge', 3222, 3218, 34, 0], ['Draynor Village', 3093, 3248, 26, 0], ['Varrock', 3212, 3424, 60, 1], ['Falador', 2965, 3380, 50, 1],
+  ['Edgeville', 3094, 3491, 22, 0], ['Barbarian Village', 3082, 3420, 18, 0], ['Al Kharid', 3293, 3174, 36, 0], ['Port Sarim', 3023, 3208, 26, 0],
+  ['Rimmington', 2957, 3214, 20, 0], ['Taverley', 2895, 3440, 22, 0], ['Burthorpe', 2899, 3544, 22, 0], ['Catherby', 2808, 3434, 24, 0],
+  ["Seers' Village", 2725, 3485, 26, 0], ['Camelot', 2757, 3477, 24, 1], ['East Ardougne', 2662, 3305, 48, 1], ['West Ardougne', 2535, 3305, 34, 0],
+  ['Yanille', 2575, 3090, 34, 0], ['Brimhaven', 2760, 3178, 28, 0], ['Musa Point', 2917, 3175, 16, 0], ['Shilo Village', 2852, 2955, 24, 0],
+  ['Canifis', 3494, 3483, 22, 0], ['Port Phasmatys', 3666, 3487, 24, 0], ['Rellekka', 2643, 3677, 34, 0], ['Tree Gnome Stronghold', 2461, 3444, 44, 0],
+  ['Pollnivneach', 3359, 2970, 24, 0], ['Nardah', 3428, 2893, 22, 0], ['Sophanem', 3304, 2780, 28, 0], ['Entrana', 2834, 3335, 24, 0],
+  ["Mort'ton", 3489, 3288, 18, 0], ['Burgh de Rott', 3494, 3208, 18, 0], ['Lletya', 2341, 3171, 20, 0], ['Hosidius', 1744, 3517, 40, 1],
+  ['Shayzien', 1504, 3615, 40, 1], ['Arceuus', 1680, 3750, 40, 1], ['Lovakengj', 1500, 3840, 40, 1], ['Port Piscarilius', 1803, 3747, 40, 1]];
+const M7_AREAS = [['Morytania', 3400, 3150, 3900, 3620], ['the Kharidian Desert', 3150, 2700, 3550, 3120], ['Karamja', 2700, 2880, 2990, 3240],
+  ['Asgarnia', 2800, 3150, 3070, 3620], ['Misthalin', 3070, 3150, 3400, 3520], ['Kandarin', 2400, 2880, 2800, 3650], ['the Fremennik Province', 2300, 3650, 2800, 4100],
+  ['Tirannwn', 2100, 2950, 2400, 3450], ['Great Kourend', 1150, 3350, 1950, 3950]];
+function m7Wild(x, z) {   // the 2007 rule: a level every 8 tiles north of y 3520, from the ditch's far side (3523) up; the same beneath it
+  const y = -z;
+  if (x < 2944 || x >= 3392) return 0;
+  if (y >= 3523 && y < 3968) return Math.floor((y - 3520) / 8) + 1;
+  if (y >= 9920 && y < 10368) return Math.floor((y - 9920) / 8) + 1;
+  return 0;
+}
+function m7Town(x, z, city) {   // the nearest town (a city only, when asked) to a tile: { n, x, y }
+  let best = null, bd = 1e18;
+  for (const [n, tx, ty, , c] of M7_TOWNS) { if (city && !c) continue; const d = (tx - x) * (tx - x) + (ty + z) * (ty + z); if (d < bd) { bd = d; best = { n, x: tx, y: ty }; } }
+  return best;
+}
+const m7InTown = (x, z) => M7_TOWNS.some(([, tx, ty, r]) => Math.abs(x - tx) <= r && Math.abs(-z - ty) <= r);
+function m7Place(x, z) {
+  const wl = m7Wild(x, z), gy = -z;
+  if (wl) return 'the Wilderness, level ' + wl;
+  for (const [n, tx, ty, r] of M7_TOWNS) if (Math.abs(x - tx) <= r && Math.abs(gy - ty) <= r) return n + (P.plane ? ', floor ' + P.plane : '');
+  if (gy > 6400) return 'underground';
+  for (const [n, x0, y0, x1, y1] of M7_AREAS) if (x >= x0 && x < x1 && gy >= y0 && gy < y1) return n;
+  return 'Gielinor';
+}
+/* the item and spell destinations the seeded worlds find by lattice, answered by the real places */
+const M7_PLACES = { 'waypoint camp': ['Burthorpe', 2898, 3553], ruins: ['the Digsite', 3340, 3445], 'guild city': ['the Fishing Guild', 2611, 3393], dungeon: ['Edgeville Dungeon', 3098, 9882],
+  'rune altar': ['the air altar ruins', 2984, 3292], 'essence mine': ['the rune essence mine', 2911, 4832], 'fishing spot': ['the Catherby shore', 2837, 3432], guild: ['the Fishing Guild', 2611, 3393] };
+const m7PlaceFor = what => { const p = M7_PLACES[what]; return p ? { n: p[0], x: p[1], z: -p[2], pl: 0 } : null; };
+const M7_WILD = [[3094, 3530, 2, 'the edge of the Wilderness'], [3236, 3635, 14, 'the Chaos Temple'], [3156, 3666, 19, 'the Graveyard of Shadows'],
+  [2966, 3696, 23, 'the ruins west of the Bandit Camp'], [3202, 3830, 39, 'Lava Dragon Isle'], [2977, 3873, 45, 'the Frozen Waste Plateau'],
+  [3288, 3886, 46, 'the Demonic Ruins'], [3105, 3933, 52, 'the Mage Arena']];
+function m7WildLanding(lv) {   // the landmark nearest the asked-for depth: the ancient teleports keep their 2007 destinations
+  const w = M7_WILD.slice().sort((a, b) => Math.abs(a[2] - lv) - Math.abs(b[2] - lv))[0];
+  return { x: w[0], z: -w[1], n: w[3], pl: 0 };
+}
+/* the runecrafting altars inside their ruins: [RC key, x, y]; an altar is named by the nearest */
+const M7_RUNES = [['air', 2841, 4829], ['mind', 2786, 4841], ['water', 2716, 4836], ['earth', 2658, 4839], ['fire', 2585, 4838], ['body', 2521, 4842],
+  ['cosmic', 2142, 4833], ['chaos', 2271, 4842], ['nature', 2400, 4841], ['law', 2464, 4818], ['death', 2208, 4830], ['blood', 1720, 3827],
+  ['soul', 1815, 3856], ['wrath', 2335, 4826], ['astral', 2156, 3864]];
+function m7RuneAltar(gx, gy) {
+  let best = 'air', bd = 1e18;
+  for (const [k, x, y] of M7_RUNES) { const d = (x - gx) * (x - gx) + (y - gy) * (y - gy); if (d < bd) { bd = d; best = k; } }
+  return Math.max(0, RC.findIndex(r => r.k === best));
+}
+
+/* ---- scenery into objects: the kinds the skills already know, by menu verb and name ---- */
+function m7Classify(ud) {
+  const n = ud.name.toLowerCase(), ops = ud.ops.map(o => o.toLowerCase()), has = re => ops.some(o => re.test(o));
+  if (has(/^chop/)) return { t: 0, k: /magic/.test(n) ? 5 : /yew/.test(n) ? 4 : /mahogany/.test(n) ? 6 : /maple/.test(n) ? 3 : /willow|teak/.test(n) ? 2 : /oak/.test(n) ? 1 : 0, dyn: 1 };
+  if (has(/^mine$/)) {
+    const k = /essence/.test(n) ? 9 : /runite|rune/.test(n) ? 6 : /adamant/.test(n) ? 5 : /mithril/.test(n) ? 4 : /coal/.test(n) ? 3 : /gold/.test(n) ? 8 : /silver/.test(n) ? 7 : /iron/.test(n) ? 2 : /tin/.test(n) ? 1 : /copper/.test(n) ? 0 : -1;
+    if (k >= 0) return { t: 1, k, dyn: 1 };
+  }
+  if (/furnace/.test(n) && has(/^smelt/)) return { t: 3 };
+  if (/anvil/.test(n) && has(/^smith/)) return { t: 4 };
+  if (has(/^cook$/)) return { t: 6 };
+  if (has(/^(bank|deposit)/) || (/bank chest/.test(n) && has(/^use$/))) return { t: 7 };
+  if (has(/^exchange$/)) return { t: 10 };
+  if (has(/^pray(-at)?$/)) return { t: 8 };
+  if (has(/^craft-rune$/)) return { t: 11, k: m7RuneAltar(ud.gx, ud.gy) };
+  if (has(/^steal-from$/)) return { t: 14, k: /baker|cake/.test(n) ? 0 : /silk/.test(n) ? 1 : /fur/.test(n) ? 2 : /silver/.test(n) ? 3 : /spice/.test(n) ? 4 : /gem/.test(n) ? 5 : 0 };
+  if (/^allotment$/.test(n)) return { t: 15, k: 0 };
+  if (/^herbs? patch$/.test(n)) return { t: 15, k: 1 };
+  if (/^tree patch$/.test(n)) return { t: 15, k: 2 };
+  return null;
+}
+function m7OnRegion(R) {
+  R.m7o = R.objs.map(ud => {
+    const s = ud.spec, cx = ud.gx + (ud.w - 1) / 2, cz = -(ud.gy + (ud.l - 1) / 2);
+    const o = ud.obj = { t: s.t, k: s.k || 0, x: cx, z: cz, y: MAP07.yAt(ud.plane, cx, cz), key: m7Key(ud.gx, ud.gy, ud.plane), n: ud.name, m7: 1, m7r: ud, pl: ud.plane,
+      noMark: 1, l7s: 1, no7: 1, vis: ud.vis || null };
+    if (!objIndex.has(o.key)) objIndex.set(o.key, o);
+    if (depleted.has(o.key) && o.vis) o.vis(1);   // a node felled while the square was away comes back felled
+    return o;
+  });
+  nearDirty = 1; m7MapDirty = 1; wmDirty = 1; osMapDirty = 1;
+}
+function m7OnUnload(R) {
+  for (const o of (R.m7o || [])) if (objIndex.get(o.key) === o) objIndex.delete(o.key);
+  nearDirty = 1; m7MapDirty = 1; osMapDirty = 1;
+}
+function m7Stream() { if (MAP07.ready()) MAP07.update(Math.round(focus.x), -Math.round(focus.z), m7Reach()); nearDirty = 1; }
+function m7Near() {
+  for (const R of MAP07.regions.values()) if (R.m7o) for (const o of R.m7o) if (Math.abs(o.x - focus.x) <= 96 && Math.abs(o.z - focus.z) <= 96) nearObjs.push(o);
+  for (const o of m7Props) if (!o.m7item) nearObjs.push(o);   // a prop item is picked from m7Props; the minimap draws no dot for it
+}
+/* a generic piece of scenery with a menu: made the moment it is pointed at, one record a placement */
+function m7LocObj(ud) {
+  if (ud.obj) return ud.obj;
+  const cx = ud.gx + (ud.w - 1) / 2, cz = -(ud.gy + (ud.l - 1) / 2);
+  return ud.obj = { m7loc: 1, ud, m7r: ud, n: ud.name, name: ud.name, x: cx, z: cz, y: MAP07.yAt(ud.plane, cx, cz), pl: ud.plane };
+}
+function m7Pick(ray) {
+  const o = ray.origin, d = ray.direction;
+  let bestT = 1e9, best = null;
+  const test = (x, y, z, r, obj) => {
+    const ox = x - o.x, oy = y - o.y, oz = z - o.z, proj = ox * d.x + oy * d.y + oz * d.z;
+    if (proj < 0 || proj > bestT) return;
+    const dx = ox - d.x * proj, dy = oy - d.y * proj, dz = oz - d.z * proj;
+    if (dx * dx + dy * dy + dz * dz < r * r) { bestT = proj; best = obj; }
+  };
+  for (const n of npcs) if (!n.dead && n.mesh.visible) test(n.rx + (n.vo || 0), n.ry + (n.h7 ? n.h7 * 0.5 : 0.8), n.rz - (n.vo || 0), n.h7 ? 0.3 + 0.45 * n.t.sz : (n.t.sz || 1) * 1.15, n);
+  for (const R of remotes.values()) if (m7Shown(R.pl)) test(R.rx, R.ry + 0.75, R.rz, 0.9, R);
+  for (const dr of drops) if (m7Shown(dr.pl)) test(dr.x, dr.y + 0.2, dr.z, 0.6, dr);
+  for (const L of pickLists) for (const f of L) test(f.x, f.y + 0.6, f.z, 1.1, f);
+  for (const p of m7Props) if (!p.dep7 && m7Shown(p.pl)) test(p.x, p.y + 0.3, p.z, 0.9, p);
+  const hit = MAP07.pick(ray, m7ViewPlane, bestT);
+  return hit ? m7LocObj(hit.ud) : best;
+}
+/* where the 2007 client lets a hand reach a loc: on or beside a wall piece or floor decoration; square beside an object's
+   footprint, with no wall between. Anything else (a monster, a drop, a fishing spot) within reach and in sight. */
+function m7AtLoc(ud, x, z) {
+  if (ud.plane !== P.plane) return false;
+  const gx = x, gy = -z, x0 = ud.gx, y0 = ud.gy, x1 = x0 + ud.w - 1, y1 = y0 + ud.l - 1;
+  const dx = gx < x0 ? x0 - gx : gx > x1 ? gx - x1 : 0, dy = gy < y0 ? y0 - gy : gy > y1 ? gy - y1 : 0;
+  if (ud.type <= 9 || ud.type === 22) return Math.max(dx, dy) <= 1;
+  if (dx + dy !== 1) return false;
+  return !MAP07.wallBetween(P.plane, gx, gy, clamp(gx, x0, x1) - gx, clamp(gy, y0, y1) - gy);
+}
+function m7TaskReach(t, o, ox, oz, reach, edge) {   // true while walking there (or refused), false once in reach
+  let ok;
+  if (o.m7r) ok = (x, z) => m7AtLoc(o.m7r, x, z);
+  else if (o.npc || o.remote) {
+    if ((o.pl | 0) !== P.plane) { say("You can't reach that.", 'bad'); P.task = null; return true; }
+    const hi = Math.max(reach, edge);
+    ok = (x, z) => { const g = chebDist(x, z, ox, oz); return g >= edge && g <= hi && hasLos(x, z, ox, oz); };
+  } else ok = (x, z) => { const g = chebDist(x, z, ox, oz); return g <= reach && (g === 0 || hasLos(x, z, Math.round(ox), Math.round(oz))); };
+  if (ok(P.tx, P.tz)) return false;
+  if (!P.path.length) {
+    const p = findPath(P.tx, P.tz, Math.round(ox), Math.round(oz), 0, ok);
+    if (!p) { say("You can't reach that.", 'bad'); P.task = null; return true; }
+    if (p.length) P.path = p;
+  }
+  return true;
+}
+
+/* ---- the spawns: monsters, townsfolk and the fishing spots, off spawns.json, near you ---- */
+/* the bestiary row a Gielinor name answers to, if any: it lends loot, slayer family, aggression and styles; the cache
+   lends the stats. Aliases catch the few names the two spell differently. */
+let M7_NAMES = null;
+const M7_ALIAS = { rat: 'rat', 'giant spider': 'spider', spider: 'smallspider', scorpion: 'smallscorpion' };
+function m7Base(name) {
+  if (!M7_NAMES) {
+    M7_NAMES = new Map();
+    for (const t of NPC_TYPES) if (!M7_NAMES.has(t.n.toLowerCase())) M7_NAMES.set(t.n.toLowerCase(), t);
+    for (const a in M7_ALIAS) M7_NAMES.set(a, NPC_BY[M7_ALIAS[a]]);
+  }
+  return M7_NAMES.get(name.toLowerCase()) || null;
+}
+/* monsters the bestiary never met drop by level from the shared tables; the wiki keeps no table this game could map */
+LOOT.g7a = { den: 128, main: [['coins', 30, 1, 12], ['herb', 4], ['seed', 6], ['gem', 1]] };
+LOOT.g7b = { den: 128, main: [['coins', 32, 10, 80], ['herb', 8], ['useed', 3], ['gem', 2], ['rdt', 1]] };
+LOOT.g7c = { den: 128, main: [['coins', 32, 60, 400], ['herb', 10], ['rseed', 3], ['gem', 3], ['rdt', 3]] };
+const M7_T = new WeakMap();   // cache def -> type
+function m7Type(def) {
+  let t = M7_T.get(def);
+  if (t) return t;
+  const name = MAP07.clean(def.name), fight = MAP07.opsOf(def).includes('Attack'), size = def.size || 1, base = fight ? m7Base(name) : null;
+  let lv = def.combatLevel | 0;
+  if (lv > 999)   // an event copy labelled 1337: the level its own stats make, else the bestiary's
+    lv = def.hitpoints > 0 ? Math.floor(0.25 * ((def.defence | 0) + def.hitpoints) + 0.325 * Math.max((def.attack | 0) + (def.strength | 0), 1.5 * (def.magic | 0), 1.5 * (def.ranged | 0))) || 1 : base ? base.lv : 0;
+  t = base ? Object.create(base) : { k: lv >= 100 ? 'g7c' : lv >= 40 ? 'g7b' : 'g7a', db: 0, abon: 0, sbon: 0, max: null, at: 'm', rng: 1, spd: 4, mspd: 1, mag: 1, mdb: 0, psn: 0, lv: Math.max(1, lv) };
+  if (base) t.base = base.base || base;
+  Object.assign(t, { n: name, sz: size, big: size >= 2 ? 1 : 0, fp7: (size - 1) >> 1, peace7: fight ? 0 : 1 });
+  if (lv > 0) t.lv = lv;
+  if (def.hitpoints > 0) t.hp = def.hitpoints; else if (!base) t.hp = Math.max(1, lv);
+  for (const [f, c] of [['atk', 'attack'], ['str', 'strength'], ['def', 'defence'], ['mag', 'magic']]) {
+    if (def[c] !== undefined) t[f] = def[c]; else if (!base) t[f] = f === 'mag' ? 1 : Math.max(1, lv);
+  }
+  if (!base && def.params && def.params[10] !== undefined) t.sbon = def.params[10];
+  if (!fight) { t.town = 1; t.flee = 1; }
+  M7_T.set(def, t);
+  return t;
+}
+function m7Npcs() {
+  for (let i = npcs.length - 1; i >= 0; i--) { const n = npcs[i]; if (Math.abs(n.tx - P.tx) > M7_DESPAWN_R || Math.abs(n.tz - P.tz) > M7_DESPAWN_R) removeNpc(n); }
+  for (let i = m7Props.length - 1; i >= 0; i--) { const p = m7Props[i]; if (Math.abs(p.x - P.tx) > M7_DESPAWN_R || Math.abs(p.z - P.tz) > M7_DESPAWN_R) m7PropGone(i); }
+  const gx = P.tx, gy = -P.tz;
+  let room = M7_CAP - npcs.length;
+  for (const R of MAP07.regions.values()) {
+    if (!R.ready || !R.spawns || !R.spawns.length || room <= 0) continue;
+    const x0 = R.sqX * 64, y0 = R.sqY * 64;
+    if (gx < x0 - M7_SPAWN_R || gx > x0 + 63 + M7_SPAWN_R || gy < y0 - M7_SPAWN_R || gy > y0 + 63 + M7_SPAWN_R) continue;
+    for (const s of R.spawns) {
+      if (room <= 0) break;
+      if (Math.abs(s.x - gx) > M7_SPAWN_R || Math.abs(s.y - gy) > M7_SPAWN_R) continue;
+      const key = 'g' + s.i;
+      if (m7Live.has(key) || npcDead.has(key)) continue;
+      if (m7Spawn(s, key)) room--;
+    }
+  }
+  m7Items();
+}
+function m7Spawn(s, key) {
+  const def = MAP07.npcDefOf(s.id, s.as), name = def && MAP07.clean(def.name);
+  if (!def || !def.models || !name || name === 'null') return 0;
+  const pl = s.plane | 0, size = def.size || 1;
+  if (/fishing spot/i.test(name)) return m7Spot(s, key, def, name, pl);
+  const t = m7Type(def), [sx, sy] = MAP07.snapWalkable(pl, s.x, s.y, 3), fp = (size - 1) >> 1, x = sx + fp, z = -(sy + fp);
+  const kh = hashSeed(key), mesh = new THREE.Group(), still = def.walkingAnimation === undefined || def.walkingAnimation === def.standingAnimation ? 1 : 0;
+  scene.add(mesh);
+  let dest = null;
+  for (let b = 0; b < 12 && !dest && !still; b++) dest = wanderAt(kh, tickN - b, x, z);   // adopt the leg the room is already walking
+  const n = { npc: 1, t, key, name: t.n, tx: x, tz: z, px: x, pz: z, rx: x, rz: z, ry: m7Y(x, z, pl), home: { x, z }, hp: t.hp, maxhp: t.hp, face: (kh & 3) * PI / 2, faceT: (kh & 3) * PI / 2,
+    mesh, atkT: 0, atkStyle: 'm', limbs: null, walkPhase: 0, styleIx: 0, styleN: 0, cd: 2 + (hash2(x, z, S) & 3), target: null, dead: 0, mv: 0,
+    pw: m7Wild(x, z) / 26, kh, dest, owner: null, lastNet: 0, netAct: 0, pl, c7: s.id, ops7: MAP07.opsOf(def), vo: size % 2 ? 0 : 0.5, h7: 0, fig: null, still };
+  npcs.push(n); m7Live.add(key); npcFoot(n);
+  MAP07.npcFigure(def).then(fig => {
+    if (!fig) return;
+    if (n.dead || npcs.indexOf(n) < 0) return fig.ent.dispose();
+    n.fig = fig; n.h7 = fig.height; if (fig.still) n.still = 1;
+    mesh.add(fig.mesh);
+  }, e => console.warn('[seedworld] figure ' + s.id, e));
+  return 1;
+}
+/* after the lunge and the bob have placed the group: an even-sized body centres between tiles. A hundred-odd figures
+   re-posing every frame is most of Gielinor's frame, so the pose is spent only where it is seen: relit close by, posed
+   on its old normals at range, held off screen or far away (its clock still runs, so it never snaps). */
+const m7Frus = new THREE.Frustum(), m7PM = new THREE.Matrix4(), m7Sph = new THREE.Sphere();
+let m7FrusF = -1;
+function m7Figure(n, dt) {
+  if (n.vo) { n.mesh.position.x += n.vo; n.mesh.position.z -= n.vo; }
+  const d = Math.max(Math.abs(n.tx - P.tx), Math.abs(n.tz - P.tz)), moving = n.tx !== n.px || n.tz !== n.pz;
+  let lod = d > 40 ? 2 : d <= 12 ? 0 : 1;
+  if (lod < 2) {
+    if (m7FrusF !== hoverFrame) { m7FrusF = hoverFrame; m7Frus.setFromProjectionMatrix(m7PM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)); }
+    m7Sph.center.copy(n.mesh.position); m7Sph.center.y += n.h7 / 2; m7Sph.radius = Math.max(1, n.h7) * Math.max(1, n.t.sz);
+    if (!m7Frus.intersectsSphere(m7Sph)) lod = 2;
+  }
+  MAP07.animate(n.fig, moving, dt * 1000, lod);
+}
+/* a fishing spot is an object to the Fishing skill (net or harpoon water) that happens to wear an npc's rippling model */
+function m7Spot(s, key, def, name, pl) {
+  const ops = MAP07.opsOf(def).map(o => o.toLowerCase()), x = s.x, z = -s.y;
+  const o = { t: 2, k: ops.some(q => /harpoon|cage/.test(q)) ? 1 : 0, x, z, y: m7Y(x, z, pl), key: m7Key(s.x, s.y, pl), n: name, m7: 1, pl, noMark: 1, prop: key, dep7: 0, fig: null, g: new THREE.Group() };
+  if (objIndex.has(o.key)) return 0;
+  o.vis = st => { o.dep7 = st ? 1 : 0; };
+  o.g.position.set(x, o.y, z); scene.add(o.g);
+  m7Props.push(o); m7Live.add(key); objIndex.set(o.key, o); nearDirty = 1;
+  if (depleted.has(o.key)) o.vis(1);
+  MAP07.npcFigure(def).then(fig => { if (!fig) return; if (m7Props.indexOf(o) < 0) return fig.ent.dispose(); o.fig = fig; o.g.add(fig.mesh); }, () => {});
+  return 1;
+}
+function m7PropGone(i) {
+  const o = m7Props.splice(i, 1)[0];
+  scene.remove(o.g); if (o.fig) o.fig.ent.dispose();
+  m7Live.delete(o.prop);
+  if (objIndex.get(o.key) === o) objIndex.delete(o.key);
+  nearDirty = 1;
+}
+/* the hand-placed ground items (a pot in the castle kitchen): they lie until taken, and are back a minute later */
+let M7_ITEMS = null;
+function m7ItemId(cid) {
+  const d = MAP07.defSync('item', cid);
+  if (!d) return null;
+  if (!M7_ITEMS) { M7_ITEMS = new Map(); for (const id in ITEMS) { const k = ITEMS[id].name.toLowerCase(); if (!M7_ITEMS.has(k)) M7_ITEMS.set(k, id); } }
+  return M7_ITEMS.get(MAP07.clean(d.name).toLowerCase()) || null;
+}
+function m7Items() {
+  for (const s of MAP07.itemSpawns()) {
+    if (Math.abs(s.x - P.tx) > M7_SPAWN_R || Math.abs(-s.y - P.tz) > M7_SPAWN_R || !MAP07.regionAt(s.x, s.y)) continue;
+    let st = m7ItemState.get(s.i);
+    if (!st) m7ItemState.set(s.i, st = { d: null, due: 0 });
+    if (st.d && drops.includes(st.d)) continue;
+    if (st.d) { st.d = null; st.due = tickN + 100; }
+    if (tickN < st.due) continue;
+    const id = m7ItemId(s.id);
+    if (!id) { m7ItemProp(s); continue; }
+    dropItem(id, 1, s.x, -s.y, 10000000, 0, s.plane | 0);
+    st.d = drops[drops.length - 1];
+  }
+}
+
+/* one this game carries no item for (the kitchen's pot and jug) lies as the map shows it, to be looked at and left */
+function m7ItemProp(s) {
+  const key = 'i' + s.i, d = MAP07.defSync('item', s.id);
+  if (m7Live.has(key) || !d) return;
+  const pl = s.plane | 0, x = s.x, z = -s.y, name = MAP07.clean(d.name) || 'Item';
+  const o = { m7item: 1, n: name, name, x, z, y: m7Y(x, z, pl), pl, prop: key, dep7: 0, fig: null, ex: d.examine, g: new THREE.Group() };
+  o.g.position.set(x, o.y + 0.01, z); o.g.rotation.y = ((x * 7 + z * 13) & 7) * PI / 4;   // the drops' own scatter
+  scene.add(o.g); m7Props.push(o); m7Live.add(key);
+  MAP07.itemGeo(s.id).then(g => { if (g && m7Props.indexOf(o) >= 0) o.g.add(MAP07.itemMesh(g)); }, () => {});
+}
+const m7ItemOpts = o => [{ t: 'Take', o: o.n, cls: 'itm', f: act(o, () => say('You have no use for the ' + o.n.toLowerCase() + '.')) },
+  { t: 'Examine', o: o.n, cls: 'itm', f: () => say(o.ex || 'It\'s ' + (/^[aeiou]/i.test(o.n) ? 'an ' : 'a ') + o.n.toLowerCase() + '.') }];
+
+/* ---- menus: a Gielinor figure's and a loc's own verbs, each put to the game's own work ---- */
+const M7_SHOPS = new Map(('shop keeper:general:1|shop assistant:general:1|bob:smith:0|zaff:magic:1|aubury:magic:1|lowe:archery:1|horvik:armour:1|thessalia:craft:1|' +
+  'gerrant:food:0|harry:food:0|wydin:pub:0|betty:magic:0|gaius:weapon:1|wayne:armour:1|cassie:armour:0|flynn:weapon:0|brian:weapon:0|grum:craft:0|' +
+  'zeke:weapon:1|louie legs:armour:1|ranael:armour:1|dommik:craft:0|rommik:craft:0|peksa:armour:0|jatix:craft:1|drogo dwarf:smith:0|nurmof:smith:1|' +
+  'ali morrisane:general:1|gem trader:craft:1|lundail:magic:2|hickton:archery:1|bow and arrow salesman:archery:2|armour salesman:armour:2|' +
+  'tribal weapon salesman:weapon:1|arhein:general:1|baker:pub:0|silver merchant:craft:1|spice seller:pub:1|fur trader:craft:1|gem merchant:craft:1|' +
+  'fish monger:food:1|fishmonger:food:1|greengrocer:pub:0|tea seller:pub:0|bartender:pub:0|barman:pub:0|ali the barman:pub:0|thora the barkeep:pub:0|' +
+  'oziach:armour:2|sigmund the merchant:general:2|skulgrimen:weapon:2|yrsa:craft:1|wizard akutha:magic:1|wizard sinina:magic:1|mage of zamorak:magic:2|' +
+  'sarah:craft:0|frincos:magic:1|aemad:general:1|kortan:general:1|fayeth:general:0|valaine:armour:1|scavvo:weapon:1|herquin:craft:1|heskel:craft:0|' +
+  'dantaera:craft:0|gulluck:weapon:2|rometti:craft:1|jiminua:general:1|obli:general:1|fernahei:food:1|vanessa:craft:0|richard:craft:0|tostig:pub:0')
+  .split('|').map(r => { const [n, k, t] = r.split(':'); return [n, [k, +t]]; }));
+function m7Shop(name) {
+  const k = name.toLowerCase();
+  const row = M7_SHOPS.get(k) || (/bar(man|maid|tender|keep)|inn/.test(k) ? ['pub', 0] : /fish/.test(k) ? ['food', 1] : /gem|silver|craft|jewel/.test(k) ? ['craft', 1]
+    : /smith|pick|mining/.test(k) ? ['smith', 1] : /armou?r|shield|helm/.test(k) ? ['armour', 1] : /weapon|sword|scimitar|axe|mace/.test(k) ? ['weapon', 1]
+    : /bow|arrow|fletch|rang/.test(k) ? ['archery', 1] : /magic|rune|staff|wizard|mage/.test(k) ? ['magic', 1] : ['general', 1]);
+  const s = SHOP[row[0]];
+  return { t: 5, k: s.i, tier: row[1], shopN: s.n + ' — ' + name, browse: 'You browse ' + name + (/s$/.test(name) ? "' " : "'s ") + 'wares.' };
+}
+const M7_SLAYER = { turael: 0, spria: 0, mazchna: 1, achtryn: 1, vannaka: 2, krystilia: 2, chaeldar: 3, nieve: 4, steve: 4, duradel: 4, konar: 4, 'konar quo maten': 4 };
+const M7_ESSENCE = new Set(['aubury', 'sedridor', 'distentor', 'cromperty', 'brimstail']);
+const M7_ROUTES = [[[3029, 3217, 'Port Sarim'], [2956, 3146, 'Karamja'], 30], [[3048, 3234, 'Port Sarim'], [2834, 3335, 'Entrana'], 0]];   // [one end, the other, fare]
+const M7_SAIL = { 'captain tobias': 0, 'seaman lorris': 0, 'seaman thresnor': 0, 'customs officer': 0, 'monk of entrana': 1 };
+function m7Sail(n) {   // the far end of the boat's route from wherever you stand
+  const [a, b, fee] = M7_ROUTES[M7_SAIL[n.name.toLowerCase()]], to = Math.hypot(a[0] - P.tx, a[1] + P.tz) > Math.hypot(b[0] - P.tx, b[1] + P.tz) ? a : b;
+  if (fee && coins() < fee) return say('The trip costs ' + fee + ' coins.', 'bad');
+  if (fee) { invRemove('coins', fee); gpSunk += fee; }
+  closeOverlays(); teleport(to[0], -to[1], 300, 0);
+  say('You sail to ' + to[2] + '.', 'lv');
+}
+const M7_CHAT = ['Hello there, adventurer.', 'Nice weather we\'re having.', 'I\'m busy right now.', 'Can\'t stop, too busy.', 'Have you been to Varrock lately?', 'Mind how you go.', 'Good day to you.'];
+function m7NpcOpts(n) {
+  const out = [], name = n.name, nm = name.toLowerCase(), t = n.t, ops = n.ops7;
+  const ui = (fn, reach) => () => { flashTarget(n, 0); P.task = { k: 'ui', o: n, fn, reach: reach || 2 }; };   // across a counter: the bankers and keepers stand behind theirs
+  for (const op of ops) {
+    const low = op.toLowerCase();
+    if (low === 'attack') out.push({ t: 'Attack', o: name + ' <span class="lvl">(level ' + t.lv + ')</span>', f: act(n, 'attack', 1) });
+    else if (low === 'pickpocket') out.push({ t: 'Pickpocket', o: name, f: t.pick ? act(n, 'pick') : ui(() => say('You find nothing worth taking.'), 1) });
+    else if (low === 'bank') out.push({ t: 'Bank', o: name, f: ui(() => openBank()) });
+    else if (low === 'exchange') out.push({ t: 'Exchange', o: name, f: ui(() => openGE()) });
+    else if (low === 'trade') out.push({ t: 'Trade', o: name, f: ui(() => startShop(Object.assign({ x: n.tx, z: n.tz }, m7Shop(name)))) });
+    else if (low === 'assignment' && M7_SLAYER[nm] !== undefined) out.push({ t: 'Assignment', o: name, f: ui(() => slayerTalk({ t: 12, k: M7_SLAYER[nm], n: name, x: n.tx, z: n.tz })) });
+    else if (/^hair/.test(low)) out.push({ t: op, o: name, f: ui(() => openBarber()) });
+    else if (low === 'teleport' && M7_ESSENCE.has(nm)) out.push({ t: 'Teleport', o: name, f: ui(() => tpTo(2911, -4832, 'to the rune essence mine', TP_CAP_ITEM, 0)) });
+    else if (M7_SAIL[nm] !== undefined && /travel|pay|take-boat|charter|sail|port|karamja|entrana/.test(low)) out.push({ t: op, o: name, f: ui(() => m7Sail(n)) });
+    else if (low === 'collect' || low === 'history' || low === 'sets' || low === 'rewards') continue;
+    else if (low === 'talk-to') out.push({ t: 'Talk-to', o: name, f: ui(() => say(name + ': ' + (M7_SLAYER[nm] !== undefined ? 'Need a task? Ask me for an assignment.' : M7_CHAT[n.kh % M7_CHAT.length]))) });
+    else out.push({ t: op, o: name, f: ui(() => say('Nothing interesting happens.')) });
+  }
+  out.push({ t: 'Examine', o: name, f: () => say(t.peace7 ? name + '.' : name + ', level ' + t.lv + ' (hitpoints ' + n.hp + '/' + n.maxhp + ').') });
+  return out;
+}
+const m7Say = (op, name) => 'You ' + op.toLowerCase().replace(/-/g, ' ') + ' the ' + name.toLowerCase() + '.';
+function m7LocOpts(o) {
+  const ud = o.ud, out = [];
+  for (const op of ud.ops) {
+    const low = op.toLowerCase();
+    if (ud.door && /^(open|close|shut)$/.test(low)) out.push({ t: op, o: ud.name, f: act(o, () => m7Door(ud, op)) });
+    else if (MAP07.transport(ud, op, P.tx, -P.tz)) out.push({ t: op, o: ud.name, f: act(o, () => m7Travel(ud, op)) });
+    else if (/^climb|floor/.test(low)) out.push({ t: op, o: ud.name, f: act(o, () => m7Climb(ud, op)) });
+    else out.push({ t: op, o: ud.name, f: act(o, () => say('Nothing interesting happens.')) });
+  }
+  out.push({ t: 'Examine', o: ud.name, f: () => say('It\'s ' + (/^[aeiou]/i.test(ud.name) ? 'an ' : 'a ') + ud.name.toLowerCase() + '.') });
+  return out;
+}
+function m7Door(ud, op) {   // both leaves of a double door swing together; the state is this client's own (a door never blocks)
+  const partner = MAP07.doorPartner(ud);
+  MAP07.toggleDoor(ud);
+  if (partner) MAP07.toggleDoor(partner);
+  sfx(62, 0.7); hoverObj = undefined;
+  say(m7Say(op, ud.name));
+}
+function m7Travel(ud, op) {   // stairs, ladders, trapdoors, cave mouths, the ditch: the transport table names the landing
+  const tr = MAP07.transport(ud, op, P.tx, -P.tz);
+  if (!tr) return m7Climb(ud, op);
+  const go = () => { closeOverlays(); teleport(tr.x, -tr.y, 200, tr.p); P.faceT = Math.atan2(tr.x - P.tx, -tr.y - P.tz); say(m7Say(op, ud.name)); };
+  if (m7Wild(tr.x, -tr.y) && !m7Wild(P.tx, P.tz) && OPT.pvpWarn && !pvpAck) return askPvp(() => { pvpAck = 1; go(); });   // the border asks once, as the walk does
+  go();
+}
+function m7Climb(ud, op) {
+  const to = MAP07.climbTarget(ud, op, P.plane);
+  if (to === null) return say("You can't go that way from here.");
+  teleport(P.tx, P.tz, 100, to);
+  say(m7Say(op, ud.name));
+}
+
+/* ---- the world, frame by frame: floors, the spots' ripples, ground items in their own models ---- */
+function m7Frame(dt) {
+  const vp = OPT.hideRoofs || P.plane > 0 || MAP07.coveredAt(P.plane, P.tx, -P.tz) ? P.plane : 3;   // under a roof, upstairs, or "Hide all roofs" (the client's roof removal: always), the floors above lift away
+  if (vp !== m7ViewPlane) { m7ViewPlane = vp; MAP07.setViewPlane(vp); }
+  if (P.plane !== m7PlaneWas) { m7PlaneWas = P.plane; mapOX = 1e9; mapRow = MW; }
+  if (P.snap7 && MAP07.regionAt(P.tx, -P.tz)) {   // a landing square is up: step off whatever the tile holds
+    P.snap7 = 0;
+    const [x, y] = MAP07.snapWalkable(P.plane, P.tx, -P.tz, 8);
+    if (x !== P.tx || y !== -P.tz) placePlayer(x, -y);
+  }
+  for (const p of m7Props) {
+    p.g.visible = !p.dep7 && m7Shown(p.pl);
+    if (p.fig && p.g.visible && Math.abs(p.x - P.tx) + Math.abs(p.z - P.tz) < 72) MAP07.animate(p.fig, 0, dt * 1000);
+  }
+  const seen = new Set();
+  for (const d of drops) {
+    if (Math.abs(d.x - P.rx) > 56 || Math.abs(d.z - P.rz) > 56) continue;
+    let m = m7DropMeshes.get(d);
+    if (!m) {
+      const cid = MAP07.itemFor(ITEMS[d.id].name);
+      if (cid === null) continue;   // still resolving, or no cache look: the drawn pip stands in
+      if (d.m7g === undefined) { d.m7g = null; MAP07.itemGeo(cid).then(g => { d.m7g = g || 0; }); }
+      if (!d.m7g) continue;
+      m = MAP07.itemMesh(d.m7g); scene.add(m); m7DropMeshes.set(d, m); d.m7m = 1;
+      m.rotation.y = ((d.x * 7 + d.z * 13) & 7) * PI / 4;
+    }
+    seen.add(d);
+    m.position.set(d.x, m7Y(d.x, d.z, d.pl) + 0.01, d.z);
+    m.visible = m7Shown(d.pl);
+  }
+  for (const [d, m] of m7DropMeshes) if (!seen.has(d)) { scene.remove(m); m7DropMeshes.delete(d); d.m7m = 0; }
+}
+/* the minimap: the loaded squares' own tile colours with their walls white and doors red, the world map beyond them */
+function m7MapStale() { if (!m7MapDirty) return false; m7MapDirty = 0; return true; }
+function m7MapRow(data, j, ox, z) {
+  const gy = -Math.round(z);
+  for (let i = 0; i < MW; i++) {
+    const gx = Math.round(ox + i * MSTEP), p = (j * MW + i) * 4;
+    let c = MAP07.tileRGB(P.plane, gx, gy), k = 1;
+    if (c >= 0) { const wb = MAP07.wallBits(P.plane, gx, gy); if (wb & 15) c = wb & 16 ? 0xc8321e : 0xeeeeee; }
+    else { c = MAP07.worldRGB(gx, gy); k = 0.55; if (c < 0) { c = 0x0c1016; k = 1; } }
+    data[p] = (c >> 16 & 255) * k; data[p + 1] = (c >> 8 & 255) * k; data[p + 2] = (c & 255) * k; data[p + 3] = 255;
+  }
+}
+/* the world map: the 2007 composite for the continent, the squares themselves once you are close enough to read walls */
+function m7WmDraw() {
+  const W = wmW, H = wmH, s = wmZoom / WM_TPP, px = wx => (wx - wmCx) * s + W / 2, pz = wz => (wz - wmCz) * s + H / 2;
+  wmCtx.imageSmoothingEnabled = false;
+  wmCtx.fillStyle = '#0c1016'; wmCtx.fillRect(0, 0, W, H);
+  const im = MAP07.worldImage(), WI = MAP07.WORLD_IMG;
+  if (im) wmCtx.drawImage(im, px(WI.gx0 - 0.5), pz(-WI.gy1 + 0.5), im.naturalWidth * WI.tpp * s, im.naturalHeight * WI.tpp * s);
+  else wmDirty = 1;
+  if (s >= 1.5) {
+    const list = [];
+    for (let sx = Math.floor((wmCx - W / 2 / s) / 64); sx <= Math.floor((wmCx + W / 2 / s) / 64); sx++)
+      for (let sy = Math.floor(-(wmCz + H / 2 / s) / 64); sy <= Math.floor(-(wmCz - H / 2 / s) / 64); sy++) if (sx >= 0 && sy >= 0) list.push([sx, sy, Math.hypot(sx * 64 + 32 - wmCx, sy * 64 + 32 + wmCz)]);
+    list.sort((a, b) => a[2] - b[2]);
+    for (const [sx, sy] of list) {
+      const c = MAP07.squareCanvas((sx << 8) | sy);
+      if (c) wmCtx.drawImage(c, Math.floor(px(sx * 64 - 0.5)), Math.floor(pz(-(sy * 64 + 63) - 0.5)), Math.ceil(64 * s) + 1, Math.ceil(64 * s) + 1);
+    }
+  }
+  if (wmZoom >= 2) {
+    wmCtx.font = 'bold ' + Math.round(clamp(9 + wmZoom * 0.4, 10, 16)) + 'px system-ui, sans-serif';
+    wmCtx.textAlign = 'center'; wmCtx.textBaseline = 'middle';
+    for (const [n, x, y, , city] of M7_TOWNS) {
+      const tx = px(x), ty = pz(-y);
+      if (tx < -90 || ty < -20 || tx > W + 90 || ty > H + 20) continue;
+      wmCtx.lineWidth = 3; wmCtx.strokeStyle = 'rgba(0,0,0,.85)'; wmCtx.strokeText(n, tx, ty);
+      wmCtx.fillStyle = city ? '#ffd34a' : '#f4ead0'; wmCtx.fillText(n, tx, ty);
+    }
+  }
+  if (deathSpot) wmIcon('skull', px(deathSpot.x), pz(deathSpot.z), 10);
+  const yx = px(P.rx), yy = pz(P.rz);
+  if (yx > -18 && yy > -18 && yx < W + 18 && yy < H + 18) drawYou(wmCtx, yx, yy, P.face, 8);
+}
+function m7Preview() {   // the world select shows Gielinor's own map instead of a seed's preview
+  welCtx.fillStyle = '#26364a'; welCtx.fillRect(0, 0, WPX, WPX);
+  const im = MAP07.worldImage();
+  if (im) { const h = im.naturalHeight * WPX / im.naturalWidth; welCtx.imageSmoothingEnabled = true; welCtx.drawImage(im, 0, (WPX - h) / 2, WPX, h); }
+  else setTimeout(() => { if (!started && isMapSeed(curSeed())) m7Preview(); }, 250);
+  el('welStat').innerHTML = '<b>Gielinor</b> &nbsp;·&nbsp; the 2007 map, square for square &nbsp;·&nbsp; not procedural';
+}
+
+/* ---- the switch ---- */
+function m7Ready() {
+  if (!m7Inited) {
+    m7Inited = 1;
+    MAP07.init({ scene, fogCenter, hooks: { classify: m7Classify, onRegion: m7OnRegion, onUnload: m7OnUnload, onSquare: () => { wmDirty = 1; } } });
+    MAP07.setBrightness(OPT.brightness);
+  }
+  return MAP07.load();
+}
+function m7Mode(on) {
+  on = on ? 1 : 0;
+  const flip = on !== M7;
+  if (flip || on) {   // every entry starts clean: the last world's figures, spots and item models go
+    for (const n of npcs) if (n.fig) { n.fig.ent.dispose(); n.fig = null; }
+    while (m7Props.length) m7PropGone(m7Props.length - 1);
+    for (const m of m7DropMeshes.values()) scene.remove(m);
+    m7DropMeshes.clear(); m7Live.clear(); m7ItemState.clear();
+  }
+  M7 = on;
+  if (m7Inited) MAP07.setActive(on);
+  water.visible = !on;
+  player.scale.setScalar(on ? M7_FIG : 1);
+  P.plane = 0; m7ViewPlane = 3; m7PlaneWas = -1;
+  if (on) MAP07.setViewPlane(3);
+  if (flip) { MSPAN = on ? 120 : 360; MSTEP = MSPAN / MW; wmZoom = on ? 12 : 10; }   // a tile a pixel on Gielinor's minimap, as the 2007 one reads
+  mapOX = 1e9; mapRow = MW; mapImg = null;
+  applyOpts();   // the fog closes where the squares stop
+}
+function m7Arrive() {
+  ORIGIN.x = M7_HOME[0]; ORIGIN.z = -M7_HOME[1];
+  teleport(M7_HOME[0], -M7_HOME[1], 300, 0);
+  P.home.x = M7_HOME[0]; P.home.z = -M7_HOME[1];
+  say('You arrive in Lumbridge. Welcome to Gielinor.', 'lv');
+}
+const m7Resumable = b => !M7 || MAP07.manifest().has(((b.tx >> 6) << 8) | ((-b.tz) >> 6));   // a Gielinor save names a real square, or you begin again in Lumbridge
+
+/* ---- 47. GIELINOR'S SPELLBOOKS: the client's own four books, read from the cache — the procedural worlds keep theirs ----
+   enum 1981 names the books (0 standard, 1 ancient, 2 lunar, 3 arceuus), each an enum of spell objs in the book's order;
+   a spell obj's params carry what the client shows: 601 name, 602 description, 604 level, 603 members, 336 book, 365-370
+   up to three rune obj + count pairs, 597/598 its sprite when castable/not, 605 its kind. What a spell DOES is this game's
+   own: a combat spell is the SPELLS row of the same name, a utility spell the USPELLS row, so damage, runes and effects
+   stay one table. A teleport has no destination or xp in the client cache (the server holds them), so M7_TP carries the
+   wiki's landing tiles and experience; a book's spells that lead off the 2007 map (Kourend, Varlamore, the boat and group
+   spells, Teleother, the minigames) stand in the book as the client draws them and say why they will not answer. */
+const M7_TP = {   // name (or obj id where a book repeats a name) -> [x, y, plane, xp, home?]
+  'Varrock Teleport': [3213, 3424, 0, 35], 'Lumbridge Teleport': [3222, 3218, 0, 41], 'Falador Teleport': [2965, 3378, 0, 48], 'Camelot Teleport': [2757, 3477, 0, 55.5],
+  'Ardougne Teleport': [2661, 3300, 0, 61], 'Watchtower Teleport': [2549, 3113, 2, 68], 'Trollheim Teleport': [2890, 3678, 0, 68], 7619: [2796, 2791, 0, 74],
+  'Edgeville Home Teleport': [3087, 3496, 0, 0, 1], 'Lunar Home Teleport': [2100, 3914, 0, 0, 1],
+  'Paddewwa Teleport': [3098, 9884, 0, 64], 'Senntisten Teleport': [3319, 3336, 0, 70], 'Kharyrll Teleport': [3493, 3472, 0, 76], 'Lassar Teleport': [3006, 3471, 0, 82],
+  'Dareeyak Teleport': [2966, 3695, 0, 88], 'Carrallanger Teleport': [3157, 3666, 0, 94], 'Annakarl Teleport': [3288, 3886, 0, 100], 'Ghorrock Teleport': [2977, 3873, 0, 106],
+  'Moonclan Teleport': [2113, 3915, 0, 66], 'Ourania Teleport': [2468, 3246, 0, 69], 'Waterbirth Teleport': [2546, 3757, 0, 71], 'Barbarian Teleport': [2543, 3568, 0, 76],
+  'Khazard Teleport': [2636, 3167, 0, 80], 'Fishing Guild Teleport': [2611, 3393, 0, 89], 'Catherby Teleport': [2804, 3433, 0, 92], 'Ice Plateau Teleport': [2972, 3873, 0, 96],
+  'Draynor Manor Teleport': [3108, 3352, 0, 16], 'Mind Altar Teleport': [2979, 3509, 0, 22], 'Salve Graveyard Teleport': [3432, 3460, 0, 30],
+  "Fenkenstrain's Castle Teleport": [3548, 3528, 0, 50], 'West Ardougne Teleport': [2500, 3291, 0, 68], 'Harmony Island Teleport': [3797, 2866, 0, 74],
+  'Cemetery Teleport': [2978, 3763, 0, 82], 'Barrows Teleport': [3565, 3314, 0, 90], 20427: [2769, 9100, 0, 100]
+};
+const M7_BOOK_N = ['Standard', 'Ancient', 'Lunar', 'Arceuus'];
+let m7Books = null, m7BooksP = null;
+/* the four books, read once (null until they land; the magic tab asks again when they do) */
+function m7SpellBooks() {
+  if (m7Books || m7BooksP) return m7Books;
+  const idOf = new Map();   // cache obj id -> this game's item id, for the runes a spell names
+  for (const id in ICON07) if (typeof ICON07[id] === 'number' && !idOf.has(ICON07[id])) idOf.set(ICON07[id], id);
+  for (const id in ITEMS) if (ITEMS[id].c7 !== undefined && !idOf.has(ITEMS[id].c7)) idOf.set(ITEMS[id].c7, id);
+  const listOf = (en, b) => OSUI.enumOf(en).then(list => Promise.all(Object.keys(list).sort((x, y) => x - y).map(k => OSUI.cfg('item', list[k]).then(d => m7Spell(+list[k], d, b, idOf)))))
+    .then(l => l.filter(Boolean));
+  m7BooksP = Promise.all([OSUI.enumOf(1981), OSUI.enumOf(5280)]).then(([books, subs]) => Promise.all([0, 1, 2, 3].map(b => Promise.all([listOf(books[b], b),
+    OSUI.enumOf(subs[b]).then(m => Promise.all(Object.keys(m).map(k => listOf(m[k], b).then(l => [+k, l])))).then(pairs => new Map(pairs))]))))
+    .then(bs => { m7Books = bs.map(([l, sub]) => Object.assign(l, { sub })); if (M7) drawSpells(); }, e => { m7BooksP = null; console.warn('[seedworld] the Gielinor spellbooks could not be read', e); });
+  return null;
+}
+function m7Spell(obj, d, bk, idOf) {
+  const p = d && d.params;
+  if (!p || !p[601]) return null;
+  const n = p[601], need = [];
+  for (const [r, c] of [[365, 366], [367, 368], [369, 370], [606, 607]]) if (p[r] > 0) need.push([idOf.get(p[r]) || 'o' + p[r], p[c] | 0]);
+  const s = { obj, n, d: p[602] || '', lv: p[604] | 0, mem: p[603] | 0, bk, need, on: p[597], off: p[598], on2: p[599], off2: p[600], comp: (p[596] | 0) & 0xffff, kind: p[605] | 0,
+    bare: p[1884] === 1, stat: p[1187] > 0 ? [p[1187], p[1188] | 0] : null };
+  const sp = SPELLS.find(q => q.n.toLowerCase() === n.toLowerCase());
+  const us = !sp && USPELLS.find(q => q.n === n);
+  const tp = M7_TP[obj] || M7_TP[n];
+  if (sp) s.sp = sp;
+  else if (us) s.us = us;
+  else if (n === 'Lumbridge Home Teleport' || n === 'Arceuus Home Teleport') s.cast = Object.assign({ n, lv: 0, xp: 0, need: [], tint: 0xd8e4ee }, { f: n === 'Arceuus Home Teleport' ? () => { say('Arceuus lies beyond this map; the spell carries you home to Lumbridge.', 'lv'); return homeTp(); } : homeTp });
+  else if (n === 'Respawn Teleport') s.cast = { n, lv: s.lv, xp: 27, need, tint: 0xa8c8e8, f: () => tpTo(P.home.x, P.home.z, 'to your respawn point') };
+  else if (n === 'Teleport to House') s.cast = { n, lv: s.lv, xp: 30, need, tint: 0xe8d9b0, f: () => houseTp() };
+  else if (tp) s.cast = { n, lv: s.lv, xp: tp[3], need, tint: [0x6a8ad8, 0x8a1a24, 0xa8c8e8, 0x5aa08a][bk], f: () => m7TpCast(n, tp) };
+  return s;
+}
+function m7TpCast(n, tp) {
+  const [x, y, pl, , home] = tp;
+  if (!MAP07.manifest().has(((x >> 6) << 8) | (y >> 6))) return say('That place lies beyond this map.', 'bad');
+  if (home) {   // the other books' home teleports keep the half-hour between casts the Lumbridge one has
+    const left = 3000 - (tickN - P.homeT);
+    if (left > 0) return say('You need to wait another ' + Math.ceil(left / 100) + ' minutes to cast this spell.', 'bad');
+    const r = tpTo(x, -y, 'home', 0, pl);
+    if (r) P.homeT = tickN;
+    return r;
+  }
+  return tpTo(x, -y, 'to ' + n.replace(/ Teleport$/, ''), 0, pl);
+}
+/* a click on a Gielinor spell: the combat rows arm as they always did, the utility rows arm or fire as they always did */
+on(spellGrid, 'click', e => { const d = e.target.closest('[data-m7]'), l = d && m7Books && m7Books[P.book]; if (l && l[+d.dataset.m7]) m7CastClick(l[+d.dataset.m7]); });   // the classic book's Gielinor teleports
+function m7CastClick(s) {
+  if (s.n === 'Back' || s.n === 'Jewellery Enchantments') { if (osMg) { osMg.sub = s.n === 'Back' ? 0 : 1; drawSpells(); } return; }   // the book's sublist (enum 5280), laid out in its place
+  if (!s.sp && !s.us && !s.cast) return say(s.n + (/Tele Group|Teleother|Teleport to Target|Boat/.test(s.n) ? ' needs another adventurer to answer it.'
+    : /Minigame/.test(s.n) ? ': no minigame calls from this world.' : /Teleport/.test(s.n) ? ': its place lies beyond this map.' : ' has no counterpart in this world yet.'), 'bad');
+  if (eff('magic') < s.lv) return say('You need Magic level ' + s.lv + ' to cast that.', 'bad');
+  if (s.sp) { P.spell = P.spell === s.sp.i ? null : s.sp.i; say(P.spell === null ? 'You put your staff away.' : 'You ready ' + s.sp.n + '.'); }
+  else if (s.us) {
+    const u = s.us;
+    if (!u.item) cast(u);
+    else if (P.uspell === u) { P.uspell = null; say('You put ' + u.n + ' away.'); }
+    else { P.uspell = u; clearUse(); say('You ready ' + u.n + '. Choose an item in your pack.'); showTab('inv'); }
+  } else cast(s.cast);
+  drawSpells();
+}
+
+/* ---- 48. OSRS INTERFACE: Gielinor with "2007 models" on wears the 2007 client's own frame ----
+   osui.js builds each piece from the cache (interface definitions, sprites, bitmap fonts); this section decides what the
+   pieces show and hands every click to the same code the game's own panels use — the panes keep their ids and data
+   attributes, so their delegated handlers never know which frame they are drawn in. The fixed-classic toplevel (if 548)
+   gives the right-hand column: the minimap frame with its orbs, the two rows of tab stones, the 190x261 side panel. The
+   procedural worlds, and Gielinor with the setting off, keep the game's own panels exactly as they were. */
+const osCol = div(document.body, ''); osCol.id = 'osCol';
+const osTop = div(osCol, ''); osTop.id = 'osTop';
+const osPanes = div(osCol, ''); osPanes.id = 'osPanes';
+/* tab index -> [pane, stone component, icon component] in if 548: the top row, then the bottom row as it reads left to right
+   (clan, friends, account, logout, settings, emotes, music — stone 8 sits right of stone 9 in the definition) */
+const OS_TABS = [['cb', 64, 71], ['sk', 65, 72], ['wd', 66, 73], ['inv', 67, 74], ['eq', 68, 75], ['pr', 69, 76], ['mg', 70, 77],
+  ['cl', 48, 55], ['ac', 49, 56], ['fr', 50, 57], ['lo', 51, 58], ['op', 52, 59], ['em', 53, 60], ['mu', 54, 61]];
+let osTopC = null, osBuildP = null, osTabNow = 'inv';
+/* the bottom row's panes, which the game's own frame has no tab for; their content is the 2007 client's (osPaneDraw) */
+for (const k of ['cl', 'ac', 'fr', 'lo', 'em', 'mu']) { const p = div(el('panes'), 'pane'); p.id = 'pane-' + k; PANES.push(k); }
+function osBuild() {
+  if (osBuildP) return osBuildP;
+  osBuildP = OSUI.mount(548, osTop, 765, 503, { names: 1 }).then(c => {
+    osTopC = c;
+    for (const i of [21, 22]) if (c[i]) c[i].el.hidden = true;   // the map and compass masks shape what the client draws there; they are not pictures
+    for (const i of [12, 13, 14, 15, 17]) if (c[i]) c[i].el.classList.add('osBelow');   // what folds away with the pack
+    OS_TABS.forEach(([, s, ic], t) => { for (const i of [s, ic]) if (c[i]) { c[i].el.dataset.ostab = t; c[i].el.classList.add('osHit'); } });
+    on(osTop, 'click', e => {
+      const d = e.target.closest('[data-ostab]');
+      if (!d) return;
+      const k = OS_TABS[+d.dataset.ostab][0], folded = document.body.classList.contains('invmin');
+      if (k === 'op' && k === osTabNow && osSet && osSet.all && !folded) return osSettings();   // back from All Settings
+      if (folded || k === osTabNow) el('invmin').click();   // the lit stone folds the panel away and any stone brings it back, as the resizable client does
+      if (k !== osTabNow || folded) showTab(k);
+    });
+    osMapInit(c); osOrbsInit(c);
+    OS.ready = 1;
+    osStones();
+  }, e => { osBuildP = null; console.warn('[seedworld] the 2007 interface could not load', e); OPT.osrs = 0; icons07Apply(1); osuiApply(); });
+  return osBuildP;
+}
+/* only the open tab's stone is lit */
+function osStones() {
+  if (!osTopC) return;
+  const folded = document.body.classList.contains('invmin');   // a folded panel lights no stone
+  OS_TABS.forEach(([k, s]) => { if (osTopC[s]) osTopC[s].el.style.visibility = k === osTabNow && !folded ? 'visible' : 'hidden'; });
+}
+function osuiApply() {
+  if (!OS.boot) return;
+  const on = M7 && OPT.osrs ? 1 : 0;
+  if (on === OS.on) return;
+  OS.on = on;
+  document.body.classList.toggle('osui', !!on);
+  if (on) {
+    osPanes.appendChild(el('panes'));
+    document.body.appendChild(el('invmin')); document.body.appendChild(el('chatmin'));   // the fold handles stand beside the 2007 frame
+    osBuild(); osChatBuild(); osFit();
+    osCh.body.appendChild(el('chatbar'));   // the real input rides over the drawn line, unseen
+    for (const id of [297, 535, 536, 897, 1358, 1359, 2176, 2177]) document.documentElement.style.setProperty('--os' + id, 'url("' + OSUI.spriteURL(id) + '")');   // stone for the plain panes' buttons; the hitsplats (block 1358, damage 1359) and the health bar (2176 over 2177)
+    for (const id of [494, 495, 496, 497]) OSUI.font(id);   // the menu and the mouseover text draw at once, so their fonts must already stand
+  } else {
+    el('side').insertBefore(el('invmin'), el('side').firstChild); el('side').appendChild(el('panes'));
+    el('chatwrap').insertBefore(el('chatmin'), el('chatwrap').firstChild);
+    document.body.insertBefore(el('chatbar'), el('chatwrap').nextSibling);
+  }
+  osTabNow = (document.querySelector('.pane.on') || { id: 'pane-inv' }).id.slice(5);
+  osStones();
+  dirty.inv = dirty.eq = dirty.sk = dirty.orb = 1;
+  drawSpells(); drawPrayers(); drawStyles();
+}
+/* the frame is drawn at its own pixel size where it fits; a small screen scales the column and the chatbox down together */
+function osFit() {
+  if (!OS.on) return;
+  const W = innerWidth, H = innerHeight;
+  let s = Math.min(1, H / 503, W * 0.5 / 249), sc = Math.min(1, W / 519);
+  if (519 * sc + 249 * s > W && 503 * s + 165 * sc > H) { const k = H / (503 * s + 165 * sc); s *= k; sc *= k; }
+  document.documentElement.style.setProperty('--oss', s.toFixed(4));
+  document.documentElement.style.setProperty('--osc', sc.toFixed(4));
+}
+on(window, 'resize', osFit);
+
+/* ---- the minimap and compass (548:22 and 548:21): the client draws the scene's minimap sprite, four pixels a tile, rotated
+   with the camera about the player and cut to the fixed_minimap mask (1183) — each row from its first to its last clear pixel;
+   the compass (169) turns the same way inside its own mask (1184). A tile is its underlay/overlay colour, a wall a white edge,
+   a door a red one; npcs, players and ground items are the mapdots sprites, the walk target the map marker's flag. ---- */
+const osMapS = { cv: null, g: null, cmp: null, cg: null, maskM: null, maskC: null, T: null, tx: 1e9, tz: 1e9, pl: -1, x0: 0, yTop: 0, img: {} };
+let osMapDirty = 1;
+function osMask(id, w, h) {   // the drawable rows of a mask sprite as an opaque stencil
+  return OSUI.image(id).then(im => {
+    const a = document.createElement('canvas'); a.width = w; a.height = h;
+    const g = a.getContext('2d', { willReadFrequently: true });
+    g.drawImage(im, 0, 0);
+    const d = g.getImageData(0, 0, w, h), px = d.data;
+    for (let y = 0; y < h; y++) {
+      let x0 = -1, x1 = -1;
+      for (let x = 0; x < w; x++) if (!px[(y * w + x) * 4 + 3]) { if (x0 < 0) x0 = x; x1 = x; }
+      for (let x = 0; x < w; x++) { const i = (y * w + x) * 4; px[i] = px[i + 1] = px[i + 2] = 0; px[i + 3] = x0 >= 0 && x >= x0 && x <= x1 ? 255 : 0; }
+    }
+    g.putImageData(d, 0, 0);
+    return a;
+  });
+}
+function osMapInit(c) {
+  const box = c[9] && c[9].el, before = c[23] && c[23].el;
+  if (!box || !before) return;
+  const S = osMapS;
+  S.cmp = document.createElement('canvas'); S.cmp.width = 32; S.cmp.height = 33;
+  S.cv = document.createElement('canvas'); S.cv.width = 145; S.cv.height = 151;
+  S.cmp.className = S.cv.className = 'osg';
+  OSUI.at(box, S.cmp, 29, 0); OSUI.at(box, S.cv, 54, 5);
+  box.insertBefore(S.cmp, before); box.insertBefore(S.cv, before);   // at() appends; the cover (1182) must stay on top
+  S.g = S.cv.getContext('2d'); S.cg = S.cmp.getContext('2d');
+  osMask(1183, 145, 151).then(m => { S.maskM = m; });
+  osMask(1184, 32, 33).then(m => { S.maskC = m; });
+  for (const [k, id] of [['compass', 169], ['item', 510], ['npc', 511], ['player', 512], ['flag', 422]]) OSUI.image(id).then(im => { S.img[k] = im; });
+  const hit = c[24] && c[24].el;   // the compass button: Look North
+  if (hit) { hit.classList.add('osHit'); hit.title = 'Look North'; on(hit, 'click', () => { yaw = PI; }); }
+  S.cv.classList.add('osHit');
+  on(S.cv, 'click', e => {   // a click inside the mask walks there
+    const r = S.cv.getBoundingClientRect(), k = 145 / r.width, px = (e.clientX - r.left) * k - 72, pz = (e.clientY - r.top) * k - 75;
+    if (!S.maskM || !S.maskM.getContext('2d').getImageData(Math.round(px + 72), Math.round(pz + 75), 1, 1).data[3]) return;
+    const a = -(yaw + PI), cs = Math.cos(a), sn = Math.sin(a);
+    walkTo(P.rx + (px * cs - pz * sn) / 4, P.rz + (px * sn + pz * cs) / 4);
+  });
+}
+function osMapTiles() {   // the picture under the minimap: 80 tiles square round the player, four pixels a tile, north up
+  const S = osMapS, R = 40, N = R * 2, px = N * 4;
+  if (!S.T) { S.T = document.createElement('canvas'); S.T.width = S.T.height = px; }
+  const g = S.T.getContext('2d'), im = g.createImageData(px, px), d = im.data;
+  const x0 = P.tx - R, yTop = -P.tz + R - 1;
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const gx = x0 + i, gy = yTop - j, wb = MAP07.wallBits(P.plane, gx, gy);
+    let c = MAP07.tileRGB(P.plane, gx, gy);
+    if (c < 0) c = 0;
+    for (let b = 0; b < 4; b++) for (let a = 0; a < 4; a++) {
+      let col = c;
+      if (wb & 15 && ((wb & 1 && a === 0) || (wb & 2 && b === 0) || (wb & 4 && a === 3) || (wb & 8 && b === 3))) col = wb & 16 ? 0xee0000 : 0xeeeeee;
+      const p = ((j * 4 + b) * px + i * 4 + a) * 4;
+      d[p] = col >> 16 & 255; d[p + 1] = col >> 8 & 255; d[p + 2] = col & 255; d[p + 3] = 255;
+    }
+  }
+  g.putImageData(im, 0, 0);
+  S.tx = P.tx; S.tz = P.tz; S.pl = P.plane; S.x0 = x0; S.yTop = yTop;
+}
+function osMapFrame() {
+  const S = osMapS;
+  if (!S.g || !S.maskM || !M7) return;
+  if (Math.abs(P.tx - S.tx) > 10 || Math.abs(P.tz - S.tz) > 10 || P.plane !== S.pl || osMapDirty) { osMapDirty = 0; osMapTiles(); }
+  const g = S.g, a = yaw + PI, cs = Math.cos(a), sn = Math.sin(a);
+  g.globalCompositeOperation = 'source-over';
+  g.fillStyle = '#000'; g.fillRect(0, 0, 145, 151);
+  g.imageSmoothingEnabled = false;
+  g.save(); g.translate(72, 75); g.rotate(a);
+  g.drawImage(S.T, -Math.round((P.rx - S.x0 + 0.5) * 4), -Math.round((S.yTop + 0.5 + P.rz) * 4));
+  g.restore();
+  const dot = (x, z, im) => {
+    if (!im) return;
+    const dx = (x - P.rx) * 4, dz = (z - P.rz) * 4;
+    if (dx * dx + dz * dz > 11000) return;
+    g.drawImage(im, Math.round(72 + dx * cs - dz * sn) - 2, Math.round(75 + dx * sn + dz * cs) - 2);
+  };
+  for (const d of drops) if (d.pl === undefined || d.pl === P.plane) dot(d.x, d.z, S.img.item);
+  for (const n of npcs) if (!n.dead && (n.pl === undefined || n.pl === P.plane)) dot(n.rx !== undefined ? n.rx : n.tx, n.rz !== undefined ? n.rz : n.tz, S.img.npc);
+  for (const R of remotes.values()) if ((R.pl | 0) === P.plane) dot(R.rx !== undefined ? R.rx : R.tx, R.rz !== undefined ? R.rz : R.tz, S.img.player);
+  if (marker.visible && S.img.flag) {
+    const dx = (marker.position.x - P.rx) * 4, dz = (marker.position.z - P.rz) * 4;
+    if (dx * dx + dz * dz < 11000) g.drawImage(S.img.flag, 0, 0, 15, 30, Math.round(72 + dx * cs - dz * sn) - 1, Math.round(75 + dx * sn + dz * cs) - 15, 15, 30);
+  }
+  g.globalCompositeOperation = 'destination-in';
+  g.drawImage(S.maskM, 0, 0);
+  g.globalCompositeOperation = 'source-over';
+  g.fillStyle = '#fff'; g.fillRect(71, 74, 3, 3);   // you
+  if (S.maskC && S.img.compass) {
+    const k = S.cg;
+    k.globalCompositeOperation = 'source-over';
+    k.clearRect(0, 0, 32, 33);
+    k.imageSmoothingEnabled = false;
+    k.save(); k.translate(16, 16); k.rotate(a); k.drawImage(S.img.compass, -25, -25); k.restore();
+    k.globalCompositeOperation = 'destination-in';
+    k.drawImage(S.maskC, 0, 0);
+  }
+}
+
+/* ---- the orbs (if 160 in 548:25): each a frame (1071, 1072 while its button is hovered), the number in p11 coloured green
+   through yellow to red by how full it is (script 449), the filler at transparency 25 and the empty sprite (1059) over it,
+   clipped to the part that is spent, and the icon on top. Hitpoints, Prayer (lit while any prayer is on: the quick-prayer
+   look), Run (lit while running) and Special Attack; the XP-drops button, and the world map globe. ---- */
+let osOrb = null, osQuick = 0;
+function osOrbsInit(c) {
+  const host = c[25] && c[25].el;
+  if (!host) return;
+  OSUI.mount(160, host, 236, 163).then(o => {
+    for (const i of [43, 48, 50]) if (o[i]) o[i].el.hidden = true;   // store, activity adviser, wiki: nothing in this world answers them
+    if (o[49]) { o[49].el.style.left = '196px'; o[49].el.style.top = '115px'; }   // script 1700 sets the world map orb 10 in from the right, 115 down
+    osOrb = { o, key: {} };
+    const hover = (btn, frame, when) => { const B = o[btn]; if (!B) return; B.el.classList.add('osHit');
+      on(B.el, 'pointerenter', () => { if (!when || when()) OSUI.setSprite(o[frame].el, 1072); }); on(B.el, 'pointerleave', () => OSUI.setSprite(o[frame].el, 1071)); };
+    hover(9, 8, () => P.psn > 0); hover(20, 19); hover(28, 27); hover(36, 35, () => !!SPEC[eq.weapon]);
+    const click = (i, f, tip) => { if (o[i]) { o[i].el.classList.add('osHit'); if (tip) o[i].el.title = tip; on(o[i].el, 'click', f); } };
+    click(28, () => { P.run = P.run ? 0 : 1; dirty.orb = 1; }, 'Toggle Run');
+    click(36, () => { if (SPEC[eq.weapon]) el('cbSpec').click(); else say('You need a special attack weapon for that.', 'bad'); }, 'Use Special Attack');
+    click(20, osQuickPrayers, 'Activate Quick-prayers');
+    click(6, () => { OPT.xpDrops = OPT.xpDrops ? 0 : 1; applyOpts(); osOrbs(); }, 'Show XP drops');
+    if (o[6]) { on(o[6].el, 'pointerenter', () => OSUI.setSprite(o[6].el, OPT.xpDrops ? 1199 : 1198)); on(o[6].el, 'pointerleave', () => OSUI.setSprite(o[6].el, OPT.xpDrops ? 1197 : 1196)); }
+    if (o[49] && o[55]) {
+      click(49, () => el('wmBtn').click(), 'World Map');
+      on(o[49].el, 'pointerenter', () => OSUI.setSprite(o[55].el, 1440)); on(o[49].el, 'pointerleave', () => OSUI.setSprite(o[55].el, 1439));
+    }
+    osOrbs();
+  }, e => console.warn('[seedworld] the 2007 orbs could not load', e));
+}
+/* quick prayers, as near as this game has them: the orb puts out every prayer and remembers them, and lights them again */
+function osQuickPrayers() {
+  if (P.prayers) { osQuick = P.prayers; P.prayers = 0; sfx(2673); markDirty(); drawPrayers(); dirty.orb = 1; return; }
+  if (!osQuick) { say("You haven't selected any quick-prayers."); return showTab('pr'); }
+  if (P.pray <= 0) return say('You have run out of prayer points, you can recharge at an altar.', 'bad');
+  for (const p of PRAYERS) if (osQuick & p.bit && lvl[SK.prayer] >= p.lv && lvl[SK.defence] >= p.dl) P.prayers |= p.bit;
+  markDirty(); drawPrayers(); dirty.orb = 1;
+}
+function osOrbs() {
+  if (!osOrb) return;
+  const o = osOrb.o;
+  const orb = (k, text, filler, empty, icon, cur, max, fill, ico, trans) => {
+    const key = cur + ':' + max + ':' + fill + ':' + ico + ':' + trans;
+    if (osOrb.key[k] === key || !o[text]) return;
+    osOrb.key[k] = key;
+    const c = Math.min(cur, max), half = Math.floor(max / 2);
+    let R, G;
+    if (half <= 0) { R = c >= max ? 0 : 255; G = c >= max ? 255 : 0; }
+    else if (c > half) { R = 255 - Math.floor(255 * (c - half) / half); G = 255; }
+    else { R = 255; G = Math.floor(255 * c / half); }
+    o[text].el.osSet(String(Math.max(cur, 0)), clamp(R, 0, 255) << 16 | clamp(G, 0, 255) << 8);
+    OSUI.setSprite(o[filler].el, fill);
+    o[filler].el.style.opacity = ((256 - (trans || 25)) / 256).toFixed(3);
+    o[empty].el.style.height = Math.floor(26 * (max - Math.max(0, c)) / Math.max(1, max)) + 'px';
+    if (ico) OSUI.setSprite(o[icon].el, ico);
+  };
+  orb('hp', 10, 11, 14, 17, P.hp, P.maxhp, P.psn > 0 ? 1061 : 1060, 1067);
+  orb('pr', 21, 22, 23, 25, Math.ceil(P.pray), P.maxpray, P.prayers ? 1066 : 1063, P.prayers ? 1058 : 1068);
+  orb('run', 29, 30, 31, 33, Math.round(P.energy), 100, P.run ? 1065 : 1064, P.run ? 1070 : 1069);
+  const sw = SPEC[eq.weapon];
+  orb('sp', 37, 38, 39, 42, Math.floor(P.spec), 100, sw ? (P.specArm ? 1608 : 1607) : 1064, 1610, sw ? 25 : 50);
+  if (o[6] && osOrb.key.xp !== OPT.xpDrops) { osOrb.key.xp = OPT.xpDrops; OSUI.setSprite(o[6].el, OPT.xpDrops ? 1197 : 1196); }
+}
+
+/* ---- the chatbox (if 162 in 548:11): the chat background (1017), the messages in p12 on a 14-pixel line — game messages
+   black, a player's words blue after their name — newest at the bottom over the separator, the input line "Name: text*",
+   the scrollbar, and the button bar (1018) with its seven filter tabs and Report. The selected tab clicked again folds the
+   box down to its bar, as the resizable client's does; the game's own log keeps every line underneath. ---- */
+const osChat = div(document.body, ''); osChat.id = 'osChat';
+const OS_CHAT_TABS = ['All', 'Game', 'Public', 'Private', 'Channel', 'Clan', 'Trade'];
+const OS_CHAT_COL = { g: 0x000000, lv: 0x000000, bad: 0x7f0000, good: 0x006600 };
+function osChatBuild() {
+  if (osCh) return;
+  osCh = { tab: 0, lines: [], scroll: 0, S: 114, stick: 1 };
+  const body = div(osChat, 'osc osChatBody'); body.style.cssText = 'left:0;top:0;width:519px;height:142px';
+  OSUI.at(body, OSUI.graphic(1017, 519, 142), 0, 0);
+  const view = div(body, 'osc osHit'); view.style.cssText = 'left:7px;top:6px;width:489px;height:114px;overflow:hidden';
+  osCh.list = div(view, 'osc'); osCh.list.style.cssText = 'left:0;top:0;width:489px;height:114px';
+  osCh.view = view;
+  const sep = div(body, 'osc'); sep.style.cssText = 'left:7px;top:120px;width:505px;height:1px;background:#807660';
+  osCh.input = OSUI.at(body, OSUI.text(502, 16, '', { font: 495, colour: 0, xa: 0, ya: 2 }), 10, 120);
+  const up = OSUI.at(body, OSUI.graphic(773, 16, 16), 496, 6), down = OSUI.at(body, OSUI.graphic(788, 16, 16), 496, 104);
+  OSUI.at(body, OSUI.graphic(792, 16, 82), 496, 22);
+  const th = div(body, 'osc'); th.style.cssText = 'left:496px;top:22px;width:16px;height:82px';
+  osCh.thumb = { el: th, top: OSUI.at(th, OSUI.graphic(789, 16, 5), 0, 0), mid: OSUI.at(th, OSUI.graphic(790, 16, 1), 0, 5), bot: OSUI.at(th, OSUI.graphic(791, 16, 5), 0, 0) };
+  up.classList.add('osHit'); down.classList.add('osHit');
+  on(up, 'click', () => osChatScroll(-14)); on(down, 'click', () => osChatScroll(14));
+  on(view, 'wheel', e => { e.preventDefault(); e.stopPropagation(); osChatScroll(e.deltaY > 0 ? 42 : -42); }, { passive: false });
+  const bar = div(osChat, 'osc'); bar.style.cssText = 'left:0;top:142px;width:519px;height:23px';
+  OSUI.at(bar, OSUI.graphic(1018, 519, 23), 0, 0);
+  osCh.btns = OS_CHAT_TABS.map((n, k) => {
+    const b = div(bar, 'osc osHit'); b.style.cssText = 'left:' + (5 + 62 * k) + 'px;top:0;width:56px;height:23px';
+    b.dataset.osch = k;
+    const g = OSUI.at(b, OSUI.graphic(3051, 56, 22), 0, 0);
+    OSUI.at(b, OSUI.text(56, 22, k ? n + '<br> ' : n, { font: 494, colour: 0xffffff, shadow: true, xa: 1, ya: 1 }), 0, 0);
+    if (k) OSUI.at(b, OSUI.text(56, 22, '<br>On', { font: 494, colour: 0x00ff00, shadow: true, xa: 1, ya: 1 }), 0, 0);
+    on(b, 'pointerenter', () => { b.osHover = 1; osChatTabs(); }); on(b, 'pointerleave', () => { b.osHover = 0; osChatTabs(); });
+    return b.osG = g, b;
+  });
+  const rep = div(bar, 'osc osHit'); rep.style.cssText = 'left:437px;top:0;width:79px;height:23px';
+  const rg = OSUI.at(rep, OSUI.graphic(3057, 79, 22), 0, 0);
+  OSUI.at(rep, OSUI.text(79, 22, 'Report', { font: 494, colour: 0xffffff, shadow: true, xa: 1, ya: 1 }), 0, 0);
+  on(rep, 'pointerenter', () => OSUI.setSprite(rg, 3058)); on(rep, 'pointerleave', () => OSUI.setSprite(rg, 3057));
+  on(rep, 'click', () => say('There is no one here to report.'));
+  on(bar, 'click', e => {
+    const b = e.target.closest('[data-osch]');
+    if (!b) return;
+    const k = +b.dataset.osch, folded = document.body.classList.contains('chatmin');
+    if (k === osCh.tab || folded) el('chatmin').click();
+    if (k !== osCh.tab) { osCh.tab = k; osCh.stick = 1; osChatLayout(); }
+    osChatTabs();
+  });
+  osCh.body = body;
+  const inp = el('chatin'), draw = () => requestAnimationFrame(osChatInput);
+  on(inp, 'input keyup focus blur', draw);
+  for (const d of chatEl.children) osChatAdd(d.textContent, d.className);   // the log so far
+  osChatTabs(); osChatInput();
+}
+function osChatTabs() {
+  if (!osCh) return;
+  osCh.btns.forEach((b, k) => OSUI.setSprite(b.osG, k === osCh.tab ? (b.osHover ? 3054 : 3053) : b.osHover ? 3052 : 3051));
+}
+function osChatInput() {
+  if (!osCh) return;
+  const v = el('chatin').value.replace(/</g, '<lt>').replace(/>/g, '<gt>');
+  osCh.input.osSet((NAME || 'You') + ': <col=0000ff>' + v + '*</col>');
+}
+/* a line of the log, drawn once: a player's words (they read "Name: text") in blue after the name, anything else in its colour */
+function osChatAdd(msg, cls) {
+  if (!osCh) return;
+  const pc = cls === 'pc';
+  const ln = { msg: String(msg), cls, pc, cv: null, h: 14 };
+  osCh.lines.push(ln);
+  while (osCh.lines.length > 120) { const x = osCh.lines.shift(); if (x.cv) x.cv.remove(); }
+  OSUI.font(495).then(f => {
+    const esc = t => t.replace(/</g, '<lt>').replace(/>/g, '<gt>');
+    let name = '', text = esc(ln.msg);
+    if (pc) { const i = ln.msg.indexOf(': '); if (i > 0) { name = esc(ln.msg.slice(0, i + 1)); text = esc(ln.msg.slice(i + 2)); } }
+    const nw = name ? OSUI.width(f, name) + 3 : 0, ls = OSUI.lines(f, text, 486 - nw);
+    const cv = document.createElement('canvas');
+    cv.width = 486; cv.height = ls.length * 14; cv.className = 'osg osc';
+    const g = cv.getContext('2d'), col = pc ? 0x0000ff : OS_CHAT_COL[cls] !== undefined ? OS_CHAT_COL[cls] : 0;
+    if (name) OSUI.drawString(g, f, name, 0, 12, 0);
+    ls.forEach((l, i) => OSUI.drawString(g, f, l, nw, 12 + i * 14, col));
+    ln.cv = cv; ln.h = cv.height;
+    osChatLayout();
+  });
+}
+function osChatLayout() {
+  if (!osCh) return;
+  const show = ln => osCh.tab === 0 || (osCh.tab === 1 && !ln.pc) || (osCh.tab === 2 && ln.pc);
+  const vis = osCh.lines.filter(ln => ln.cv && show(ln));
+  let sum = 0;
+  for (const ln of vis) sum += ln.h;
+  const S = Math.max(sum + 2, 114);
+  osCh.list.textContent = '';
+  osCh.list.style.height = S + 'px';
+  let y = S - 2;
+  for (let i = vis.length - 1; i >= 0; i--) { y -= vis[i].h; vis[i].cv.style.left = '3px'; vis[i].cv.style.top = y + 'px'; osCh.list.appendChild(vis[i].cv); }
+  osCh.S = S;
+  if (osCh.stick) osCh.scroll = S - 114;
+  osChatScroll(0);
+}
+function osChatScroll(d) {
+  const S = osCh.S;
+  osCh.scroll = clamp(osCh.scroll + d, 0, S - 114);
+  osCh.stick = osCh.scroll >= S - 114;
+  osCh.list.style.top = -osCh.scroll + 'px';
+  const H = Math.max(10, Math.floor(82 * 114 / S)), y = S > 114 ? Math.floor((82 - H) * osCh.scroll / (S - 114)) : 0, t = osCh.thumb;
+  t.el.style.top = (22 + y) + 'px'; t.el.style.height = H + 'px';
+  t.mid.style.height = Math.max(0, H - 10) + 'px'; t.bot.style.top = (H - 5) + 'px';
+}
+/* the client's pale tooltip (script 2344): two columns of p12 split on '|', 4px apart, in a 0xffffa0 box with a black edge,
+   5px below the thing hovered — or above it when the panel runs out */
+function osTip(host, x, y, w, h, left, right) {
+  osTipHide(host);
+  OSUI.font(495).then(f => {
+    const L = left.split('|'), R = right.split('|');
+    let tw = 0;
+    for (let i = 0; i < L.length; i++) tw = Math.max(tw, OSUI.width(f, L[i]) + 4 + OSUI.width(f, R[i] || ''));
+    const W = tw + 4, H = L.length * 12 + 7;
+    let tx = Math.min(x + 5, 190 - W), ty = y + h + 5;
+    if (ty > 261 - H) ty = y - H - 5;
+    const box = div(host, 'osTip'); box.style.cssText = 'left:' + Math.max(0, tx) + 'px;top:' + Math.max(0, ty) + 'px;width:' + W + 'px;height:' + H + 'px;background:#ffffa0;box-shadow:inset 0 0 0 1px #000';
+    OSUI.at(box, OSUI.text(W - 4, H - 1, L.join('<br>'), { font: 495, colour: 0, xa: 0, ya: 0, lh: 12 }), 2, 1);
+    OSUI.at(box, OSUI.text(W - 4, H - 1, R.join('<br>'), { font: 495, colour: 0, xa: 2, ya: 0, lh: 12 }), 2, 1);
+    host.osTipEl = box;
+  });
+}
+function osTipHide(host) { if (host.osTipEl) { host.osTipEl.remove(); host.osTipEl = null; } }
+
+/* the skills tab: if 320's 24 cells, each filled as script 393 fills it — its skill key and icon nudge ride the cell's own
+   onLoad arguments, enum 681 turns the key into the stat, enum 255 the stat into its icon, enum 108 names it; the stone
+   halves (sprites 187/188), the icon at (3 + nudge, 4) and the two p11 yellow levels at (32, 4) and (44, 16) are the
+   script's constants. The strip reads "Total level: n" (script 396). */
+let osSk = null;
+function osSkills() {
+  if (!osSk) {
+    const pane = el('pane-sk');
+    pane.classList.add('osLive');
+    osSk = { host: div(pane, 'osPane'), cells: [], total: null, ready: 0 };
+    Promise.all([OSUI.mount(320, osSk.host, 190, 261), OSUI.enumOf(681), OSUI.enumOf(255), OSUI.enumOf(108)]).then(([c, e681, e255, e108]) => {
+      for (const k in c) {
+        const l = c[k].c.onLoadListener;
+        if (!l || l[0] !== 393) continue;
+        const key = l[3], nudge = l[4] | 0, stat = e681[key], si = SK[String(e108[key] || '').toLowerCase()];
+        if (si === undefined || stat === undefined) continue;
+        const cell = c[k], h = cell.el, lv = { font: 494, colour: 0xffff00, shadow: true, xa: 1, ya: 0 };
+        OSUI.at(h, OSUI.graphic(187, 36, 36), 0, 0);
+        OSUI.at(h, OSUI.graphic(188, 36, 36), 31, 0);
+        OSUI.at(h, OSUI.graphic(e255[stat], 25, 25), 3 + nudge, 4);
+        const cur = OSUI.at(h, OSUI.text(15, 12, '', lv), 32, 4), base = OSUI.at(h, OSUI.text(15, 12, '', lv), 44, 16);
+        h.dataset.ossk = si; h.classList.add('osHit');
+        osSk.cells.push({ si, cell, cur, base, key: '' });
+      }
+      osSk.total = c[32] && c[32].el;
+      osSk.ready = 1;
+      osSkills();
+    }, e => console.warn('[seedworld] the 2007 skills tab could not load', e));
+    on(osSk.host, 'click', e => { const d = e.target.closest('[data-ossk]'); if (d) skillGuide(+d.dataset.ossk); });
+    on(osSk.host, 'pointerover', e => {
+      const d = e.target.closest('[data-ossk]');
+      if (!d || e.pointerType === 'touch') return;
+      const i = +d.dataset.ossk, rec = osSk.cells.find(q => q.si === i), L = lvl[i], x0 = Math.floor(xp[i]);
+      const more = L < MAXL ? '|Next level at:|Remaining XP:' : '', nums = L < MAXL ? '|' + Math.ceil(XP_TABLE[L + 1]).toLocaleString('en-US') + '|' + Math.ceil(XP_TABLE[L + 1] - xp[i]).toLocaleString('en-US') : '';
+      osTip(osSk.host, rec.cell.x, rec.cell.y, rec.cell.w, rec.cell.h, SKILLS[i].f + ' XP:' + more, x0.toLocaleString('en-US') + nums);
+    });
+    on(osSk.host, 'pointerout', e => { if (!e.relatedTarget || !osSk.host.contains(e.relatedTarget) || !e.relatedTarget.closest('[data-ossk]')) osTipHide(osSk.host); });
+  }
+  if (!osSk.ready) return;
+  for (const r of osSk.cells) {
+    const key = lvl[r.si] + ':' + bst[r.si];
+    if (r.key === key) continue;
+    r.key = key;
+    r.cur.osSet(String(lvl[r.si] + bst[r.si]));
+    r.base.osSet(String(lvl[r.si]));
+  }
+  if (osSk.total && osSk.total.osSet) osSk.total.osSet('Total level: ' + totalLevel());
+}
+
+/* the prayer tab: enum 4956's 29 prayer objs sorted by their level (script 465), each laid into its own slot component
+   (param 1751) on a 37-pixel pitch five across from the container at (4, 9) (script 547): the prayerglow (4892) under a lit
+   one, its 30x30 icon at (2, 2) — param 1757 when the level allows it, 1756 when not. A cache prayer is this game's prayer
+   with the same sprite. The strip below: the points icon (651) and "cur / max" in orange p12, and the Filters button. */
+let osPr = null;
+function osPrayers() {
+  if (!osPr) {
+    const pane = el('pane-pr');
+    pane.classList.add('osLive');
+    osPr = { host: div(pane, 'osPane'), ready: 0, slots: [], pts: null };
+    Promise.all([OSUI.mount(541, osPr.host, 190, 261), OSUI.enumOf(4956)]).then(([c, en]) =>
+      Promise.all(Object.keys(en).sort((a, b) => a - b).map(k => OSUI.cfg('item', en[k]))).then(defs => {
+        const list = defs.map(d => d && d.params).filter(p => p && p[1751] > 0).sort((a, b) => a[1753] - b[1753]);
+        for (let k = 9; k <= 38; k++) if (c[k]) c[k].el.hidden = true;   // prayer1..prayer30: the book shows only the slots its prayers claim
+        list.forEach((p, i) => {
+          const slot = c[p[1751] & 0xffff];
+          if (!slot) return;
+          const s = slot.el;
+          s.hidden = false; s.style.left = (i % 5 * 37) + 'px'; s.style.top = (Math.floor(i / 5) * 37) + 'px';
+          const glow = OSUI.at(s, OSUI.graphic(4892, 34, 34), 0, 0), icon = OSUI.at(s, OSUI.graphic(p[1757], 30, 30), 2, 2);
+          const pr = PRAYERS.find(q => PR07[q.k] === p[1757]);
+          if (pr) { s.dataset.ospr = pr.k; s.classList.add('osHit'); }
+          osPr.slots.push({ p, pr, slot, glow, icon, key: '' });
+        });
+        OSUI.at(osPr.host, OSUI.graphic(651, 17, 18), 25, 238);
+        osPr.pts = OSUI.at(osPr.host, OSUI.text(44, 28, '', { font: 495, colour: 0xff981f, shadow: true, xa: 0, ya: 1 }), 49, 233);
+        const fb = OSUI.at(osPr.host, OSUI.nine([1141, 1142, 1143, 1144, 1145, 1146, 1147, 1148, 1149], 46, 18, 6), 119, 238);
+        OSUI.at(fb, OSUI.text(46, 18, 'Filters', { font: 494, colour: 0xff981f, shadow: true, xa: 1, ya: 1 }), 0, 0);
+        osPr.ready = 1;
+        osPrayers();
+      })).catch(e => console.warn('[seedworld] the 2007 prayer tab could not load', e));
+    on(osPr.host, 'click', e => { const d = e.target.closest('[data-ospr]'); if (d) prayToggle(d.dataset.ospr); });
+    on(osPr.host, 'pointerover', e => {
+      const d = e.target.closest('[data-ospr]');
+      if (!d || e.pointerType === 'touch') return;
+      const r = osPr.slots.find(q => q.slot.el === d);
+      if (r) osTipLines(osPr.host, r.slot.x + 4, r.slot.y + 9, 34, 34, 'Level ' + r.p[1753] + '<br>' + r.p[1752] + '<br>' + r.p[1754]);
+    });
+    on(osPr.host, 'pointerout', e => { if (!e.relatedTarget || !e.relatedTarget.closest || !e.relatedTarget.closest('[data-ospr]')) osTipHide(osPr.host); });
+  }
+  if (!osPr.ready) return;
+  for (const r of osPr.slots) {
+    const ok = r.pr ? lvl[SK.prayer] >= r.pr.lv && lvl[SK.defence] >= r.pr.dl : lvl[SK.prayer] >= r.p[1753];
+    const lit = r.pr && (P.prayers & r.pr.bit) ? 1 : 0, key = ok + ':' + lit;
+    if (r.key === key) continue;
+    r.key = key;
+    r.glow.style.visibility = lit ? 'visible' : 'hidden';
+    OSUI.setSprite(r.icon, ok ? r.p[1757] : r.p[1756]);
+  }
+  osPr.pts.osSet(Math.ceil(P.pray) + ' / ' + P.maxpray);
+}
+/* the spellbook: Gielinor's real book (section 47) for the book in hand, laid out by script 2611 from the spell count alone —
+   cells of 24 (40 for a list of 20 or fewer), 3..7 columns, the gaps shared out of the 184x240 top layer and the grid centred
+   in it — sorted by level, ties by list order (script 2621). A spell shows param 597 when the level and runes allow it and
+   598 when not (or when this world has nothing it could do); the armed spell wears the client's outline. The hover box is
+   script 2623's: a black box, "Level N: Name" in orange p12, the description in brown p11, the runes with have/need. */
+let osMg = null;
+function osMagic() {
+  if (!osMg) {
+    const pane = el('pane-mg');
+    pane.classList.add('osLive');
+    osMg = { host: div(pane, 'osPane'), layer: null, cells: [], book: -1, ready: 0 };
+    osMg.layer = div(osMg.host, 'osc');
+    const fb = OSUI.at(osMg.host, OSUI.nine([1141, 1142, 1143, 1144, 1145, 1146, 1147, 1148, 1149], 46, 17, 6), 72, 244);
+    OSUI.at(fb, OSUI.text(46, 17, 'Filters', { font: 494, colour: 0xff981f, shadow: true, xa: 1, ya: 1 }), 0, 0);
+    on(osMg.host, 'click', e => { const d = e.target.closest('[data-osmg]'); if (d && osMg.cells[+d.dataset.osmg]) m7CastClick(osMg.cells[+d.dataset.osmg].s); });
+    on(osMg.host, 'pointerover', e => {
+      const d = e.target.closest('[data-osmg]');
+      if (!d || e.pointerType === 'touch') return;
+      osSpellTip(osMg.cells[+d.dataset.osmg]);
+    });
+    on(osMg.host, 'pointerout', e => { if (!e.relatedTarget || !e.relatedTarget.closest || !e.relatedTarget.closest('[data-osmg]')) osTipHide(osMg.host); });
+  }
+  const books = m7SpellBooks();
+  if (!books) return;
+  const bk = clamp(P.book | 0, 0, 3), sub = osMg.sub && books[bk] && books[bk].sub.get(osMg.sub), list = sub || books[bk] || [];
+  if (!sub) osMg.sub = 0;
+  if (osMg.book !== bk + ':' + osMg.sub) {
+    osMg.book = bk + ':' + osMg.sub;
+    osMg.layer.innerHTML = ''; osMg.cells = [];
+    const order = list.map((s, li) => [s, li]).sort((a, b) => (1000 * a[0].lv + a[1]) - (1000 * b[0].lv + b[1])).map(q => q[0]);
+    const n = order.length, big = n <= 20, cell = big ? 40 : 24, cols = n <= 15 ? 3 : n <= 20 ? 4 : Math.max(4, Math.min(7, Math.floor((n + 8) / 9)));
+    const xgap = Math.max(0, Math.min(Math.floor(cell * 5 / 7), Math.floor((184 - cell * cols) / Math.max(1, cols - 1))));
+    const rows = Math.max(1, Math.floor((n + cols - 1) / cols)), ygap = rows >= 2 ? Math.max(0, Math.min(xgap, Math.floor((240 - cell * rows) / (rows - 1)))) : 0;
+    const W = cols * cell + (cols - 1) * xgap, H = rows * cell + (rows - 1) * ygap, x0 = 3 + Math.floor((184 - W) / 2), y0 = Math.floor((240 - H) / 2);
+    order.forEach((s, d) => {
+      const x = x0 + (d % cols) * (cell + xgap), y = y0 + Math.floor(d / cols) * (cell + ygap);
+      const g = OSUI.at(osMg.layer, OSUI.graphic(cell >= 40 && s.on2 ? s.on2 : s.on, cell, cell), x, y);
+      g.dataset.osmg = d; g.classList.add('osHit');
+      osMg.cells.push({ s, g, x, y, cell, key: '' });
+    });
+  }
+  for (const c of osMg.cells) {
+    const s = c.s, usable = !!(s.sp || s.us || s.cast || s.n === 'Back' || s.n === 'Jewellery Enchantments');
+    const ok = usable && eff('magic') >= s.lv && !s.need.some(q => !ITEMS[q[0]]) && spellReady(s) && (!s.stat || lvl[SK[OS_STAT[s.stat[0]]]] >= s.stat[1]);
+    const armed = (s.sp && P.spell === s.sp.i) || (s.us && P.uspell === s.us);   // the client's target mode: outline 2 (script 2617)
+    const cool = /Home Teleport$/.test(s.n) && tickN - P.homeT < 3000;   // script 2614: a home teleport inside its half hour is drawn at transparency 150
+    const key = (ok ? 1 : 0) + ':' + (armed ? 1 : 0) + ':' + (cool ? 1 : 0);
+    if (c.key === key) continue;
+    c.key = key;
+    const id = c.cell >= 40 && s.on2 ? (ok ? s.on2 : s.off2) : ok ? s.on : s.off;
+    if (armed) OSUI.spriteFx(id, 2).then(u => { if (c.key === key) { c.g.osSprite = -1; c.g.src = u; } }); else OSUI.setSprite(c.g, id);
+    c.g.style.opacity = cool ? (1 - 150 / 255).toFixed(3) : '';
+  }
+}
+/* enum 681's stat numbers as this game's skill keys (the client's Skills order) */
+const OS_STAT = ['attack', 'defence', 'strength', 'hitpoints', 'ranged', 'prayer', 'magic', 'cooking', 'woodcutting', 'fletching', 'fishing', 'firemaking',
+  'crafting', 'smithing', 'mining', 'herblore', 'agility', 'thieving', 'slayer', 'farming', 'runecraft', 'hunter', 'construction', 'sailing'];
+function osSpellTip(c) {
+  const host = osMg.host;
+  osTipHide(host);
+  const tok = host.osTipTok = (host.osTipTok | 0) + 1;
+  Promise.all([OSUI.font(495), OSUI.font(494)]).then(([f5, f4]) => {
+    if (host.osTipTok !== tok) return;
+    const s = c.s, title = s.lv > 0 && !s.bare ? 'Level ' + s.lv + ': ' + s.n : s.n;
+    const desc = s.d + (s.sp || s.us || s.cast || s.n === 'Back' || s.n === 'Jewellery Enchantments' ? '' : '<br><col=ff0000>Not in this world</col>');
+    const T = 2 + 13 * OSUI.lines(f5, title, 177).length, D = 2 + 13 * OSUI.lines(f4, desc, 175).length, cols = s.need.length + (s.stat ? 1 : 0);
+    const H = cols ? T + D + 50 : T + D + 4, y = c.y < 110 ? 240 - H : 5;
+    const box = div(host, 'osTip'); box.style.cssText = 'left:0;top:0;width:190px;height:261px';
+    const r1 = div(box, 'osc'); r1.style.cssText = 'left:5px;top:' + y + 'px;width:180px;height:' + H + 'px;background:rgba(0,0,0,' + (1 - 42 / 255).toFixed(3) + ')';
+    const r2 = div(box, 'osc'); r2.style.cssText = 'left:6px;top:' + (y + 1) + 'px;width:179px;height:' + (H - 1) + 'px;box-shadow:inset 0 0 0 1px #2e2b23';
+    const r3 = div(box, 'osc'); r3.style.cssText = 'left:5px;top:' + y + 'px;width:179px;height:' + (H - 1) + 'px;box-shadow:inset 0 0 0 1px #726451';
+    OSUI.at(box, OSUI.text(177, T, title, { font: 495, colour: 0xff981f, xa: 1, ya: 1 }), 7, y + 2);
+    OSUI.at(box, OSUI.text(175, D, desc, { font: 494, colour: 0xaf6a1a, xa: 1, ya: 1, lh: 12 }), 7, y + 3 + T);
+    if (cols) {
+      const g = Math.floor((190 - 35 * cols) / (cols + 1)), ry = y + 2 + T + D, free = staffRune();
+      const fmtN = v => v >= 10000000 ? Math.floor(v / 1000000) + 'M' : v >= 10000 ? Math.floor(v / 1000) + 'K' : String(v);
+      s.need.forEach(([id, k], i) => {
+        const x = (i + 1) * g + 35 * i;
+        if (ITEMS[id]) OSUI.at(box, osItemEl(id, -1, 0, 0), x, ry);
+        const inf = free.includes(id), have = ITEMS[id] ? invCount(id) : 0;
+        OSUI.at(box, OSUI.text(35, 14, (inf ? '*' : fmtN(have)) + '/' + k, { font: 494, colour: inf || have >= k ? 0x00ff00 : 0xff0000, xa: 1, ya: 1 }), x, ry + 32);
+      });
+      if (s.stat) OSUI.enumOf(255).then(e => {
+        const x = cols * g + 35 * (cols - 1), si = SK[OS_STAT[s.stat[0]]], have = si === undefined ? 0 : lvl[si];
+        OSUI.at(box, OSUI.graphic(e[s.stat[0]], 26, 26), x, ry + 3);
+        OSUI.at(box, OSUI.text(35, 14, have + '/' + s.stat[1], { font: 494, colour: have >= s.stat[1] ? 0x00ff00 : 0xff0000, xa: 1, ya: 1 }), cols * g + 34 * (cols - 1), ry + 32);
+      });
+    }
+    host.osTipEl = box;
+  });
+}
+/* an item on the client's 36x32 item canvas, drawn the way ItemSpriteFactory draws it: the model sprite at the offset it was
+   cropped from (osrs.js keeps it; the glyph standing in while a sprite draws is centred), outline 2 a white ring round the
+   baked black one, the shadow one pixel down-right of every opaque pixel (a drop shadow is exactly that rule on a hard-edged
+   sprite), the stack number in p11 at baseline 9 — yellow, white thousands "K", green millions "M" — and all of it clipped to
+   the canvas. `n` -1 draws no number (setobject's -1 count). */
+function osItemEl(id, n, shadow, outline) {
+  const box = document.createElement('div'), im = document.createElement('img'), it = ITEMS[id], a = OPT.osrs ? itemArt(id) : undefined;
+  box.className = 'osItem';
+  im.alt = ''; im.draggable = false; im.className = 'osg';
+  const k = n > 1 ? n : 1;
+  if (typeof a === 'number' && OSRSK.iconNow(a, k) === undefined) { im.dataset.ic = a; im.dataset.n = k; }   // icSwap puts the sprite in when it lands
+  if (shadow) im.style.filter = 'drop-shadow(1px 1px 0 ' + OSUI.hex(shadow) + ')';
+  const pad = outline >= 2 ? 1 : 0;
+  const place = () => {
+    if (pad && im.osRinged !== im.src) {   // ring the picture that just arrived, then place the ringed one
+      const cv = document.createElement('canvas'), w = im.naturalWidth + 2, h = im.naturalHeight + 2;
+      cv.width = w; cv.height = h;
+      const g = cv.getContext('2d');
+      g.drawImage(im, 1, 1);
+      const d = g.getImageData(0, 0, w, h);
+      OSUI.ring(d.data, w, h, 0xffffff);
+      g.putImageData(d, 0, 0);
+      im.osRinged = im.src = cv.toDataURL();
+      return;
+    }
+    const xy = typeof a === 'number' ? OSRSK.iconXY(a, k) : null;
+    im.style.left = (xy ? xy[0] - pad : (36 - im.naturalWidth) >> 1) + 'px';
+    im.style.top = (xy ? xy[1] - pad : (32 - im.naturalHeight) >> 1) + 'px';
+  };
+  im.addEventListener('load', place);
+  im.src = icon(id, k);
+  box.appendChild(im);
+  if (n !== -1 && it && (it.stack || n !== 1)) {
+    const cv = document.createElement('canvas');
+    cv.width = 36; cv.height = 32; cv.className = 'osg osCount';
+    const t = n < 100000 ? '<col=ffff00>' + n + '</col>' : n < 10000000 ? '<col=ffffff>' + Math.floor(n / 1000) + 'K</col>' : '<col=00ff80>' + Math.floor(n / 1000000) + 'M</col>';
+    OSUI.font(494).then(f => OSUI.drawString(cv.getContext('2d'), f, t, 0, 9, 0xffff00, 1));
+    box.appendChild(cv);
+  }
+  return box;
+}
+/* the worn-equipment tab: if 387 as it stands (the link bars, the eleven slot layers, the four button layers and their icons),
+   each slot filled as script 3282 fills it — the slot stone (170), the worn item at (2, 2) under the 0x333333 shadow, or the
+   empty-slot icon from enum 904 — and the buttons' 9-pixel stone tiles (913-920; 921-928 over a 0x30201c wash on hover).
+   A click on a worn piece removes it, as the client's first option does; the buttons open this game's own sheets. */
+const OS_EQ = [['head', 0, 15], ['cape', 1, 16], ['neck', 2, 17], ['weapon', 3, 18], ['body', 4, 19], ['shield', 5, 20], ['legs', 7, 21],
+  ['hands', 9, 22], ['feet', 10, 23], ['ring', 12, 24], ['ammo', 13, 25]];
+const OS_TILE9 = [[0, 0, 9, 9], [31, 0, 9, 9], [0, 31, 9, 9], [31, 31, 9, 9], [0, 9, 9, 22], [9, 0, 22, 9], [31, 9, 9, 22], [9, 31, 22, 9]];
+const osTiles9 = (host, first) => { const b = div(host, 'osc'); b.style.cssText = 'left:0;top:0;width:40px;height:40px'; OS_TILE9.forEach((r, i) => OSUI.at(b, OSUI.graphic(first + i, r[2], r[3], { tile: 1 }), r[0], r[1])); return b; };
+let osEq = null;
+function osEquip() {
+  if (!osEq) {
+    const pane = el('pane-eq');
+    pane.classList.add('osLive');
+    osEq = { host: div(pane, 'osPane'), slots: [], ready: 0 };
+    Promise.all([OSUI.mount(387, osEq.host, 190, 261), OSUI.enumOf(904)]).then(([c, e904]) => {
+      [[1, 'stats'], [3, 'prices'], [5, 'death'], [7, 'follower']].forEach(([i, k]) => {
+        const L = c[i];
+        if (!L) return;
+        L.el.dataset.oseqb = k; L.el.classList.add('osHit');
+        const hover = div(L.el, 'osc');
+        hover.style.cssText = 'left:0;top:0;width:40px;height:40px;visibility:hidden';
+        const wash = div(hover, 'osc'); wash.style.cssText = 'left:1px;top:1px;width:38px;height:38px;background:rgba(48,32,28,' + (56 / 256).toFixed(3) + ')';
+        L.norm = osTiles9(L.el, 913); osTiles9(hover, 921); L.hover = hover;
+      });
+      for (const i of [2, 4, 6, 8]) if (c[i]) c[i].el.style.pointerEvents = 'none';
+      for (const [k, slot, comp] of OS_EQ) {
+        const L = c[comp];
+        if (!L) continue;
+        OSUI.at(L.el, OSUI.graphic(170, 36, 36), 0, 0);
+        const ico = OSUI.at(L.el, OSUI.graphic(e904[slot], 32, 32), 2, 2);
+        L.el.dataset.oseq = k; L.el.classList.add('osHit');
+        osEq.slots.push({ k, L, ico, item: null, key: '' });
+      }
+      osEq.c = c; osEq.ready = 1;
+      osEquip();
+    }, e => console.warn('[seedworld] the 2007 equipment tab could not load', e));
+    on(osEq.host, 'click', e => {
+      if (ctxAte) { ctxAte = 0; return; }
+      const b = e.target.closest('[data-oseqb]');
+      if (b) return ({ stats: showStats, prices: osPriceGuide, death: osKeptOnDeath, follower: osCallFollower })[b.dataset.oseqb]();
+      const d = e.target.closest('[data-oseq]');
+      if (d && eq[d.dataset.oseq]) unequip(d.dataset.oseq);
+    });
+    on(osEq.host, 'contextmenu', e => {
+      e.preventDefault();
+      const d = e.target.closest('[data-oseq]');
+      if (!d || !eq[d.dataset.oseq]) return;
+      const s = d.dataset.oseq, it = ITEMS[eq[s]];
+      openCtx(e.clientX, e.clientY, [{ t: 'Remove', o: it.name, cls: 'itm', f: () => unequip(s) }, examineOpt(it)]);
+    });
+    on(osEq.host, 'pointerover', e => { const b = e.target.closest('[data-oseqb]'); if (b && osEq.c) { const L = osEq.c[+[1, 3, 5, 7][['stats', 'prices', 'death', 'follower'].indexOf(b.dataset.oseqb)]]; L.hover.style.visibility = 'visible'; L.norm.style.visibility = 'hidden'; } });
+    on(osEq.host, 'pointerout', e => {
+      const b = e.target.closest('[data-oseqb]');
+      if (!b || !osEq.c || (e.relatedTarget && b.contains(e.relatedTarget))) return;
+      const L = osEq.c[[1, 3, 5, 7][['stats', 'prices', 'death', 'follower'].indexOf(b.dataset.oseqb)]];
+      L.hover.style.visibility = 'hidden'; L.norm.style.visibility = 'visible';
+    });
+  }
+  if (!osEq.ready) return;
+  for (const r of osEq.slots) {
+    const id = eq[r.k], n = r.k === 'ammo' ? P.ammoN : 1, key = (id || '') + ':' + n;
+    if (r.key === key) continue;
+    r.key = key;
+    if (r.item) { r.item.remove(); r.item = null; }
+    r.ico.style.visibility = id ? 'hidden' : 'visible';
+    if (id) r.item = OSUI.at(r.L.el, osItemEl(id, n, 0x333333, 1), 2, 2);
+  }
+}
+/* the three sheets behind the equipment buttons, in this game's modal: guide prices, what a death would keep, the follower */
+function osPriceGuide() {
+  const rows = [];
+  let tot = 0;
+  const add = (id, n) => { const v = geGuide(id) * n; tot += v; rows.push(mkRow('', id, ITEMS[id].name + (n > 1 ? ' × ' + n.toLocaleString('en-US') : ''), v.toLocaleString('en-US') + ' gp', '', '', n)); };
+  for (const s of EQ_SLOTS) if (eq[s]) add(eq[s], s === 'ammo' ? P.ammoN : 1);
+  for (let i = 0; i < INV_N; i++) if (inv[i]) add(inv[i].id, inv[i].n);
+  showModal('Guide Prices', rows.length ? gridOf(rows) : '<p class="gesEmpty">You are carrying nothing of value.</p>', 'Total guide price: ' + tot.toLocaleString('en-US') + ' gp', 1);
+}
+function osKeptOnDeath() {
+  const all = [];
+  for (const s of EQ_SLOTS) if (eq[s]) all.push({ id: eq[s], n: s === 'ammo' ? P.ammoN : 1 });
+  for (let i = 0; i < INV_N; i++) if (inv[i]) all.push({ id: inv[i].id, n: inv[i].n });
+  all.sort((a, b) => ITEMS[b.id].val - ITEMS[a.id].val);
+  let keep = skulled() ? (prayHas('item') ? 1 : 0) : 3 + (prayHas('item') ? 1 : 0);   // die()'s own count
+  const kept = [], lost = [];
+  for (const s of all) {
+    if (s.id.startsWith('pet_')) continue;
+    const k = Math.min(keep, s.n); keep -= k;
+    if (k) kept.push(mkRow('', s.id, ITEMS[s.id].name + (k > 1 ? ' × ' + k : ''), 'kept', '', '', k));
+    if (s.n > k) lost.push(mkRow('', s.id, ITEMS[s.id].name + (s.n - k > 1 ? ' × ' + (s.n - k).toLocaleString('en-US') : ''), 'lost', '', ' no', s.n - k));
+  }
+  showModal('Items Kept on Death', '<p class="blab">Items you will keep on death</p>' + (kept.length ? gridOf(kept) : '<p class="gesEmpty">None.</p>')
+    + '<p class="blab">Items you will lose on death</p>' + (lost.length ? gridOf(lost) : '<p class="gesEmpty">None.</p>'),
+    'The most valuable three are kept, four with Protect Item; a skull keeps none.', 1);
+}
+function osCallFollower() {
+  if (!P.pet || !petMesh) return say("You don't have a follower.", 'bad');
+  petMesh.position.set(P.rx + 1.1 + petR, Math.max(P.ry, 0), P.rz + 1);
+  say('Your follower comes to your side.');
+}
+
+/* the combat options tab (if 593 as script 7593 lays it out): the weapon's name in q8 and "Combat Lvl" in p11 over the style
+   buttons — a dbtable 78 row per weapon category, each button its (slot, name, tooltip, icon) laid into the four 71x47 places
+   (or the staff column with the autocast pair beside it), red stone tiles on the one in use — then Auto Retaliate and the
+   special attack bar. Which category a weapon is lives on the server, not in the cache, so OS_WCAT reads it off the name the
+   way the wiki files weapons. The buttons drive this game's own styles: melee stances to STYLES, ranged to RSTYLES, a staff's
+   strikes to STYLES and its spell pair to the cast style; the special bar is SPEC's. */
+const OS_WCAT = [[/chinchompa/, 7], [/salamander|swamp lizard/, 6], [/bulwark/, 28], [/bludgeon/, 27], [/partisan/, 30], [/\bbanner\b/, 25],
+  [/whip|tentacle/, 20], [/scythe/, 14], [/claws?\b/, 4], [/halberd/, 12], [/crossbow|ballista/, 5],
+  [/blowpipe|\bdarts?\b|knife|knives|thrownaxe|throwing axe|javelin|toktz-xil-ul|atlatl/, 19],
+  [/shortbow|longbow|\bbow\b|bow of|recurve|seercull|webweaver|venator/, 3], [/pickaxe/, 11],
+  [/staff of the dead|staff of light|staff of balance/, 21], [/trident|sanguinesti|tumeken|thammaron|accursed sceptre|warped sceptre/, 24],
+  [/battleaxe|hatchet|\baxe\b|greataxe/, 1], [/godsword|2h sword|saradomin sword|colossal blade/, 10], [/spear|hasta|lance/, 15],
+  [/warhammer|maul|\bhammers?\b|tzhaar-ket-om/, 2], [/\bmace\b|flail|morning star|tzhaar-ket-em|\bsceptre\b/, 16],
+  [/scimitar|longsword|sabre|machete|excalibur|silverlight|darklight|arclight|saeldor|cutlass/, 9],
+  [/staff|\bwand\b|\bcane\b|toktz-mej-tal/, 18], [/dagger|sword|rapier|keris|fang|toktz-xil-ak|harpoon/, 17]];
+const OS_GCAT = { sword: 17, dagger: 17, scim: 9, lsword: 9, sword2h: 10, axe: 1, baxe: 1, pick: 11, mace: 16, wham: 2, claws: 4, halberd: 12, spear: 15,
+  whip: 20, scythe: 14, staff: 18, wand: 18, bow: 3, cbow: 5, pipe: 19, trident: 24 };
+function osWeaponCat() {
+  const w = weaponIt(), bow = bowItem();
+  if (bow && bow.thrown) return 19;
+  if (!w) return 0;
+  const nm = w.name.toLowerCase();
+  let cat = -1;
+  for (const [re, c] of OS_WCAT) if (re.test(nm)) { cat = c; break; }
+  if (cat < 0) cat = OS_GCAT[w.g] !== undefined ? OS_GCAT[w.g] : 17;
+  const ranged = [3, 5, 6, 7, 19], mage = gearClass(w) === 'mage';
+  if (bow && !ranged.includes(cat)) cat = w.g === 'cbow' ? 5 : 3;   // the game fires it: the tab must offer ranged stances
+  if (!bow && ranged.includes(cat)) cat = mage ? 18 : 17;
+  if (!bow && mage && ![18, 21, 22, 24].includes(cat)) cat = pstaffOn() ? 24 : 18;
+  return cat;
+}
+const OS_STANCE = { accurate: 0, aggressive: 1, defensive: 2, controlled: 3 };
+let osCb = null, osCbSlot = -1;
+const osCatRows = new Map();
+function osCatRow(cat) {
+  let p = osCatRows.get(cat);
+  if (!p) {
+    p = OSUI.cfg('dbtableindex', 78).then(ix => {
+      const r = ix && ix[0] && ix[0].values && ix[0].values[0] && ix[0].values[0][cat];
+      return r ? OSUI.cfg('dbrow', r[0]) : null;
+    }).then(row => {
+      const v = row && row.values && row.values[1], out = [];
+      if (v) for (let i = 0; i + 3 < v.length; i += 4) {
+        const tip = String(v[i + 2]), st = (tip.match(/^\(([^)]*)\)/) || [])[1] || '';
+        out.push({ slot: v[i], n: v[i + 1], tip, spr: v[i + 3], stance: st.toLowerCase() });
+      }
+      return out;
+    });
+    osCatRows.set(cat, p); p.catch(() => osCatRows.delete(cat));
+  }
+  return p;
+}
+const OS_CAT_N = ['Unarmed', 'Axe', 'Blunt', 'Bow', 'Claw', 'Crossbow', 'Salamander', 'Chinchompas', 'Gun', 'Slash Sword', '2h Sword', 'Pickaxe', 'Polearm',
+  'Polestaff', 'Scythe', 'Spear', 'Spiked', 'Stab Sword', 'Staff', 'Thrown', 'Whip', 'Bladed Staff', 'Staff', '2h Sword', 'Powered Staff', 'Banner', 'Polearm',
+  'Bludgeon', 'Bulwark', 'Powered Wand', 'Partisan', 'Tribrid', 'Blunt', 'Gun', 'Multi-melee', 'Slash Flail'];
+const OS_GREY = [1141, 1142, 1143, 1144, 1145, 1146, 1147, 1148, 1149], OS_RED = [1150, 1151, 1152, 1153, 1154, 1155, 1156, 1157, 1158];
+const osStone = (host, w, h, red) => { const n = OSUI.nine(red ? OS_RED : OS_GREY, w, h, 6); n.style.left = '0px'; n.style.top = '0px'; host.appendChild(n); return n; };
+function osCombat() {
+  if (!osCb) {
+    const pane = el('pane-cb');
+    pane.classList.add('osLive');
+    osCb = { host: div(pane, 'osPane'), key: '', btns: [] };
+    const orange = { font: 494, colour: 0xff981f, shadow: true, xa: 1, ya: 1 };
+    osCb.wep = OSUI.at(osCb.host, OSUI.text(169, 30, '', { font: 497, colour: 0xff981f, shadow: true, xa: 1, ya: 1, lh: 15 }), 10, 0);
+    osCb.lvl = OSUI.at(osCb.host, OSUI.text(169, 12, '', orange), 10, 26);
+    osCb.cat = OSUI.at(osCb.host, OSUI.text(190, 28, '', orange), 0, 231);
+    osCb.layer = div(osCb.host, 'osc'); osCb.layer.style.cssText = 'left:0;top:0;width:190px;height:261px';
+    const ret = div(osCb.host, 'osc osHit'); ret.style.cssText = 'left:20px;top:153px;width:150px;height:44px'; ret.dataset.oscb = 'ret';
+    osCb.ret = { el: ret, bg: null, ico: OSUI.at(ret, OSUI.graphic(1748, 26, 39), 7, 3), txt: null };
+    osCb.ret.txt = OSUI.at(ret, OSUI.text(112, 42, '', { font: 495, colour: 0xff981f, shadow: true, xa: 1, ya: 1, lh: 12 }), 36, 1);
+    const sp = div(osCb.host, 'osc osHit'); sp.style.cssText = 'left:20px;top:204px;width:150px;height:26px'; sp.dataset.oscb = 'spec';
+    osStone(sp, 150, 26, 0);
+    const back = div(sp, 'osc'); back.style.cssText = 'left:2px;top:7px;width:146px;height:12px;background:#730606';
+    const fill = div(sp, 'osc'); fill.style.cssText = 'left:2px;top:7px;width:0;height:12px;background:#397d3b';
+    const stxt = OSUI.at(sp, OSUI.text(150, 26, '', { font: 494, colour: 0x000010, xa: 1, ya: 1 }), 0, 0);
+    const edge = div(sp, 'osc'); edge.style.cssText = 'left:2px;top:6px;width:146px;height:14px;box-shadow:inset 0 0 0 1px #2c2a23';
+    osCb.spec = { el: sp, fill, txt: stxt, w: -1 };
+    on(osCb.host, 'click', e => {
+      const d = e.target.closest('[data-oscb]');
+      if (!d) return;
+      const k = d.dataset.oscb;
+      if (k === 'ret') { OPT.retaliate = OPT.retaliate ? 0 : 1; applyOpts(); return osCombat(); }
+      if (k === 'spec') return el('cbSpec').click();
+      if (k === 'cast0' || k === 'cast1') {
+        P.cstyle = k === 'cast1' ? 1 : 0;
+        if (P.spell === null) { say('Choose a combat spell in your spellbook to cast.'); showTab('mg'); }
+        return drawStyles();
+      }
+      const b = osCb.btns[+k];
+      if (!b) return;
+      osCbSlot = b.s.slot;
+      if (b.mode === 'r') { P.rstyle = b.i; say('Ranged style: ' + b.s.n + '.'); }
+      else if (b.mode === 'p') P.cstyle = b.i;
+      else { P.style = b.i; if (b.mode === 'g') P.spell = null; say('Combat style: ' + b.s.n + '.'); }
+      drawStyles();
+    });
+    on(osCb.host, 'pointerover', e => {
+      const d = e.target.closest('[data-oscb]');
+      if (!d || e.pointerType === 'touch') return;
+      clearTimeout(osCb.tipT);
+      const k = d.dataset.oscb, b = osCb.btns[+k];
+      const txt = k === 'ret' ? 'When active your character will automatically fight back if attacked.' : b ? b.s.tip : '';
+      if (!txt) return;
+      const r = k === 'ret' ? { x: 20, y: 153, w: 150, h: 44 } : b.r;
+      osCb.tipT = setTimeout(() => osTipLines(osCb.host, r.x, r.y, r.w, r.h, txt, 136), 500);   // the client waits 25 cycles
+    });
+    on(osCb.host, 'pointerout', e => { if (!e.relatedTarget || !e.relatedTarget.closest || !e.relatedTarget.closest('[data-oscb]')) { clearTimeout(osCb.tipT); osTipHide(osCb.host); } });
+  }
+  const cat = osWeaponCat(), bow = bowItem(), w = weaponIt(), wn = bow && bow !== w ? bow.name : w ? w.name : 'Unarmed';
+  osCb.wep.osSet(wn);
+  OSUI.font(497).then(f => { osCb.lvl.style.top = (OSUI.lines(f, wn, 169).length > 1 ? 32 : 26) + 'px'; });   // a name that wraps pushes the level down (script 2486)
+  osCb.lvl.osSet('Combat Lvl: ' + combatLevel());
+  osCb.cat.osSet('Category: ' + OS_CAT_N[cat]);
+  osCatRow(cat).then(rows => {
+    if (osWeaponCat() !== cat) return;
+    const staff = [18, 21, 22].includes(cat);
+    const mode = bow ? 'r' : cat === 24 || cat === 29 ? 'p' : staff ? 'g' : 'm';
+    const btns = rows.map((s, j) => ({ s, i: mode === 'r' ? Math.min(2, j) : mode === 'p' ? (s.stance === 'longrange' ? 1 : 0) : OS_STANCE[s.stance] !== undefined ? OS_STANCE[s.stance] : Math.min(3, s.slot), mode }));
+    const cur = mode === 'r' ? P.rstyle : mode === 'p' ? P.cstyle : mode === 'g' && P.spell !== null ? -1 : P.style;
+    let sel = btns.findIndex(b => b.i === cur && b.s.slot === osCbSlot);
+    if (sel < 0) sel = btns.findIndex(b => b.i === cur);
+    const key = cat + ':' + sel + ':' + (P.spell === null ? '' : P.spell + '/' + P.cstyle) + ':' + rows.length;
+    if (osCb.key !== key) {
+      osCb.key = key;
+      osCb.layer.textContent = ''; osCb.btns = btns;
+      btns.forEach((b, j) => {
+        const r = staff ? { x: 20, y: 45 + 36 * j, w: 71, h: 32 } : { x: j % 2 ? 99 : 20, y: j < 2 ? 45 : 99, w: 71, h: 47 };
+        b.r = r;
+        const box = div(osCb.layer, 'osc osHit'); box.style.cssText = 'left:' + r.x + 'px;top:' + r.y + 'px;width:' + r.w + 'px;height:' + r.h + 'px';
+        box.dataset.oscb = j;
+        osStone(box, r.w, r.h, j === sel);
+        if (staff) OSUI.at(box, OSUI.graphic(b.s.spr, j ? 34 : 33, j ? 24 : 23), j ? 18 : 19, 3);
+        else OSUI.at(box, OSUI.graphic(b.s.spr, 34, 24), 18, 5);
+        OSUI.at(box, OSUI.text(68, 13, b.s.n, { font: 494, colour: 0xff981f, shadow: true, xa: 1, ya: 0 }), 1, staff ? 19 : 30);
+      });
+      if (staff) {   // the autocast pair: defensive over normal, the armed spell's icon on the red one
+        const spell = P.spell !== null ? SPELLS[P.spell] : null, bk = m7Books && m7Books[clamp(P.book | 0, 0, 3)];
+        const art = spell && bk && (bk.find(s => s.sp === spell) || {}).on;
+        [[1, 45], [0, 99]].forEach(([def, y]) => {
+          const box = div(osCb.layer, 'osc osHit'); box.style.cssText = 'left:99px;top:' + y + 'px;width:71px;height:50px';
+          box.dataset.oscb = 'cast' + def;
+          const on = spell && P.cstyle === def;
+          osStone(box, 71, 50, on);
+          if (def) OSUI.at(box, OSUI.graphic(760, 36, 36), 1, 7);
+          if (on && art) OSUI.at(box, OSUI.graphic(art, 24, 24), def ? 37 : 23, 8);
+          else OSUI.at(box, OSUI.graphic(780, 33, 36), def ? 33 : 19, 2);
+          OSUI.at(box, OSUI.text(71, 16, 'Spell', { font: 494, colour: 0xff981f, shadow: true, xa: 1, ya: 0 }), 0, 32);
+        });
+      }
+    }
+  });
+  const ret = osCb.ret, rOn = OPT.retaliate ? 1 : 0;
+  if (ret.on !== rOn) {
+    ret.on = rOn;
+    if (ret.bg) ret.bg.remove();
+    ret.bg = osStone(ret.el, 150, 44, rOn); ret.el.insertBefore(ret.bg, ret.el.firstChild);
+    OSUI.setSprite(ret.ico, rOn ? 1749 : 1748);
+    ret.txt.osSet('Auto Retaliate<br>(' + (rOn ? 'On' : 'Off') + ')');
+  }
+  const sw = SPEC[eq.weapon], s = osCb.spec;
+  s.el.style.visibility = sw ? 'visible' : 'hidden';
+  if (sw) {
+    const pct = sw.souls ? (P.souls || 0) * 20 : Math.floor(P.spec), fw = Math.floor(Math.min(100, pct) * 146 / 100);
+    s.fill.style.width = fw + 'px';
+    s.fill.style.background = sw.souls ? '#397d3b' : P.spec >= sw.cost ? '#397d3b' : '#00326b';
+    s.txt.osSet(sw.souls ? 'Special Attack: ' + (P.souls || 0) + '/5' : 'Special Attack: ' + Math.floor(P.spec) + '%', P.specArm ? 0xffff00 : 0x000010);
+  }
+}
+/* a one-column tooltip, wrapped to the panel (the prayer and spell books' hover text) */
+function osTipLines(host, x, y, w, h, text, maxW) {
+  osTipHide(host);
+  OSUI.font(495).then(f => {
+    const ls = OSUI.lines(f, text, maxW || 180);
+    let tw = 0;
+    for (const l of ls) tw = Math.max(tw, OSUI.width(f, l));
+    const W = tw + 4, H = ls.length * 12 + 7;
+    let tx = Math.min(x + 5, 190 - W), ty = y + h + 5;
+    if (ty > 261 - H) ty = y - H - 5;
+    const box = div(host, 'osTip'); box.style.cssText = 'left:' + Math.max(0, tx) + 'px;top:' + Math.max(0, ty) + 'px;width:' + W + 'px;height:' + H + 'px;background:#ffffa0;box-shadow:inset 0 0 0 1px #000';
+    OSUI.at(box, OSUI.text(W - 4, H - 1, ls.join('<br>'), { font: 495, colour: 0, xa: 0, ya: 0, lh: 12 }), 2, 1);
+    host.osTipEl = box;
+  });
+}
+
+/* ---- the bottom row's tabs, each laid out as its interface's scripts lay it (settings 116, logout 182, emotes 216, music 239,
+   friends 429, the chat-channel tabs 707, account 109) and put to this game's own work where it has any ---- */
+const osSpr = (host, id, x, y, w, h, o) => OSUI.at(host, OSUI.graphic(id, w, h, o), x, y);
+const osTxt = (host, s, x, y, w, h, font, col, ax, ay, lh, shadow) => OSUI.at(host, OSUI.text(w, h, s, { font, colour: col, xa: ax, ya: ay, lh: lh || 0, shadow: shadow !== false }), x, y);
+const osRect = (host, x, y, w, h, col, fill, trans) => {
+  const d = div(host, 'osc'), rgba = 'rgba(' + (col >> 16 & 255) + ',' + (col >> 8 & 255) + ',' + (col & 255) + ',' + ((256 - (trans || 0)) / 256).toFixed(3) + ')';
+  d.style.cssText = 'left:' + x + 'px;top:' + y + 'px;width:' + w + 'px;height:' + h + 'px;' + (fill ? 'background:' + rgba : 'box-shadow:inset 0 0 0 1px ' + rgba);
+  return d;
+};
+const osClip = (host, x, y, w, h) => { const d = div(host, 'osc'); d.style.cssText = 'left:' + x + 'px;top:' + y + 'px;width:' + w + 'px;height:' + h + 'px;overflow:hidden'; return d; };
+/* the steel border (script 392 -> 249): four 25x30 corners, the 36-pixel edge tiles laid 15 outside the box, all clipped to it */
+function osSteel(host, x, y, w, h) {
+  const c = osClip(host, x, y, w, h);
+  osSpr(c, 310, 0, 0, 25, 30, { tile: 1 }); osSpr(c, 311, w - 25, 0, 25, 30, { tile: 1 });
+  osSpr(c, 312, 0, h - 30, 25, 30, { tile: 1 }); osSpr(c, 313, w - 25, h - 30, 25, 30, { tile: 1 });
+  osSpr(c, 172, -15, 30, 36, h - 60, { tile: 1 }); osSpr(c, 315, w - 21, 30, 36, h - 60, { tile: 1 });
+  osSpr(c, 314, 25, -15, w - 50, 36, { tile: 1 }); osSpr(c, 173, 25, h - 21, w - 50, 36, { tile: 1 });
+  return c;
+}
+/* the 9-pixel stone button (script 134; hover 3243): a tiled 297 centre (897 hovered) inside corners 913-916 and edges 917-920 */
+function osStoneBtn(host, x, y, w, h, label, font) {
+  const b = div(host, 'osc osHit'); b.style.cssText = 'left:' + x + 'px;top:' + y + 'px;width:' + w + 'px;height:' + h + 'px';
+  const face = hov => {
+    const f = div(b, 'osc'); f.style.cssText = 'left:0;top:0;width:' + w + 'px;height:' + h + 'px' + (hov ? ';visibility:hidden' : '');
+    const k = hov ? 8 : 0;
+    osSpr(f, hov ? 897 : 297, 1, 1, w - 2, h - 2, { tile: 1 });
+    osSpr(f, 913 + k, 0, 0, 9, 9, { tile: 1 }); osSpr(f, 914 + k, w - 9, 0, 9, 9, { tile: 1 }); osSpr(f, 915 + k, 0, h - 9, 9, 9, { tile: 1 }); osSpr(f, 916 + k, w - 9, h - 9, 9, 9, { tile: 1 });
+    osSpr(f, 917 + k, 0, 9, 9, h - 18, { tile: 1 }); osSpr(f, 918 + k, 9, 0, w - 18, 9, { tile: 1 }); osSpr(f, 919 + k, w - 9, 9, 9, h - 18, { tile: 1 }); osSpr(f, 920 + k, 9, h - 9, w - 18, 9, { tile: 1 });
+    return f;
+  };
+  const n = face(0), hv = face(1);
+  if (label) osTxt(b, label, 5, 5, w - 10, h - 10, font || 494, 0xff981f, 1, 1, 14);
+  on(b, 'pointerenter', () => { hv.style.visibility = 'visible'; n.style.visibility = 'hidden'; });
+  on(b, 'pointerleave', () => { hv.style.visibility = 'hidden'; n.style.visibility = 'visible'; });
+  return b;
+}
+/* the tall three-tab strip of the settings and account panels (scripts 2597/2598): 20x26 pieces, the right one the left mirrored,
+   a 1px #5d5848 line under the row broken beneath the selected tab */
+function osTallTabs(host, icons, sel, onPick) {
+  const box = div(host, 'osc'); box.style.cssText = 'left:0;top:0;width:190px;height:30px';
+  const draw = hover => {
+    box.textContent = '';
+    icons.forEach(([ic, iw, ih, ix, iy], i) => {
+      const x = [2, 65, 128][i], s = i === sel ? [2283, 2284] : i === hover ? [2287, 2288] : [2285, 2286];
+      const t = div(box, 'osc osHit'); t.style.cssText = 'left:' + x + 'px;top:0;width:60px;height:30px'; t.dataset.ostt = i;
+      osSpr(t, s[0], 0, 3, 20, 26); osSpr(t, s[1], 20, 3, 20, 26); osSpr(t, s[0], 40, 3, 20, 26, { flipH: 1 });
+      osSpr(t, ic, ix - x, iy, iw, ih);
+    });
+    const tx = [2, 65, 128][sel];
+    osRect(box, 0, 28, tx, 1, 0x5d5848, 1); osRect(box, tx + 60, 28, 190 - tx - 60, 1, 0x5d5848, 1);
+  };
+  draw(-1);
+  on(box, 'click', e => { const t = e.target.closest('[data-ostt]'); if (t) onPick(+t.dataset.ostt); });
+  on(box, 'pointerover', e => { const t = e.target.closest('[data-ostt]'); if (t && +t.dataset.ostt !== sel) draw(+t.dataset.ostt); });
+  on(box, 'pointerleave', () => draw(-1));
+  return box;
+}
+/* a settings slider (script 9234): the nine 16x16 track pieces from x 37 and the bobble at 53 + value*96/max; a click or drag sets it */
+function osSlider(host, y, icon, bobble, get, set) {
+  osSpr(host, icon, 11, y - 8, 32, 32);
+  const mute = osSpr(host, 7426, 10, y - 9, 34, 34);
+  [2852, 2853, 2861, 2862, 2854, 2861, 2862, 2854, 2857].forEach((id, k) => osSpr(host, id, 37 + 16 * k, y, 16, 16));
+  const bob = osSpr(host, bobble, 53, y, 16, 16);
+  const hit = div(host, 'osc osHit'); hit.style.cssText = 'left:37px;top:' + (y - 4) + 'px;width:144px;height:24px;touch-action:none';
+  const put = () => { const v = clamp(get(), 0, 1); bob.style.left = (53 + Math.floor(v * 96)) + 'px'; mute.style.visibility = v <= 0 ? 'visible' : 'hidden'; };
+  const at = e => { const r = hit.getBoundingClientRect(), px = (e.clientX - r.left) * 144 / r.width; set(clamp((px - 24) / 96, 0, 1)); put(); };
+  on(hit, 'pointerdown', e => { hit.setPointerCapture(e.pointerId); at(e); });
+  on(hit, 'pointermove', e => { if (e.buttons) at(e); });
+  put();
+  return put;
+}
+/* a checkbox row: the label in p12 orange and the 17x17 box (8383, ticked 8384) */
+function osCheck(host, y, label, get, set) {
+  osTxt(host, label, 14, y, 143, 28, 495, 0xff981f, 0, 1, 10);
+  const box = osSpr(host, get() ? 8384 : 8383, 159, y + 5, 17, 17);
+  const hit = div(host, 'osc osHit'); hit.style.cssText = 'left:10px;top:' + y + 'px;width:170px;height:28px';
+  on(hit, 'click', () => { set(get() ? 0 : 1); OSUI.setSprite(box, get() ? 8384 : 8383); });
+  return () => OSUI.setSprite(box, get() ? 8384 : 8383);
+}
+const osPane = k => { const p = el('pane-' + k); p.classList.add('osLive'); const h = div(p, 'osPane'); return h; };
+const osOpt = k => () => OPT[k], osSetOpt = (k, then) => v => { OPT[k] = v; if (then) then(); applyOpts(OPT_ROWS.find(r => r.k === k)); };
+
+/* Settings: Controls, Audio and Display, as the side panel has them, carrying this game's own options; All Settings opens the
+   game's full list in the panel (the stone brings the 2007 panel back) */
+let osSet = null;
+function osSettings() {
+  const pane = el('pane-op');
+  if (osSet && osSet.all) { osSet.all = 0; pane.classList.add('osLive'); }
+  if (!osSet) { osSet = { host: osPane('op'), tab: 0, all: 0 }; }
+  const h = osSet.host;
+  h.textContent = '';
+  osTallTabs(h, [[2410, 22, 22, 21, 5], [911, 17, 18, 86, 6], [2932, 22, 22, 147, 4]], osSet.tab, i => { osSet.tab = i; osSettings(); });
+  osTxt(h, ['Controls Settings', 'Audio Settings', 'Display Settings'][osSet.tab], 0, 30, 190, 19, 496, 0xff981f, 1, 1);
+  const mid = osClip(h, 3, 49, 184, 176);
+  if (osSet.tab === 0) {
+    const L = osClip(mid, 6, 6, 180, 170);
+    osCheck(L, 0, 'Auto Retaliate', osOpt('retaliate'), osSetOpt('retaliate', () => { if (osCb) osCombat(); }));
+    osCheck(L, 28, 'PvP border warning', osOpt('pvpWarn'), osSetOpt('pvpWarn'));
+    osCheck(L, 56, 'Respawn clocks', osOpt('timers'), osSetOpt('timers'));
+    osCheck(L, 84, 'XP drops', osOpt('xpDrops'), osSetOpt('xpDrops', osOrbs));
+    const runBox = osSpr(L, P.run ? 762 : 761, 6, 120, 40, 40);
+    osSpr(L, 677, 17, 124, 17, 18);
+    const runT = osTxt(L, Math.round(P.energy) + '%', 3, 140, 45, 17, 495, 0xff981f, 1, 1, 14);
+    const rh = div(L, 'osc osHit'); rh.style.cssText = 'left:6px;top:120px;width:40px;height:40px'; rh.title = 'Toggle Run';
+    on(rh, 'click', () => { P.run = P.run ? 0 : 1; dirty.orb = 1; OSUI.setSprite(runBox, P.run ? 762 : 761); runT.osSet(Math.round(P.energy) + '%'); });
+    osSpr(L, 761, 48, 120, 40, 40); osSpr(L, 2410, 57, 129, 22, 22);
+    const dv = div(L, 'osc osHit'); dv.style.cssText = 'left:48px;top:120px;width:40px;height:40px'; dv.title = 'Developer console';
+    on(dv, 'click', devGate);
+  } else if (osSet.tab === 1) {
+    osSlider(mid, 18, 660, 2860, () => vol, v => setVol(v));
+    osSlider(mid, 60, 661, 2860, () => sfxVol, v => setSfxVol(v));
+  } else {
+    const B = OPT_ROWS.find(r => r.k === 'brightness'), V = OPT_ROWS.find(r => r.k === 'viewRadius');
+    osSlider(mid, 19, 659, 2858, () => (OPT.brightness - B.min) / (B.max - B.min), v => { OPT.brightness = Math.round((B.min + v * (B.max - B.min)) * 10) / 10; applyOpts(B); });
+    osSlider(mid, 56, 1162, 1201, () => (OPT.viewRadius - V.min) / (V.max - V.min), v => { const n = Math.round(V.min + v * (V.max - V.min)); if (n !== OPT.viewRadius) { OPT.viewRadius = n; applyOpts(V); } });
+    const L = osClip(mid, 6, 80, 180, 96);
+    osCheck(L, 0, '2007 models', osOpt('osrs'), v => { OPT.osrs = v; icons07Apply(1); osrsApply(); applyOpts(OPT_ROWS.find(r => r.k === 'osrs')); });
+    osCheck(L, 28, 'Hide all roofs', osOpt('hideRoofs'), osSetOpt('hideRoofs'));
+    osCheck(L, 56, 'Distance fog', osOpt('fog'), osSetOpt('fog'));
+  }
+  osSteel(h, 3, 49, 184, 176);
+  const all = osStoneBtn(h, 25, 228, 140, 30, 'All Settings');
+  on(all, 'click', () => { osSet.all = 1; pane.classList.remove('osLive'); drawOpts(); });
+}
+
+/* Logout: the two long buttons of script 2243; both leave through the game's own sign-out, which saves first */
+let osLo = null;
+function osLogout() {
+  if (osLo) return;
+  osLo = osPane('lo');
+  osTxt(osLo, 'Use the buttons below to<br>logout or switch worlds safely.', 0, 67, 190, 40, 495, 0xff981f, 1, 1, 18);
+  [[134, 174, 1048, 176, 'World Switcher', 0xc0c0c0], [201, 177, 1049, 178, 'Click here to logout', 0xff0000]].forEach(([y, l, m, r, s, hc]) => {
+    const b = div(osLo, 'osc osHit'); b.style.cssText = 'left:23px;top:' + y + 'px;width:144px;height:36px';
+    osSpr(b, m, 26, 0, 94, 36, { tile: 1 }); osSpr(b, l, 0, 0, 36, 36); osSpr(b, r, 108, 0, 36, 36);
+    const t = osTxt(b, s, 0, 0, 144, 36, 496, 0xf7f0df, 1, 1);
+    on(b, 'pointerenter', () => t.osSet(s, hc)); on(b, 'pointerleave', () => t.osSet(s, 0xf7f0df));
+    on(b, 'click', () => el('signout').click());
+  });
+}
+
+/* Emotes: enum 1000's names over enum 1001's pictures (1002's when locked), four across on a 42x49 pitch (script 699) */
+let osEm = null;
+function osEmotes() {
+  if (osEm) return;
+  osEm = { host: osPane('em'), scroll: 0 };
+  const view = osClip(osEm.host, 2, 0, 171, 261), list = div(view, 'osc');
+  list.style.cssText = 'left:0;top:0;width:171px;height:691px';
+  view.classList.add('osHit');
+  Promise.all([OSUI.enumOf(1000), OSUI.enumOf(1001), OSUI.enumOf(1002)]).then(([names, spr, locked]) => {
+    Object.keys(names).sort((a, b) => a - b).forEach((k, n) => {
+      const x = 42 * (n % 4), y = 6 + 49 * Math.floor(n / 4), open = !(k in locked) || +k === 54;
+      const g = osSpr(list, open ? spr[k] : locked[k], x, y, 48, 48);
+      g.title = names[k];
+      g.classList.add('osHit');
+      on(g, 'click', () => say(open ? 'You can\'t perform emotes in this world yet.' : 'You haven\'t unlocked this emote yet.'));
+    });
+    list.style.height = (6 + 49 * Math.ceil(Object.keys(names).length / 4)) + 'px';
+  });
+  const bar = osScrollbar(osEm.host, 173, 0, 261, () => [osEm.scroll, parseInt(list.style.height) - 261], v => { osEm.scroll = v; list.style.top = -v + 'px'; });
+  on(view, 'wheel', e => { e.preventDefault(); bar(e.deltaY > 0 ? 49 : -49); }, { passive: false });
+}
+/* a vertical scrollbar (script 31): arrows 773/788, the track 792 and the thumb 790 between its caps 789/791, all scaled */
+function osScrollbar(host, x, y, h, get, set) {
+  osSpr(host, 792, x, y + 16, 16, h - 32);
+  const th = div(host, 'osc'); th.style.cssText = 'left:' + x + 'px;top:' + (y + 16) + 'px;width:16px;height:10px';
+  const mid = osSpr(th, 790, 0, 5, 16, 1), top = osSpr(th, 789, 0, 0, 16, 5), bot = osSpr(th, 791, 0, 5, 16, 5);
+  const up = osSpr(host, 773, x, y, 16, 16), dn = osSpr(host, 788, x, y + h - 16, 16, 16);
+  up.classList.add('osHit'); dn.classList.add('osHit');
+  const move = d => {
+    const [v, max] = get(), nv = clamp(v + d, 0, Math.max(0, max));
+    set(nv);
+    const track = h - 32, S = max + h, H = Math.max(10, Math.floor(track * h / Math.max(h, S))), ty = max > 0 ? Math.floor((track - H) * nv / max) : 0;
+    th.style.top = (y + 16 + ty) + 'px'; th.style.height = H + 'px'; mid.style.height = Math.max(0, H - 10) + 'px'; bot.style.top = (H - 5) + 'px';
+  };
+  on(up, 'click', () => move(-15)); on(dn, 'click', () => move(15));
+  move(0);
+  return move;
+}
+
+/* Music: the music table's visible rows (dbtable 44, not hidden) by sort name, green when the table unlocks them itself, red
+   otherwise, in the dark list inside the steel border with the four mode buttons and the playlist box above */
+let osMu = null;
+function osMusic() {
+  if (osMu) return;
+  osMu = { host: osPane('mu'), scroll: 0 };
+  const h = osMu.host;
+  [[6, 1, 7427], [49, 0, 7428], [92, 0, 7429], [147, 1, 7430]].forEach(([x, down, ic]) => {
+    const k = down ? 16 : 0, base = down ? 6812 : 6796;
+    osSpr(h, down ? 897 : 297, x + 1, 6, 35, 24, { tile: 1 });
+    osSpr(h, base, x, 5, 5, 5, { tile: 1 }); osSpr(h, base + 1, x + 32, 5, 5, 5, { tile: 1 }); osSpr(h, base + 2, x, 26, 5, 5, { tile: 1 }); osSpr(h, base + 3, x + 32, 26, 5, 5, { tile: 1 });
+    osSpr(h, base + 4, x, 10, 5, 16, { tile: 1 }); osSpr(h, base + 5, x + 5, 5, 27, 5, { tile: 1 }); osSpr(h, base + 6, x + 32, 10, 5, 16, { tile: 1 }); osSpr(h, base + 7, x + 5, 26, 27, 5, { tile: 1 });
+    osSpr(h, ic, x + 7, 9, 23, 18);
+  });
+  osTxt(h, 'Playing:', 7, 44, 47, 18, 495, 0xff981f, 0, 0);
+  const now = osTxt(h, '', 7, 61, 183, 18, 495, 0x3ce6e6, 0, 0);
+  osSpr(h, 297, 64, 37, 120, 20, { tile: 1 }); osRect(h, 64, 37, 120, 20, 0x0e0e0c, 0); osRect(h, 65, 38, 118, 18, 0x474745, 0);
+  osSpr(h, 788, 166, 39, 16, 16); osTxt(h, 'All music', 66, 39, 100, 16, 494, 0xff981f, 1, 1);
+  osRect(h, 3, 80, 184, 164, 0, 1, 212);
+  const view = osClip(h, 11, 86, 154, 154), list = div(view, 'osc');
+  list.style.cssText = 'left:0;top:0;width:154px;height:0';
+  view.classList.add('osHit');
+  const count = osTxt(h, '', 0, 247, 190, 13, 494, 0xff981f, 1, 2);
+  osSteel(h, 2, 80, 186, 166);
+  const bar = osScrollbar(h, 166, 86, 154, () => [osMu.scroll, list.offsetHeight - 154 + 6], v => { osMu.scroll = v; list.style.top = -v + 'px'; });
+  on(view, 'wheel', e => { e.preventDefault(); bar(e.deltaY > 0 ? 45 : -45); }, { passive: false });
+  OSUI.cfg('dbtableindex', 44).then(ix => {
+    const ids = ix && ix[-1] && ix[-1].values[0][0];
+    return Promise.all((ids || []).map(id => OSUI.cfg('dbrow', id).then(r => r && [id, r.values])));
+  }).then(rows => {
+    const tracks = rows.filter(r => r && r[1] && !(r[1][9] && r[1][9][0])).map(([id, v]) => ({ id, sort: String(v[0] && v[0][0] || ''), n: String(v[1] && v[1][0] || ''), open: !!(v[6] && v[6][0]) || !v[5] }))
+      .sort((a, b) => a.sort.toLowerCase() < b.sort.toLowerCase() ? -1 : a.sort.toLowerCase() > b.sort.toLowerCase() ? 1 : 0);
+    const playing = !bgm.paused ? '7th Realm' : '';   // the one track this game plays
+    tracks.forEach((t, i) => {
+      const col = t.n === playing ? 0x3ce6e6 : t.open ? 0x0dc10d : 0xff0000, r = osTxt(list, t.n, 0, 3 + 15 * i, 154, 15, 495, col, 0, 1);
+      r.classList.add('osHit');
+      on(r, 'pointerenter', () => r.osSet(t.n, 0xffffff)); on(r, 'pointerleave', () => r.osSet(t.n, col));
+      on(r, 'click', () => say(t.open ? 'This world plays its own music: ' + t.n + ' is not in it.' : 'You have not unlocked this piece of music yet!'));
+    });
+    list.style.height = (6 + 15 * tracks.length) + 'px';
+    count.osSet('Unlocked: ' + tracks.filter(t => t.open).length + ' / ' + tracks.length);
+    now.osSet(playing);
+    bar(0);
+  }).catch(e => console.warn('[seedworld] the music list could not be read', e));
+}
+
+/* Friends: the header, the steel frame and the empty list's message with Add/Del Friend (script 125); the ignore list behind the
+   toggle in the corner */
+let osFr = null;
+function osFriends() {
+  if (!osFr) osFr = { host: osPane('fr'), ign: 0 };
+  const h = osFr.host, ign = osFr.ign;
+  h.textContent = '';
+  const tg = osSpr(h, ign ? 1702 : 1703, 171, 1, 17, 18);
+  tg.classList.add('osHit'); tg.title = ign ? 'View Friends List' : 'View Ignore List';
+  on(tg, 'click', () => { osFr.ign = ign ? 0 : 1; osFriends(); });
+  osTxt(h, ign ? 'Ignore List' : 'Friends List', 0, 1, 170, 20, 496, 0xff981f, 1, 1);
+  osTxt(h, ign ? 'You may ignore users by using the button below, or by right-clicking on a message from them and selecting to add them to your ignore list.'
+    : 'You may add friends by using the button below, or by right-clicking on a message from them and selecting to add them as a friend.', 14, 26, 162, 102, 495, 0xffffff, 1, 1);
+  osSteel(h, 2, 20, 186, 205);
+  [[18, ign ? 'Add Name' : 'Add Friend'], [100, ign ? 'Del Name' : 'Del Friend']].forEach(([x, s]) => {
+    const b = osSpr(h, 293, x, 225, 72, 36); b.classList.add('osHit');
+    osTxt(h, s, x, 225, 72, 36, 494, 0xff981f, 1, 1);
+    on(b, 'click', () => say(ign ? 'There is no one here to ignore.' : 'Friends lists are not kept in this world yet.'));
+  });
+}
+
+/* the chat-channel tabs (script 4474): four short tabs, the first lit; the channel itself is the server's, and there is none */
+let osCl = null;
+function osClan() {
+  if (osCl) return;
+  osCl = osPane('cl');
+  [[4, 3338], [50, 3339], [96, 3340], [142, 3344]].forEach(([x, ic], i) => {
+    const s = i ? [2279, 2280] : [2277, 2278];
+    osSpr(osCl, s[0], x, 3, 20, 21); osSpr(osCl, s[0], x + 24, 3, 20, 21, { flipH: 1 }); osSpr(osCl, s[1], x + 16, 3, 12, 21); osSpr(osCl, ic, x + 13, 5, 17, 18);
+  });
+  osRect(osCl, 0, 23, 4, 1, 0x5d5848, 1); osRect(osCl, 48, 23, 142, 1, 0x5d5848, 1);
+  osTxt(osCl, 'You are not currently in a chat-channel.', 14, 60, 162, 60, 495, 0xff981f, 1, 1);
+}
+
+/* Account management (if 109's Account tab): the name, and the game's own ledgers behind the long buttons (sprite 1701) */
+let osAc = null;
+function osAccount() {
+  if (osAc) return;
+  osAc = osPane('ac');
+  osTallTabs(osAc, [[2410, 22, 22, 21, 5], [2411, 22, 22, 84, 5], [2412, 22, 22, 147, 5]], 0, () => {});
+  osTxt(osAc, 'Account', 0, 33, 190, 22, 496, 0xff981f, 1, 1, 18);
+  osTxt(osAc, 'Name: ' + (NAME || '<col=ff0000>Not Set</col>'), 0, 56, 190, 22, 495, 0xff981f, 1, 1, 18);
+  [[78, 2151, 'Character Summary', () => showStats()], [110, 2150, 'Collection Log', () => el('clogBtn').click()], [142, 1706, 'Feats', () => el('caBtn').click()]].forEach(([y, ic, s, f]) => {
+    const b = div(osAc, 'osc osHit'); b.style.cssText = 'left:27px;top:' + (y - 2) + 'px;width:136px;height:32px';
+    osSpr(b, 1701, 2, 2, 132, 28); osSpr(b, ic, 7, 5, 22, 22); osSpr(b, ic, 107, 5, 22, 22);
+    const t = osTxt(b, s, 0, 0, 136, 32, 494, 0xf7f0df, 1, 1);
+    on(b, 'pointerenter', () => t.osSet(s, 0xc0c0c0)); on(b, 'pointerleave', () => t.osSet(s, 0xf7f0df));
+    on(b, 'click', f);
+  });
+}
+Object.assign(PANE_DRAW, { lo: () => OS.on && osLogout(), em: () => OS.on && osEmotes(), mu: () => OS.on && osMusic(), fr: () => OS.on && osFriends(), cl: () => OS.on && osClan(), ac: () => OS.on && osAccount() });
+PANE_DRAW.op = () => OS.on ? osSettings() : drawOpts();
+
+/* ---- the mouseover text and the right-click menu, as the client draws them (natively, in b12): the verb white, an item's
+   name orange, an npc's yellow with its "(level-N)" coloured by how far it stands from your own combat level, scenery cyan;
+   the menu a 0x5d5447 box with a black "Choose Option" bar and a black edge round the rows, 15 pixels a row, the row under
+   the pointer yellow, centred on the click ---- */
+const osLvlCol = lv => { const d = lv - combatLevel(); return d < -9 ? '00ff00' : d < -6 ? '40ff00' : d < -3 ? '80ff00' : d < 0 ? 'c0ff00' : d > 9 ? 'ff0000' : d > 6 ? 'ff3000' : d > 3 ? 'ff7000' : d > 0 ? 'ffb000' : 'ffff00'; };
+function osLabel(html) {   // this game's label markup as the client's colour tags
+  const npc = html.indexOf('class="lvl"') >= 0, ent = t => t.replace(/&lt;/g, '<lt>').replace(/&gt;/g, '<gt>').replace(/&amp;/g, '&').replace(/&#39;/g, "'").replace(/&quot;/g, '"');
+  let out = '';
+  for (const m of html.match(/<[^>]*>|[^<]+/g) || []) {
+    if (m[0] !== '<') out += ent(m);
+    else if (m.indexOf('class="itm"') >= 0) out += '<col=ff9040>';
+    else if (m.indexOf('class="obj"') >= 0) out += npc ? '<col=ffff00>' : '<col=00ffff>';
+    else if (m.indexOf('class="lvl"') >= 0) out += '<col=' + '000000' + '>';
+    else if (m === '</span>') out += '</col>';
+  }
+  return out.replace(/<col=000000>\s*\(level (\d+)\)/g, (s, lv) => '<col=' + osLvlCol(+lv) + '> (level-' + lv + ')').replace(/<\/col><\/col>/g, '</col>');
+}
+function osMenu(x, y, opts) {
+  const f = OSUI.fontNow(496);
+  if (!f) return false;
+  const rows = opts.map(o => ({ s: osLabel(optLabel(o)), f: () => { closeCtx(); o.f(); } })).concat([{ s: 'Cancel', f: closeCtx }]);
+  let w = OSUI.width(f, 'Choose Option');
+  for (const r of rows) w = Math.max(w, OSUI.width(f, r.s));
+  w += 8;
+  const h = rows.length * 15 + 22, k = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--oss')) || 1;
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h; cv.className = 'osg';
+  const g = cv.getContext('2d');
+  let hi = -2;
+  const paint = n => {
+    if (n === hi) return;
+    hi = n;
+    g.fillStyle = '#5d5447'; g.fillRect(0, 0, w, h);
+    g.fillStyle = '#000'; g.fillRect(1, 1, w - 2, 16);
+    g.fillRect(1, 18, w - 2, 1); g.fillRect(1, h - 2, w - 2, 1); g.fillRect(1, 18, 1, h - 19); g.fillRect(w - 2, 18, 1, h - 19);
+    OSUI.drawString(g, f, 'Choose Option', 3, 14, 0x5d5447);
+    rows.forEach((r, i) => OSUI.drawString(g, f, r.s, 3, 31 + i * 15, i === n ? 0xffff00 : 0xffffff, 0));
+  };
+  const rowAt = e => { const r = cv.getBoundingClientRect(), py = (e.clientY - r.top) * h / r.height; const i = Math.floor((py - 18) / 15); return i >= 0 && i < rows.length ? i : -1; };
+  paint(-1);
+  ctxEl.textContent = '';
+  ctxEl.classList.add('osMenu');
+  ctxEl.appendChild(cv);
+  cv.onpointermove = e => paint(rowAt(e));
+  cv.onpointerleave = () => paint(-1);
+  cv.onclick = e => { const i = rowAt(e); if (i >= 0) rows[i].f(); };
+  ctxEl.style.display = 'block';
+  ctxEl.style.left = clamp(Math.round(x - w * k / 2), 0, Math.max(0, innerWidth - w * k)) + 'px';
+  ctxEl.style.top = clamp(Math.round(y), 0, Math.max(0, innerHeight - h * k)) + 'px';
+  return true;
+}
+const osHoverEl = div(document.body, ''); osHoverEl.id = 'osHover';
+const osHoverCv = document.createElement('canvas'); osHoverCv.width = 512; osHoverCv.height = 20; osHoverCv.className = 'osg';
+osHoverEl.appendChild(osHoverCv);
+new MutationObserver(() => {
+  if (!OS.on) return;
+  const f = OSUI.fontNow(496), g = osHoverCv.getContext('2d');
+  g.clearRect(0, 0, 512, 20);
+  if (f && hoverEl.innerHTML) OSUI.drawString(g, f, osLabel(hoverEl.innerHTML.replace(/<span style="[^"]*">([^<]*)<\/span>/, '$1')), 4, 15, 0xffffff, 0);
+}).observe(hoverEl, { childList: true, subtree: true, characterData: true });
+
+OS.boot = 1;
+osuiApply();
 
 requestAnimationFrame(frame);
 el('boot').classList.add('gone');

@@ -1,0 +1,1238 @@
+/* ---- GIELINOR (map07.js) ------------------------------------------------------------------------------------
+   The curated 2007 map, played instead of a seed. Terrain, scenery, doors, stairs, spawns and ground items stream
+   out of the osrs-r2 transcode tree (OSRSK.OUT — the one place its base is named) exactly the way
+   ../osrs-r2/viewer/viewer.js draws them, rebuilt for this renderer: three r128, one tile = one unit, north = -z,
+   a tile's centre on the integer (OSRS tile gx,gy is seedworld tile x = gx, z = -gy). Nothing Jagex-format is
+   decoded here; this file reads the atoms (../osrs-r2/GUIDE.md) plus the four tables the viewer's build scripts derive
+   (assets/map07/, rebuilt by tools/map07/): which squares exist, the NPC + item spawns, door pairs, transports — plus
+   roofs.json, this game's own: the blank roof kits and the models they borrow.
+
+   What the viewer never needed and a game does: collision. Walls block their tile EDGE, objects their footprint,
+   floor flags their tile, per render plane (a bridge deck collides one plane down), exactly the client's
+   CollisionMap — with the viewer's own exception that an openable wall (a door, a gate, a curtain) never blocks, so
+   no client can disagree with another about whether a door is shut. Everything else a game needs of the map —
+   heights, line of sight, picking, transports, the minimap's colours — is a query on the regions loaded.
+
+   Where the viewer drew the map wrong, this file draws it the client's way instead: roof kits this cache ships as blank
+   black quads borrow their sibling kit's models (roofs.json); translucent faces blend instead of standing solid; tiles
+   are cut by their overlay shape and underlays blend over their neighbours; textured overlays wear their texture; and
+   locs whose def asks for it follow the ground under every vertex (contouredGround) from the height at their middle.
+
+   Behind one global, MAP07; nothing runs until load(). game.js section 46 is the whole of the wiring: it classifies
+   the scenery into its own object kinds (a tree is a tree to woodcutting), turns spawns into monsters and draws the
+   maps; this file only knows the map. Lights: the viewer's Lambert pair (ambient 0.65 + a 0.9 sun), added to the
+   scene and switched on only while the map is up — every seedworld material is unlit, so nothing else sees them. ---- */
+const MAP07 = (() => {
+'use strict';
+
+const OUT = OSRSK.OUT, DATA = 'assets/map07';
+const BRIGHT = 0.7;                  /* the viewer's palette exponent for model faces */
+const U = 1 / 128;                   /* cache units -> tiles */
+const MODEL_MAX = 7000;              /* parsed model records kept before trimming the oldest (a trimmed one just refetches) */
+const PLAYER_STAND = 808, PLAYER_WALK = 819;   /* the client's default player pose sequences; bipeds with none borrow them */
+
+/* collision flags (the client's CollisionMap bits); projectile twins are the movement bits << 9 */
+const F_NW = 1, F_N = 2, F_NE = 4, F_E = 8, F_SE = 16, F_S = 32, F_SW = 64, F_W = 128, F_OBJ = 256;
+const P_OBJ = F_OBJ << 9, F_DECO = 0x40000, F_FLOOR = 0x200000, F_FULL = F_OBJ | F_DECO | F_FLOOR;
+
+let scene = null, fogCenter = null, H = {};
+let root = null, planeG = null, amb = null, sun = null, bright = 1;
+let loading = null, loaded = false, active = false;
+let underlays = {}, overlays = {}, textures = {};
+const manifest = new Set(), doorPairs = new Map(), spawnsByRegion = new Map();
+let transByLoc = {}, itemSpawns = [], resolveItem = {}, resolveLoc = {}, worldImg = null;
+let roofFix = {};   /* loc id -> { as, m: { shape: model } }: roof kits this cache ships blank borrow a sibling's models (roofs.json) */
+
+const getJson = url => fetch(url).then(r => r.ok ? r.json() : Promise.reject(new Error(url + ' -> HTTP ' + r.status)));
+const getBin = url => fetch(url).then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(url + ' -> HTTP ' + r.status)));
+/* a frame's breath between region builds; the timer backs the frame up, since an occluded window can starve rAF without ever reporting itself hidden */
+const nextFrame = () => new Promise(r => { let done = 0; const go = () => { if (!done) { done = 1; r(); } }; if (typeof requestAnimationFrame === 'function' && !document.hidden) requestAnimationFrame(go); setTimeout(go, 50); });
+const clean = s => (typeof s === 'string' ? s.replace(/<[^>]*>/g, '').trim() : '');
+const opsOf = def => Object.entries((def && def.ops) || {}).filter(([, o]) => o && o.text).sort(([a], [b]) => a - b).map(([, o]) => clean(o.text));
+
+/* ---- assets: one loader for everything under OUT ---- */
+const shardP = new Map(), shardE = new Map(), modelM = new Map(), fmP = new Map(), faP = new Map(), texMats = new Map(), texMatsT = new Map(), texMatsG = new Map(), texMaps = new Map();
+const WHITE = [1, 1, 1];
+function shard(type, s) {
+  const key = type + '/' + s;
+  let p = shardP.get(key);
+  if (!p) {
+    p = getJson(OUT + '/cfg/' + key + '.json').then(j => {
+      const e = j.entries || {};
+      if (type === 'loc') for (const id in e) { const f = roofFix[id], d = e[id]; if (f && d.models) d.models = d.models.map(q => f.m[q.shape] !== undefined ? { model: f.m[q.shape], shape: q.shape } : q); }
+      shardE.set(key, e);
+      return e;
+    }, () => { shardE.set(key, {}); return {}; });
+    shardP.set(key, p);
+  }
+  return p;
+}
+async function defs(type, ids) {   /* sharded on-demand defs; shard = floor(id/256) */
+  const out = {}, shards = [...new Set([...ids].filter(i => i >= 0).map(i => (i / 256) | 0))];
+  await Promise.all(shards.map(async s => Object.assign(out, await shard(type, s))));
+  return out;
+}
+const defSync = (type, id) => { const e = shardE.get(type + '/' + ((id / 256) | 0)); return e ? e[id] : undefined; };
+async function catalog(type) {      /* the small whole catalogs: underlay, overlay, texture */
+  const idx = await getJson(OUT + '/cfg/' + type + '/index.json'), out = {};
+  for (const s of idx.shards) Object.assign(out, (await getJson(OUT + '/cfg/' + type + '/' + s + '.json')).entries);
+  return out;
+}
+const modelP = new Map();
+function models(ids) {
+  const ps = [];
+  for (const id of ids) {
+    if (!(id >= 0) || modelM.has(id)) continue;
+    let p = modelP.get(id);
+    if (!p) { p = getBin(OUT + '/m/' + id + '.bin').then(b => parseModel(b), () => null).then(m => { modelM.set(id, m); modelP.delete(id); }); modelP.set(id, p); }
+    ps.push(p);
+  }
+  return Promise.all(ps);
+}
+function trimModels() {   /* only between builds: a model a build is about to read must never vanish under it */
+  if (modelM.size <= MODEL_MAX) return;
+  let drop = modelM.size - ((MODEL_MAX * 0.8) | 0);
+  for (const key of modelM.keys()) { if (drop-- <= 0) break; if (!pinned.has(key)) modelM.delete(key); }
+}
+const pinned = new Set();
+const model = id => modelM.get(id);
+const framemap = id => { if (!fmP.has(id)) fmP.set(id, getBin(OUT + '/fm/' + id + '.bin').then(parseFramemap)); return fmP.get(id); };
+const frameArchive = id => {
+  if (!faP.has(id)) faP.set(id, getBin(OUT + '/a/' + id + '.bin').then(async b => { const fa = parseFrames(b); fa.fm = await framemap(fa.framemapId); return fa; }));
+  return faP.get(id);
+};
+function texMap(id) {
+  let tex = texMaps.get(id);
+  if (!tex) { tex = new THREE.TextureLoader().load(OUT + '/tx/' + id + '.png'); tex.wrapS = tex.wrapT = THREE.RepeatWrapping; texMaps.set(id, tex); }
+  return tex;
+}
+function texMaterial(id) {
+  let m = texMats.get(id);
+  if (!m) { m = new THREE.MeshLambertMaterial({ map: texMap(id), side: THREE.DoubleSide, alphaTest: 0.4 }); texMats.set(id, m); }
+  return m;
+}
+/* a translucent textured face: the texture times its vertex alpha, drawn after the solid world without writing depth,
+   pulled a hair toward the eye so a wash laid flat on the floor never fights the floor */
+function texMaterialT(id) {
+  let m = texMatsT.get(id);
+  if (!m) {
+    m = new THREE.MeshLambertMaterial({ map: texMap(id), side: THREE.DoubleSide, vertexColors: true, transparent: true, depthWrite: false, alphaTest: 0.01, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+    texMatsT.set(id, m);
+  }
+  return m;
+}
+
+/* ---- atoms (little-endian; ../osrs-r2/GUIDE.md) ---- */
+const magic = dv => String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
+function parseTerrain(buf) {   /* OSTR v1 */
+  const dv = new DataView(buf);
+  if (magic(dv) !== 'OSTR' || dv.getUint8(4) !== 1) throw new Error('bad OSTR atom');
+  let o = 9;
+  const cut = n => buf.slice(o, (o += n));
+  const r = { sqX: dv.getUint16(5, true), sqY: dv.getUint16(7, true),
+    H: new Int16Array(cut(32768)), UL: new Uint16Array(cut(32768)), OL: new Uint16Array(cut(32768)), SR: new Uint8Array(cut(16384)), FL: new Uint8Array(cut(16384)) };
+  r.bridge = new Uint8Array(4096);
+  for (let i = 0; i < 4096; i++) r.bridge[i] = r.FL[4096 + i] & 2 ? 1 : 0;
+  return r;
+}
+function parseLocs(buf) {      /* OSLC v1 */
+  const dv = new DataView(buf);
+  if (magic(dv) !== 'OSLC' || dv.getUint8(4) !== 1) throw new Error('bad OSLC atom');
+  const n = dv.getUint32(5, true), out = new Array(n);
+  for (let i = 0, o = 9; i < n; i++, o += 9) out[i] = { id: dv.getUint32(o, true), plane: dv.getUint8(o + 4), x: dv.getUint8(o + 5), y: dv.getUint8(o + 6), type: dv.getUint8(o + 7), rot: dv.getUint8(o + 8) };
+  return out;
+}
+const M_TYPES = 1, M_ALPHA = 2, M_PRIOS = 4, M_TEX = 8, M_TCOORD = 16, M_VGROUP = 32;
+function parseModel(buf) {     /* m/<id>.bin record */
+  const dv = new DataView(buf);
+  const vc = dv.getUint16(0, true), fc = dv.getUint16(2, true), ttc = dv.getUint16(4, true), flags = dv.getUint8(6);
+  let o = 8;
+  const cut = n => buf.slice(o, (o += n));
+  const verts = new Int16Array(cut(vc * 6)), idx = new Uint16Array(cut(fc * 6)), colors = new Uint16Array(cut(fc * 2));
+  const texs = flags & M_TEX ? new Uint16Array(cut(fc * 2)) : null;
+  o += ttc * 6;
+  const types = flags & M_TYPES ? new Int8Array(cut(fc)) : null;
+  const alphas = flags & M_ALPHA ? new Uint8Array(cut(fc)) : null;
+  if (flags & M_PRIOS) o += fc;
+  if (flags & M_TCOORD) o += fc;
+  o += ttc;
+  const vgroups = flags & M_VGROUP ? new Uint8Array(cut(vc)) : null;
+  return { vc, fc, verts, idx, colors, texs, types, alphas, vgroups };
+}
+/* the client never draws render-type-2 faces nor alpha-255 ones: modellers use them for hidden helper geometry */
+const faceHidden = (m, f) => (m.types !== null && m.types[f] === 2) || (m.alphas !== null && m.alphas[f] > 250);
+function parseFramemap(buf) {  /* OSFM v1 */
+  const dv = new DataView(buf);
+  if (magic(dv) !== 'OSFM') throw new Error('bad OSFM');
+  const n = dv.getUint16(5, true), types = new Uint8Array(n), labels = [];
+  let o = 7;
+  for (let g = 0; g < n; g++) {
+    types[g] = dv.getUint8(o);
+    const lc = dv.getUint16(o + 1, true), ls = new Uint16Array(lc);
+    for (let i = 0; i < lc; i++) ls[i] = dv.getUint16(o + 3 + i * 2, true);
+    labels.push(ls); o += 3 + lc * 2;
+  }
+  return { types, labels };
+}
+function parseFrames(buf) {    /* OSFA v1 */
+  const dv = new DataView(buf);
+  if (magic(dv) !== 'OSFA') throw new Error('bad OSFA');
+  const framemapId = dv.getUint16(5, true), frameCount = dv.getUint16(7, true), byFile = new Map();
+  let o = 9;
+  for (let f = 0; f < frameCount; f++) {
+    const fileId = dv.getUint16(o, true), n = dv.getUint16(o + 2, true);
+    o += 4;
+    const bases = new Uint16Array(n), ds = new Int16Array(n * 3);
+    for (let i = 0; i < n; i++, o += 8) { bases[i] = dv.getUint16(o, true); ds[i * 3] = dv.getInt16(o + 2, true); ds[i * 3 + 1] = dv.getInt16(o + 4, true); ds[i * 3 + 2] = dv.getInt16(o + 6, true); }
+    byFile.set(fileId, { bases, ds });
+  }
+  return { framemapId, byFile };
+}
+
+/* ---- sequences: cfg/seq frameIDs ([archive, file] pairs) -> playable frame lists ---- */
+const seqs = new Map();   /* seq id -> [{tr, fm, ms}] | null (missing, or skeletal-only) */
+async function loadSeqs(ids) {
+  const want = [...new Set([...ids].filter(i => i !== undefined && i >= 0 && !seqs.has(i)))];
+  if (!want.length) return;
+  const d = await defs('seq', want);
+  await Promise.all(want.map(async id => {
+    const s = d[id];
+    if (!s || !s.frameIDs || !s.frameIDs.length) { seqs.set(id, null); return; }
+    try {
+      const archs = {};
+      await Promise.all([...new Set(s.frameIDs.map(f => f[0]))].map(async a => { archs[a] = await frameArchive(a); }));
+      const frames = [];
+      s.frameIDs.forEach(([a, f], i) => { const tr = archs[a] && archs[a].byFile.get(f); if (tr) frames.push({ tr, fm: archs[a].fm, ms: ((s.frameLengths && s.frameLengths[i]) || 2) * 20 }); });
+      seqs.set(id, frames.length ? frames : null);
+    } catch { seqs.set(id, null); }
+  }));
+}
+
+/* ---- colour: Jagex 16-bit HSL -> RGB (RuneLite JagexColor), the viewer's exponent ---- */
+const palC = new Map();
+function hsl(v) {
+  let c = palC.get(v);
+  if (c !== undefined) return c;
+  const hue = (v >> 10 & 63) / 64 + 0.0078125, sat = (v >> 7 & 7) / 8 + 0.0625, lum = (v & 127) / 128;
+  const ch = (1 - Math.abs(2 * lum - 1)) * sat, x = ch * (1 - Math.abs((hue * 6) % 2 - 1)), l = lum - ch / 2;
+  let r = l, g = l, b = l;
+  switch ((hue * 6) | 0) { case 0: r += ch; g += x; break; case 1: g += ch; r += x; break; case 2: g += ch; b += x; break; case 3: b += ch; g += x; break; case 4: b += ch; r += x; break; default: r += ch; b += x; }
+  const adj = q => Math.min(Math.pow(Math.min((q * 256) | 0, 255) / 256, BRIGHT), 0.999);
+  palC.set(v, c = [adj(r), adj(g), adj(b)]);
+  return c;
+}
+const rgbI = v => [(v >> 16 & 255) / 255, (v >> 8 & 255) / 255, (v & 255) / 255];
+function faceColor(m, f, recol, retex) {
+  let tid = m.texs ? m.texs[f] - 1 : -1;
+  if (tid >= 0 && retex && retex.has(tid)) tid = retex.get(tid);
+  if (tid >= 0 && textures[tid]) return rgbI(textures[tid].avgRgbAdjusted);
+  let c = m.colors[f];
+  if (recol && recol.has(c)) c = recol.get(c);
+  return hsl(c);
+}
+function tileColor(ol, ul) {   /* a tile's colour on the maps: an overlay's own map colour first, as the client's minimap takes it */
+  if (ol) {
+    const d = overlays[ol - 1] || {};
+    if (d.secondaryRgbColor !== undefined) return d.secondaryRgbColor;
+    if (d.texture !== undefined && textures[d.texture]) return textures[d.texture].avgRgbAdjusted;
+    if (d.rgbColor !== 0xff00ff) return d.rgbColor || 0;   /* magenta: transparent, the underlay shows */
+  }
+  if (ul) { const d = underlays[ul - 1]; if (d) return d.rgb; }
+  return -1;
+}
+function colorMaps(def, bare) {
+  let recol = null, retex = null;
+  if (!bare && def.recolorFrom) { recol = new Map(); for (let i = 0; i < def.recolorFrom.length; i++) recol.set(def.recolorFrom[i] & 0xffff, def.recolorTo[i] & 0xffff); }
+  if (!bare && def.retextureFrom) { retex = new Map(); for (let i = 0; i < def.retextureFrom.length; i++) retex.set(def.retextureFrom[i], def.retextureTo[i]); }
+  return { recol, retex };
+}
+
+/* ---- the loaded world ---- */
+const regions = new Map();   /* rid -> R: terrain grids, collision, meshes, owners, objects */
+let lastR = null;
+const ridOf = (gx, gy) => ((gx >> 6) << 8) | (gy >> 6);
+function regionAt(gx, gy) {
+  if (lastR && gx >> 6 === lastR.sqX && gy >> 6 === lastR.sqY) return lastR;
+  const r = regions.get(ridOf(gx, gy));
+  if (r && r.ready) lastR = r;
+  return r && r.ready ? r : null;
+}
+const regionRaw = (gx, gy) => regions.get(ridOf(gx, gy)) || null;   /* loading included: collision writes land as soon as a region is parsed */
+function cornerH(p, gx, gy, fb) {   /* raw cache height at a tile's SW corner; a missing neighbour clamps into fb */
+  const r = regionRaw(gx, gy), b = p * 4096;
+  if (r && r.H) return r.H[b + (gx & 63) * 64 + (gy & 63)];
+  return fb.H[b + Math.min(Math.max(gx - fb.sqX * 64, 0), 63) * 64 + Math.min(Math.max(gy - fb.sqY * 64, 0), 63)];
+}
+const bridgeAt = (gx, gy) => { const r = regionRaw(gx, gy); return r && r.bridge ? r.bridge[(gx & 63) * 64 + (gy & 63)] : 0; };
+const renderPlane = (plane, gx, gy) => (plane >= 1 && bridgeAt(gx, gy) ? plane - 1 : plane);
+/* the ground's height in tiles (up) at continuous OSRS tile coords; ground level on a bridge walks the deck above */
+function heightAt(plane, fx, fy) {
+  const gx = Math.floor(fx), gy = Math.floor(fy), r = regionRaw(gx, gy);
+  if (!r || !r.H) return 0;
+  if (plane === 0 && bridgeAt(gx, gy)) plane = 1;
+  const h00 = cornerH(plane, gx, gy, r), h10 = cornerH(plane, gx + 1, gy, r), h01 = cornerH(plane, gx, gy + 1, r), h11 = cornerH(plane, gx + 1, gy + 1, r);
+  const tx = fx - gx, ty = fy - gy;
+  return -((h00 * (1 - tx) + h10 * tx) * (1 - ty) + (h01 * (1 - tx) + h11 * tx) * ty) * U;
+}
+/* seedworld coordinates: x = gx, z = -gy, a tile's centre on the integer */
+const yAt = (plane, x, z) => heightAt(plane, x + 0.5, -z + 0.5);
+
+/* ---- collision (the client's CollisionMap, per render plane) ---- */
+/* an upper floor's empty air stays walkable, as in the client: its walls fence it, and rooftop courses, platforms and
+   spawns stand on tiles that carry no floor of their own */
+function flagAt(rp, gx, gy) { const r = regionAt(gx, gy); return r ? r.clip[rp * 4096 + (gx & 63) * 64 + (gy & 63)] : F_FULL; }
+function orFlag(R, rp, gx, gy, f) {   /* a write past R's edge is kept on R and replayed into the neighbour whenever both are up */
+  if (rp < 0 || rp > 3 || !f) return;
+  const t = regionRaw(gx, gy);
+  if (t === R || (t && t.clip)) { t.clip[rp * 4096 + (gx & 63) * 64 + (gy & 63)] |= f; if (t === R) return; }
+  if (t !== R) R.ext.push(ridOf(gx, gy), rp * 4096 + (gx & 63) * 64 + (gy & 63), f);
+}
+function addWall(R, rp, x, y, type, rot, bp) {
+  const f = (gx, gy, b) => orFlag(R, rp, gx, gy, bp ? b | (b << 9) : b);
+  if (type === 0) {
+    if (rot === 0) { f(x, y, F_W); f(x - 1, y, F_E); } else if (rot === 1) { f(x, y, F_N); f(x, y + 1, F_S); }
+    else if (rot === 2) { f(x, y, F_E); f(x + 1, y, F_W); } else { f(x, y, F_S); f(x, y - 1, F_N); }
+  } else if (type === 1 || type === 3) {
+    if (rot === 0) { f(x, y, F_NW); f(x - 1, y + 1, F_SE); } else if (rot === 1) { f(x, y, F_NE); f(x + 1, y + 1, F_SW); }
+    else if (rot === 2) { f(x, y, F_SE); f(x + 1, y - 1, F_NW); } else { f(x, y, F_SW); f(x - 1, y - 1, F_NE); }
+  } else if (type === 2) {
+    if (rot === 0) { f(x, y, F_W | F_N); f(x - 1, y, F_E); f(x, y + 1, F_S); } else if (rot === 1) { f(x, y, F_N | F_E); f(x, y + 1, F_S); f(x + 1, y, F_W); }
+    else if (rot === 2) { f(x, y, F_E | F_S); f(x + 1, y, F_W); f(x, y - 1, F_N); } else { f(x, y, F_S | F_W); f(x, y - 1, F_N); f(x - 1, y, F_E); }
+  }
+}
+const OPENABLE = /^(open|close|shut)$/i;
+const openable = (def, id) => doorPairs.has(id) || opsOf(def).some(o => OPENABLE.test(o));
+function clipLoc(R, def, id, pl, w, l) {
+  const rp = renderPlane(pl.plane, pl.gx, pl.gy), ct = def.clipType === undefined ? 2 : def.clipType, bp = def.blocksProjectile !== false, t = pl.type;
+  if (t === 22) { if (ct === 1) orFlag(R, rp, pl.gx, pl.gy, F_DECO); return; }
+  if (t <= 3) { if (ct !== 0 && !openable(def, id)) addWall(R, rp, pl.gx, pl.gy, t, pl.rot, bp); return; }
+  if ((t >= 9 && t <= 21) && ct !== 0) for (let dx = 0; dx < w; dx++) for (let dy = 0; dy < l; dy++) orFlag(R, rp, pl.gx + dx, pl.gy + dy, F_OBJ | (bp ? P_OBJ : 0));
+}
+/* one step, |dx|,|dy| <= 1, OSRS north = +dy; the client's own masks, diagonals needing both orthogonals */
+function canMove(rp, x, y, dx, dy, proj, last) {
+  const B = proj ? (last ? 0 : P_OBJ) : F_FULL, s = proj ? 9 : 0, f = (a, b) => flagAt(rp, a, b);
+  const m = bits => B | (bits << s);
+  const N = !(f(x, y + 1) & m(F_S)), S = !(f(x, y - 1) & m(F_N)), E = !(f(x + 1, y) & m(F_W)), W = !(f(x - 1, y) & m(F_E));
+  if (!dx) return dy > 0 ? N : dy < 0 ? S : true;
+  if (!dy) return dx > 0 ? E : W;
+  if (dx > 0 && dy > 0) return N && E && !(f(x + 1, y + 1) & m(F_S | F_SW | F_W));
+  if (dx < 0 && dy > 0) return N && W && !(f(x - 1, y + 1) & m(F_S | F_SE | F_E));
+  if (dx > 0) return S && E && !(f(x + 1, y - 1) & m(F_N | F_NW | F_W));
+  return S && W && !(f(x - 1, y - 1) & m(F_N | F_NE | F_E));
+}
+/* line of sight: the tile walk seedworld's hasLos makes, each hop judged by the projectile flags */
+function los(rp, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, n = Math.max(Math.abs(dx), Math.abs(dy));
+  let px = ax, py = ay;
+  for (let i = 1; i <= n; i++) {
+    const x = Math.round(ax + dx * i / n), y = Math.round(ay + dy * i / n);
+    if (!canMove(rp, px, py, x - px, y - py, 1, i === n)) return false;
+    px = x; py = y;
+  }
+  return true;
+}
+const openTile = (rp, gx, gy) => !(flagAt(rp, gx, gy) & F_FULL);
+function snapWalkable(rp, gx, gy, maxR) {
+  if (openTile(rp, gx, gy)) return [gx, gy];
+  for (let r = 1; r <= (maxR || 3); r++) for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++)
+    if (Math.max(Math.abs(dx), Math.abs(dy)) === r && openTile(rp, gx + dx, gy + dy)) return [gx + dx, gy + dy];
+  return [gx, gy];
+}
+
+/* ---- geometry sinks: flat-coloured faces, plus textured faces bucketed per texture with the client's implicit
+   per-face UVs (the face's own vertices are its texture triangle). owners[] names the pick target per triangle.
+   Translucent faces (glass, water, a tile kit's wash; faceTransparency 1-250) keep buckets of their own, carrying
+   their opacity as vertex alpha — drawn solid they were green slabs for windows and black ones over dungeon floors. ---- */
+const makeSink = () => ({ pos: [], col: [], owners: [], tex: new Map(), tpos: [], tcol: [], towners: [], ttex: new Map(), ud: null });
+function grow(ud, x, y, z) {
+  if (!ud) return;
+  const b = ud.box;
+  if (x < b.min.x) b.min.x = x; if (y < b.min.y) b.min.y = y; if (z < b.min.z) b.min.z = z;
+  if (x > b.max.x) b.max.x = x; if (y > b.max.y) b.max.y = y; if (z > b.max.z) b.max.z = z;
+}
+/* t: {cx, cz, gy (tiles, up), rot, extra45, mirror, sx, sh, sy, ox, oh, oy, recol, retex}
+   + for a placed loc {r, plane, base (raw height), px, py (its middle, cache units), contour (the def's contouredGround)} */
+let vX = new Float64Array(4096), vY = new Float64Array(4096), vZ = new Float64Array(4096);
+function appendModel(sink, m, t, flat) {
+  const sx = t.sx || 1, sh = t.sh || 1, sy = t.sy || 1, rot = t.rot || 0, S = Math.SQRT1_2;
+  const v = m.verts, n = m.vc, out = new Float32Array(n * 3);
+  if (vX.length < n) { vX = new Float64Array(n); vY = new Float64Array(n); vZ = new Float64Array(n); }
+  let minY = 0, minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
+  for (let i = 0; i < n; i++) {
+    let x = v[i * 3], y = v[i * 3 + 1], z = v[i * 3 + 2];
+    if (t.mirror) z = -z;
+    for (let r = 0; r < rot; r++) { const q = x; x = z; z = -q; }   /* client rotateY90 */
+    if (t.extra45) { const q = x; x = (q + z) * S; z = (z - q) * S; }
+    x = x * sx + (t.ox || 0); y = y * sh + (t.oh || 0); z = z * sy + (t.oy || 0);
+    vX[i] = x; vY[i] = y; vZ[i] = z;
+    if (y < minY) minY = y;
+    if (x < minX) minX = x; if (x > maxX) maxX = x; if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+  }
+  if (t.contour >= 0 && t.px !== undefined && n) contourGround(t, n, minY, minX, maxX, minZ, maxZ);
+  for (let i = 0; i < n; i++) { out[i * 3] = t.cx + vX[i] * U; out[i * 3 + 1] = t.gy - vY[i] * U; out[i * 3 + 2] = t.cz - vZ[i] * U; }
+  const idx = m.idx, ud = sink.ud;
+  for (let f = 0; f < m.fc; f++) {
+    if (faceHidden(m, f)) continue;
+    let tid = m.texs ? m.texs[f] - 1 : -1;
+    if (tid >= 0 && t.retex && t.retex.has(tid)) tid = t.retex.get(tid);
+    const a = idx[f * 3], b = idx[f * 3 + 1], c = idx[f * 3 + 2], al = flat || !m.alphas ? 0 : m.alphas[f], op = 1 - al / 255;
+    if (!flat && tid >= 0 && textures[tid] !== undefined) {
+      const T = al ? sink.ttex : sink.tex;
+      let bk = T.get(tid);
+      if (!bk) T.set(tid, bk = { pos: [], uv: [], owners: [], col: al ? [] : null });
+      for (const vi of [a, b, c]) { bk.pos.push(out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); grow(ud, out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); }
+      bk.uv.push(0, 0, 1, 0, 0, 1); bk.owners.push(ud);
+      if (al) bk.col.push(1, 1, 1, op, 1, 1, 1, op, 1, 1, 1, op);
+      continue;
+    }
+    const [r, g, bl] = faceColor(m, f, t.recol, t.retex);
+    if (al) {
+      for (const vi of [a, b, c]) { sink.tpos.push(out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); sink.tcol.push(r, g, bl, op); grow(ud, out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); }
+      sink.towners.push(ud);
+      continue;
+    }
+    for (const vi of [a, b, c]) { sink.pos.push(out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); sink.col.push(r, g, bl); grow(ud, out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); }
+    sink.owners.push(ud);
+  }
+}
+let matFlat = null, matFlatF = null, matFlatT = null;
+function flatMats() {
+  if (!matFlat) {
+    matFlat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+    matFlatF = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
+    matFlatT = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+  }
+}
+function bake(pos, col, doubleSide) {
+  flatMats();
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.computeVertexNormals();
+  return new THREE.Mesh(g, doubleSide ? matFlat : matFlatF);
+}
+function bakeT(pos, col) {   /* rgba vertex colours: three r128 blends by vertex alpha when the colour attribute has four components */
+  flatMats();
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 4));
+  g.computeVertexNormals();
+  return new THREE.Mesh(g, matFlatT);
+}
+/* bake a sink into meshes (one flat + one per texture) under group g; every owner learns its triangle ranges */
+function flushSink(s, g) {
+  const made = [];
+  const own = (mesh, owners) => {
+    mesh.userData.owners = owners;
+    for (let i = 0; i < owners.length;) {
+      const ud = owners[i]; let j = i + 1;
+      while (j < owners.length && owners[j] === ud) j++;
+      if (ud) ud.tris.push(mesh, i, j);
+      i = j;
+    }
+  };
+  if (s.pos.length) { const m = bake(s.pos, s.col, true); own(m, s.owners); made.push(m); }
+  const textured = (b, mat) => {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(b.uv, 2));
+    if (b.col) geo.setAttribute('color', new THREE.Float32BufferAttribute(b.col, 4));
+    geo.computeVertexNormals();
+    const m = new THREE.Mesh(geo, mat);
+    own(m, b.owners); made.push(m);
+  };
+  for (const [tid, b] of s.tex) textured(b, texMaterial(tid));
+  if (s.tpos.length) { const m = bakeT(s.tpos, s.tcol); own(m, s.towners); made.push(m); }
+  for (const [tid, b] of s.ttex) textured(b, texMaterialT(tid));
+  for (const m of made) g.add(m);
+  return made;
+}
+function disposeMesh(m) {
+  if (m.parent) m.parent.remove(m);
+  if (m.geometry) m.geometry.dispose();
+  for (const c of [...m.children]) disposeMesh(c);
+}
+
+/* the client's Model.contourGround, on the transformed vertices in vX/vY/vZ: a loc whose def says contouredGround
+   follows the ground under each vertex instead of standing level at its middle's height — 0 moves every vertex by
+   the ground's rise there, n > 0 only the lowest n/65536 of the model, fading out upward. Most of the modern map
+   asks for it (walls, fences, rugs, floor kits); level on a slope, those float at one end and sink at the other. */
+function contourGround(t, n, minY, minX, maxX, minZ, maxZ) {
+  const base = t.base, ct = t.contour, p = t.plane, r = t.r;
+  const sx = (t.px + minX) >> 7, ex = (t.px + maxX + 127) >> 7, sz = (t.py + minZ) >> 7, ez = (t.py + maxZ + 127) >> 7;
+  if (cornerH(p, sx, sz, r) === base && cornerH(p, ex, sz, r) === base && cornerH(p, sx, ez, r) === base && cornerH(p, ex, ez, r) === base) return;   /* level ground: as placed */
+  if (ct > 0 && minY >= 0) return;
+  let lx = 1e9, lz = 1e9, h00 = 0, h10 = 0, h01 = 0, h11 = 0;
+  for (let i = 0; i < n; i++) {
+    const X = t.px + vX[i], Z = t.py + vZ[i], tx = Math.floor(X / 128), tz = Math.floor(Z / 128), rx = X - tx * 128, rz = Z - tz * 128;
+    if (tx !== lx || tz !== lz) { lx = tx; lz = tz; h00 = cornerH(p, tx, tz, r); h10 = cornerH(p, tx + 1, tz, r); h01 = cornerH(p, tx, tz + 1, r); h11 = cornerH(p, tx + 1, tz + 1, r); }
+    const h = ((h00 * (128 - rx) + h10 * rx) * (128 - rz) + (h01 * (128 - rx) + h11 * rx) * rz) / 16384;
+    if (ct === 0) vY[i] += h - base;
+    else { const q = vY[i] * 65536 / minY; if (q < ct) vY[i] += (h - base) * (ct - q) / ct; }
+  }
+}
+
+/* ---- terrain: the client's tile models, one mesh per render plane (bridge-flagged tiles above ground drop one level
+   and keep their heights). An overlay's shape (shapeRot >> 2, turned by its low bits) cuts the tile into overlay and
+   underlay triangles, so a diagonal floor stops at its diagonal wall instead of filling the square (rs-map-viewer's
+   SceneTileModel tables). Underlay colours are the client's blend: hue weighted by its multiplier, saturation and
+   lightness averaged, over the eleven-by-eleven tiles round each one (neighbouring squares when they are up), packed
+   to HSL16 like the client, each corner taking its own tile's blend — the ground shades between swatches instead of
+   reading as a checkerboard. A magenta overlay is the client's hole: that part is not drawn. ---- */
+const SHAPE_V = [[1, 3, 5, 7], [1, 3, 5, 7], [1, 3, 5, 7], [1, 3, 5, 7, 6], [1, 3, 5, 7, 6], [1, 3, 5, 7, 6], [1, 3, 5, 7, 6], [1, 3, 5, 7, 2, 6],
+  [1, 3, 5, 7, 2, 8], [1, 3, 5, 7, 2, 8], [1, 3, 5, 7, 11, 12], [1, 3, 5, 7, 11, 12], [1, 3, 5, 7, 13, 14]];
+const SHAPE_F = [[0, 1, 2, 3, 0, 0, 1, 3], [1, 1, 2, 3, 1, 0, 1, 3], [0, 1, 2, 3, 1, 0, 1, 3], [0, 0, 1, 2, 0, 0, 2, 4, 1, 0, 4, 3], [0, 0, 1, 4, 0, 0, 4, 3, 1, 1, 2, 4],
+  [0, 0, 4, 3, 1, 0, 1, 2, 1, 0, 2, 4], [0, 1, 2, 4, 1, 0, 1, 4, 1, 0, 4, 3], [0, 4, 1, 2, 0, 4, 2, 5, 1, 0, 4, 5, 1, 0, 5, 3],
+  [0, 4, 1, 2, 0, 4, 2, 3, 0, 4, 3, 5, 1, 0, 4, 5], [0, 0, 4, 5, 1, 4, 1, 2, 1, 4, 2, 3, 1, 4, 3, 5],
+  [0, 0, 1, 5, 0, 1, 4, 5, 0, 1, 2, 4, 1, 0, 5, 3, 1, 5, 4, 3, 1, 4, 2, 3], [1, 0, 1, 5, 1, 1, 4, 5, 1, 1, 2, 4, 0, 0, 5, 3, 0, 5, 4, 3, 0, 4, 2, 3],
+  [1, 0, 5, 4, 1, 0, 1, 5, 0, 0, 4, 3, 0, 4, 5, 3, 0, 5, 2, 3, 0, 1, 2, 5]];
+/* a shape vertex -> [x, z] in cache units within the tile, and which corners its height and colour average */
+const SHAPE_P = [null, [0, 0, 0, 0], [64, 0, 1, 0], [128, 0, 1, 1], [128, 64, 1, 2], [128, 128, 2, 2], [64, 128, 3, 2], [0, 128, 3, 3], [0, 64, 3, 0],
+  [64, 32, 1, 0], [96, 64, 1, 2], [64, 96, 3, 2], [32, 64, 3, 0], [32, 32, 0, 0], [96, 32, 1, 1], [96, 96, 2, 2], [32, 96, 3, 3]];   /* corners: 0 SW, 1 SE, 2 NE, 3 NW */
+const packHsl = (h, s, l) => { if (l > 179) s >>= 1; if (l > 192) s >>= 1; if (l > 217) s >>= 1; if (l > 243) s >>= 1; return ((s >> 5) << 7) + ((h >> 2) << 10) + (l >> 1); };
+const groundC = new Map();
+function groundRGB(v) {   /* HSL16 -> rgb for the ground: the client's palette without the model exponent, the tone the flat swatches had */
+  let c = groundC.get(v);
+  if (c !== undefined) return c;
+  const hue = (v >> 10 & 63) / 64 + 0.0078125, sat = (v >> 7 & 7) / 8 + 0.0625, lum = (v & 127) / 128;
+  const ch = (1 - Math.abs(2 * lum - 1)) * sat, x = ch * (1 - Math.abs((hue * 6) % 2 - 1)), l = lum - ch / 2;
+  let r = l, g = l, b = l;
+  switch ((hue * 6) | 0) { case 0: r += ch; g += x; break; case 1: g += ch; r += x; break; case 2: g += ch; b += x; break; case 3: b += ch; g += x; break; case 4: b += ch; r += x; break; default: r += ch; b += x; }
+  groundC.set(v, c = [Math.min(r, 1), Math.min(g, 1), Math.min(b, 1)]);
+  return c;
+}
+const BW = 75, BO = 5, BP = 76;   /* the blend window's grid: the square and five tiles round it; prefix sums one wider */
+const blendUL = new Uint16Array(BW * BW), blendS = [0, 1, 2, 3, 4].map(() => new Int32Array(BP * BP));
+function blendPlane(R, p) {   /* prefix sums of hue x multiplier, saturation, lightness, multiplier, count over the window grid */
+  const bx = R.sqX * 64 - BO, by = R.sqY * 64 - BO, [sH, sS, sL, sM, sN] = blendS;
+  let lr = null, lrid = -1;
+  for (let x = 0; x < BW; x++) for (let y = 0; y < BW; y++) {
+    const gx = bx + x, gy = by + y, rid = ridOf(gx, gy);
+    if (rid !== lrid) { lrid = rid; lr = rid === R.rid ? R : regions.get(rid) || null; }
+    const u = lr && lr.UL ? lr.UL[p * 4096 + (gx & 63) * 64 + (gy & 63)] : 0, d = u ? underlays[u - 1] : null, hs = d && d.hsl;
+    blendUL[x * BW + y] = hs ? u : 0;
+    const k = (x + 1) * BP + y + 1, a = x * BP + y + 1, b = (x + 1) * BP + y, c = x * BP + y;
+    sH[k] = (hs ? hs.hue : 0) + sH[a] + sH[b] - sH[c];
+    sS[k] = (hs ? hs.sat : 0) + sS[a] + sS[b] - sS[c];
+    sL[k] = (hs ? hs.lum : 0) + sL[a] + sL[b] - sL[c];
+    sM[k] = (hs ? hs.hueMultiplier : 0) + sM[a] + sM[b] - sM[c];
+    sN[k] = (hs ? 1 : 0) + sN[a] + sN[b] - sN[c];
+  }
+}
+function blendAt(x, y) {   /* square-local tile (0..64): its blended HSL16, or -1 where it has no underlay */
+  if (!blendUL[(x + BO) * BW + y + BO]) return -1;
+  const X0 = x, X1 = x + 11, Y0 = y, Y1 = y + 11, q = s => s[X1 * BP + Y1] - s[X0 * BP + Y1] - s[X1 * BP + Y0] + s[X0 * BP + Y0];
+  const [sH, sS, sL, sM, sN] = blendS, nn = q(sN), mm = q(sM);
+  return nn && mm ? packHsl((q(sH) * 256 / mm) | 0, (q(sS) / nn) | 0, (q(sL) / nn) | 0) : -1;
+}
+function groundTex(id) {   /* a textured overlay (water, lava, cobbles) wears its texture, one repeat a tile, lit like the ground */
+  let m = texMatsG.get(id);
+  if (!m) { m = new THREE.MeshLambertMaterial({ map: texMap(id), side: THREE.FrontSide }); texMatsG.set(id, m); }
+  return m;
+}
+function buildTerrain(R) {
+  const lv = [0, 1, 2, 3].map(() => ({ pos: [], col: [], tex: new Map() }));
+  const vx = new Float32Array(6), vz = new Float32Array(6), vh = new Float32Array(6), vu = new Float32Array(6), vv = new Float32Array(6), vc = new Array(6);
+  for (let p = 0; p < 4; p++) {
+    let any = false;
+    for (let i = p * 4096; i < (p + 1) * 4096 && !any; i++) if (R.UL[i] || R.OL[i]) any = true;
+    if (!any) continue;
+    blendPlane(R, p);
+    const blend = new Int32Array(65 * 65);
+    for (let x = 0; x <= 64; x++) for (let y = 0; y <= 64; y++) blend[x * 65 + y] = blendAt(x, y);
+    for (let x = 0; x < 64; x++) for (let y = 0; y < 64; y++) {
+      const i = p * 4096 + x * 64 + y, u = R.UL[i], o = R.OL[i];
+      if (!u && !o) continue;
+      const b = lv[p >= 1 && R.bridge[x * 64 + y] ? p - 1 : p], gx = R.sqX * 64 + x, gy = R.sqY * 64 + y;
+      const hc = [cornerH(p, gx, gy, R), cornerH(p, gx + 1, gy, R), cornerH(p, gx + 1, gy + 1, R), cornerH(p, gx, gy + 1, R)];
+      let uc = null;
+      const sw = u ? blend[x * 65 + y] : -1;
+      if (sw >= 0) {
+        const at = (bx2, by2) => { const q = blend[bx2 * 65 + by2]; return groundRGB(q >= 0 ? q : sw); };
+        uc = [groundRGB(sw), at(x + 1, y), at(x + 1, y + 1), at(x, y + 1)];
+      } else if (u && !o) { const d = underlays[u - 1]; if (d) { const c = rgbI(d.rgb); uc = [c, c, c, c]; } }   /* no blend data: the swatch as it was */
+      let shape = 0, rot = 0, oc = null, ot = -1;
+      if (o) {
+        const d = overlays[o - 1] || {};
+        shape = (R.SR[i] >> 2) + 1; rot = R.SR[i] & 3;
+        if (shape >= SHAPE_F.length) shape = 1;
+        if (d.texture !== undefined && textures[d.texture]) { ot = d.texture; oc = WHITE; }
+        else if (d.rgbColor !== 0xff00ff) oc = rgbI(d.rgbColor || 0);
+        else if (d.secondaryRgbColor !== undefined) oc = rgbI(d.secondaryRgbColor);   /* drawn by the client's own water and scenery passes: its map colour stands in */
+      }
+      const V = SHAPE_V[shape], F = SHAPE_F[shape];
+      for (let k = 0; k < V.length; k++) {
+        let q = V[k];
+        if ((q & 1) === 0 && q <= 8) q = ((q - rot - rot - 1) & 7) + 1;
+        if (q > 8 && q <= 12) q = ((q - 9 - rot) & 3) + 9;
+        if (q > 12 && q <= 16) q = ((q - 13 - rot) & 3) + 13;
+        const P = SHAPE_P[q];
+        vx[k] = gx - 0.5 + P[0] / 128; vz[k] = -gy + 0.5 - P[1] / 128; vu[k] = P[0] / 128; vv[k] = P[1] / 128;
+        vh[k] = -((hc[P[2]] + hc[P[3]]) >> 1) * U;
+        if (uc) { const c0 = uc[P[2]], c1 = uc[P[3]]; vc[k] = c0 === c1 ? c0 : [(c0[0] + c1[0]) / 2, (c0[1] + c1[1]) / 2, (c0[2] + c1[2]) / 2]; }
+      }
+      for (let f = 0; f < F.length; f += 4) {
+        const over = F[f] === 1;
+        if (over ? !oc : !uc) continue;
+        let A = F[f + 1], B = F[f + 2], C = F[f + 3];
+        if (A < 4) A = (A - rot) & 3; if (B < 4) B = (B - rot) & 3; if (C < 4) C = (C - rot) & 3;
+        if ((vz[B] - vz[A]) * (vx[C] - vx[A]) - (vx[B] - vx[A]) * (vz[C] - vz[A]) < 0) { const s = B; B = C; C = s; }   /* face up */
+        if (over && ot >= 0) {
+          let bk = b.tex.get(ot);
+          if (!bk) b.tex.set(ot, bk = { pos: [], uv: [] });
+          for (const k of [A, B, C]) { bk.pos.push(vx[k], vh[k], vz[k]); bk.uv.push(vu[k], vv[k]); }
+          continue;
+        }
+        for (const k of [A, B, C]) { b.pos.push(vx[k], vh[k], vz[k]); const c = over ? oc : vc[k]; b.col.push(c[0], c[1], c[2]); }
+      }
+    }
+  }
+  for (let p = 0; p < 4; p++) {
+    if (R.terr[p]) { disposeMesh(R.terr[p]); R.terr[p] = null; }
+    const L = lv[p];
+    if (!L.pos.length && !L.tex.size) continue;
+    const g = new THREE.Group();
+    g.userData.terrain = 1;
+    if (L.pos.length) g.add(bake(L.pos, L.col, false));
+    for (const [tid, bk] of L.tex) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(bk.pos, 3));
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(bk.uv, 2));
+      geo.computeVertexNormals();
+      g.add(new THREE.Mesh(geo, groundTex(tid)));
+    }
+    planeG[p].add(g); R.terr[p] = g;
+  }
+}
+
+/* ---- scenery ---- */
+function defaultChild(d) {   /* a varbit/varp-driven loc or npc renders as children[state]; a fresh account's state is 0 */
+  const kids = d.multiChildren || [];
+  if (kids.length) return kids[0];
+  return d.oobChild === undefined ? -1 : d.oobChild;
+}
+function resolveDef(dd, id) { let d = dd[id]; if (d && !d.models) { const c = defaultChild(d); if (c >= 0 && dd[c] && dd[c].models) d = dd[c]; } return d; }
+const footprint = (def, rot) => { const w = def.width || 1, l = def.length || 1; return rot & 1 ? [l, w] : [w, l]; };
+function groundCenter(plane, gx, gy, w, l) {   /* the modern client's rule: the height round the footprint's middle, not its outer corners */
+  const r = regionRaw(gx, gy);
+  if (!r || !r.H) return null;
+  const sx = gx + (w >> 1), ex = gx + ((w + 1) >> 1), sy = gy + (l >> 1), ey = gy + ((l + 1) >> 1);
+  const h = (cornerH(plane, ex, ey, r) + cornerH(plane, sx, ey, r) + cornerH(plane, sx, sy, r) + cornerH(plane, ex, sy, r)) >> 2;
+  return { cx: gx + w / 2 - 0.5, cz: -(gy + l / 2) + 0.5, gy: -h * U, r, plane, base: h, px: gx * 128 + w * 64, py: gy * 128 + l * 64 };
+}
+/* draws one placement {id, plane, gx, gy, type, rot} into a sink under owner ud (null: not pickable) */
+function drawLoc(sink, def, pl, ud, bare) {
+  const [w, l] = footprint(def, pl.rot);
+  /* diagonal shapes (1, 3, 9) are authored in diagonal position and only turn in quarters; the extra 45 degrees is
+     for a straight model reused diagonally: wall decor 6-8 (shape 4's) and type 11 (shape 10's) */
+  let extra45 = pl.type >= 6 && pl.type <= 8, entries = def.models.filter(m => m.shape === pl.type);
+  if (!entries.length && pl.type === 11) { entries = def.models.filter(m => m.shape === 10); extra45 = true; }
+  if (!entries.length && pl.type >= 5 && pl.type <= 8) entries = def.models.filter(m => m.shape === 4);
+  if (!entries.length) return false;
+  sink.ud = ud;
+  const cm = colorMaps(def, bare);
+  const draw = (rot, e45) => {
+    const t = groundCenter(pl.plane, pl.gx, pl.gy, w, l);   /* heights from the CACHE plane: a deck stays raised */
+    if (!t) return;
+    Object.assign(t, cm, { rot, extra45: e45, mirror: !!def.isRotated,
+      sx: (def.modelSizeX || 128) / 128, sh: (def.modelSizeHeight || 128) / 128, sy: (def.modelSizeY || 128) / 128,
+      ox: def.offsetX || 0, oh: def.offsetHeight || 0, oy: def.offsetY || 0, contour: def.contouredGround === undefined ? -1 : def.contouredGround });
+    for (const e of entries) { const mod = model(e.model); if (mod) appendModel(sink, mod, t); }
+  };
+  draw(pl.rot, extra45);
+  if (pl.type === 2) draw((pl.rot + 1) & 3, false);
+  sink.ud = null;
+  return true;
+}
+const newOwner = (R, pl, def, id, w, l) => ({ kind: 'loc', R, locId: id, def, name: clean(def.name) || 'loc ' + id, ops: opsOf(def), plane: renderPlane(pl.plane, pl.gx, pl.gy),
+  cachePlane: pl.plane, gx: pl.gx, gy: pl.gy, w, l, type: pl.type, rot: pl.rot, tris: [], box: new THREE.Box3(new THREE.Vector3(1e9, 1e9, 1e9), new THREE.Vector3(-1e9, -1e9, -1e9)) });
+
+/* ---- openable locs: pairs from doors.json; a toggled placement survives a region reload ---- */
+const locOverrides = new Map();
+const DOOR_DIR = [[-1, 0], [0, 1], [1, 0], [0, -1]];   /* wall rot 0 west edge, 1 north, 2 east, 3 south */
+function toggledPlacement(pl) {
+  const pair = doorPairs.get(pl.id);
+  if (pl.type > 3) return Object.assign({}, pl, { id: pair.other });   /* objects and trapdoors swap in place */
+  const dr = pair.conv[1] === '+' ? 1 : -1, adj = pair.conv[0] === 'a';
+  if (pair.closed) { const d = adj ? DOOR_DIR[pl.rot] : [0, 0]; return Object.assign({}, pl, { id: pair.other, gx: pl.gx + d[0], gy: pl.gy + d[1], rot: (pl.rot + dr + 4) & 3 }); }
+  const rr = (pl.rot - dr + 4) & 3, d = adj ? DOOR_DIR[rr] : [0, 0];
+  return Object.assign({}, pl, { id: pair.other, gx: pl.gx - d[0], gy: pl.gy - d[1], rot: rr });
+}
+
+/* a scenery piece with its own meshes (a door, a tree that falls, a vein that empties): state 0 whole, 1 spent.
+   The spent look is laid at build time, hidden, so a model trimmed from the cache later can never leave a hole. */
+function dynamic(R, def, pl, ud, spec) {
+  const g = new THREE.Group();
+  planeG[ud.plane].add(g);
+  const s = makeSink();
+  drawLoc(s, def, pl, ud, false);
+  const whole = flushSink(s, g), spent = spentLook(def, pl, spec, g);
+  for (const m of spent) m.visible = false;
+  let state = 0;
+  ud.dyn = g;
+  ud.vis = st => {
+    st = st ? 1 : 0;
+    if (st === state) return;
+    state = st;
+    for (const m of whole) m.visible = !st;
+    for (const m of spent) m.visible = !!st;
+  };
+  return g;
+}
+let stumps = null;   /* tree stump defs, resolved once at load; matched to the tree's footprint */
+function spentLook(def, pl, spec, g) {
+  if (!spec) return [];
+  const s = makeSink();
+  if (spec.t === 1) drawLoc(s, def, pl, null, true);   /* an emptied vein: the same rock with the ore's recolours stripped */
+  else if (spec.t === 0 && stumps && stumps.length) {
+    const [w, l] = footprint(def, pl.rot), st = stumps.find(q => (q.width || 1) === w && (q.length || 1) === l) || stumps[0];
+    drawLoc(s, st, Object.assign({}, pl, { type: 10, rot: 0 }), null, false);
+  }
+  return flushSink(s, g);
+}
+
+/* ---- regions: parse, collide, draw ---- */
+function newRegion(rid) {
+  return { rid, sqX: rid >> 8, sqY: rid & 255, ready: 0, terr: [null, null, null, null], groups: [], owners: [], objs: [], ext: [], solid: new Uint8Array(16384),
+    clip: new Int32Array(16384), walls: new Uint8Array(16384), box: new THREE.Box3() };
+}
+async function loadRegion(rid) {
+  if (!manifest.has(rid) || regions.has(rid)) return;
+  const R = newRegion(rid);
+  regions.set(rid, R);
+  let t, placed;
+  try {
+    const [tb, lb] = await Promise.all([getBin(OUT + '/t/' + rid + '.bin'), getBin(OUT + '/l/' + rid + '.bin').catch(() => null)]);
+    t = parseTerrain(tb); placed = lb ? parseLocs(lb) : [];
+  } catch (e) { regions.delete(rid); console.warn('[map07] region ' + rid + ' failed', e); return; }
+  if (regions.get(rid) !== R) return;
+  Object.assign(R, t);
+  const bx = R.sqX * 64, by = R.sqY * 64;
+  R.box.set(new THREE.Vector3(bx - 0.5, -60, -(by + 64) + 0.5), new THREE.Vector3(bx + 63.5, 200, -by + 0.5));
+  /* floor tiles: roof hiding reads solid; a blocked tile setting collides on its render plane */
+  for (let p = 0; p < 4; p++) for (let i = 0; i < 4096; i++) {
+    const rp = p >= 1 && R.bridge[i] ? p - 1 : p;
+    if (R.UL[p * 4096 + i] || R.OL[p * 4096 + i]) R.solid[rp * 4096 + i] = 1;
+    if (R.FL[p * 4096 + i] & 1 && !(p === 0 && R.bridge[i])) R.clip[rp * 4096 + i] |= F_FLOOR;
+  }
+  /* defs: every placed id, both states of every door, varbit children; then the models they name */
+  const ids = new Set(placed.map(p => p.id));
+  for (const p of placed) { const pr = doorPairs.get(p.id); if (pr) ids.add(pr.other); }
+  const dd = await defs('loc', ids), kids = new Set();
+  for (const i of ids) { const d = dd[i]; if (d && !d.models) { const c = defaultChild(d); if (c >= 0) kids.add(c); } }
+  if (kids.size) Object.assign(dd, await defs('loc', kids));
+  const mids = new Set();
+  for (const i of [...ids, ...kids]) for (const m of ((dd[i] && dd[i].models) || [])) mids.add(m.model);
+  /* the spawns' defs too (children included), so game.js can name and type a monster the moment the square is up;
+     their models and frames are fetched per figure (npcFigure), when one actually stands near enough to be drawn */
+  const spawnList = spawnsByRegion.get(rid) || [];
+  const npcIds = new Set();
+  for (const s of spawnList) { npcIds.add(s.id); if (s.as !== undefined) npcIds.add(s.as); }
+  const nd = npcIds.size ? await defs('npc', npcIds) : {}, nkids = new Set();
+  for (const s of spawnList) { const d = nd[s.id]; if (d && !d.models) { const c = defaultChild(d); if (c >= 0) nkids.add(c); } }
+  if (nkids.size) await defs('npc', nkids);
+  await models(mids);
+  if (regions.get(rid) !== R) return;
+  R.locDefs = dd;
+  await nextFrame();
+  if (regions.get(rid) !== R) return;
+  /* collision, roofs, the minimap's walls; then the static sink, with doors and classified pieces on their own */
+  const sinks = [0, 1, 2, 3].map(() => makeSink()), dynList = [];
+  for (const p of placed) {
+    const def = resolveDef(dd, p.id);
+    if (!def || !def.models) continue;
+    const gx = bx + p.x, gy = by + p.y, [w, l] = footprint(def, p.rot), rp = renderPlane(p.plane, gx, gy);
+    const pl = { id: p.id, plane: p.plane, gx, gy, type: p.type, rot: p.rot };
+    if (p.type >= 12 && p.type <= 21) for (let dx = 0; dx < w; dx++) for (let dy = 0; dy < l; dy++) {
+      const r2 = regionRaw(gx + dx, gy + dy);
+      if (r2 && r2.solid) r2.solid[rp * 4096 + ((gx + dx) & 63) * 64 + ((gy + dy) & 63)] = 1;
+    }
+    clipLoc(R, def, p.id, pl, w, l);
+    if (p.type === 0 || p.type === 2) {   /* minimap walls: bit per edge (W N E S), doors marked */
+      const e = p.type === 2 ? (1 << p.rot) | (1 << ((p.rot + 1) & 3)) : 1 << p.rot, i = rp * 4096 + p.x * 64 + p.y;
+      R.walls[i] |= e | (openable(def, p.id) ? 16 : 0);
+    }
+    if (doorPairs.has(p.id)) { dynList.push({ pl, door: 1 }); continue; }
+    /* only a piece with a menu is pickable, and every kind game.js can put to work has one (Chop down, Mine, Bank...) */
+    const ud = def.ops ? newOwner(R, pl, def, p.id, w, l) : null;
+    if (ud && !ud.ops.length) { drawLoc(sinks[rp], def, pl, null, false); continue; }
+    const spec = ud && H.classify ? H.classify(ud) : null;
+    if (spec) ud.spec = spec;
+    if (spec && spec.dyn) { dynList.push({ pl, def, ud, spec }); continue; }
+    drawLoc(sinks[rp], def, pl, ud, false);
+    if (ud) { R.owners.push(ud); if (spec) R.objs.push(ud); }
+  }
+  for (let p = 0; p < 4; p++) {
+    const g = new THREE.Group();
+    planeG[p].add(g); R.groups.push(g);
+    flushSink(sinks[p], g);
+  }
+  for (const q of dynList) {
+    if (q.door) {
+      const key = q.pl.plane + ',' + q.pl.gx + ',' + q.pl.gy + ',' + q.pl.type;
+      spawnDoor(R, key, q.pl, locOverrides.get(key) || q.pl);
+    } else { dynamic(R, q.def, q.pl, q.ud, q.spec); R.owners.push(q.ud); R.objs.push(q.ud); R.groups.push(q.ud.dyn); }
+  }
+  /* writes past the edges: ours into loaded neighbours, theirs into us */
+  applyExt(R, R);
+  for (const n of regions.values()) if (n !== R && n.clip && n.ext.length) applyExt(n, R);
+  R.spawns = spawnList;
+  R.ready = 1; lastR = null;
+  buildTerrain(R);
+  /* the neighbours close their seams on our heights, and their edge blends reach five tiles into us */
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const n = (dx || dy) && regions.get(((R.sqX + dx) << 8) | (R.sqY + dy)); if (n && n.ready) buildTerrain(n); }
+  if (H.onRegion) H.onRegion(R);
+}
+function applyExt(src, only) {
+  const e = src.ext;
+  for (let i = 0; i < e.length; i += 3) {
+    const t = regions.get(e[i]);
+    if (t && t.clip && (only === src ? t !== src : t === only)) t.clip[e[i + 1]] |= e[i + 2];
+  }
+}
+function spawnDoor(R, key, orig, pl) {
+  const def = resolveDef(R.locDefs, pl.id);
+  if (!def || !def.models) return;
+  const [w, l] = footprint(def, pl.rot), ud = newOwner(R, pl, def, pl.id, w, l);
+  ud.door = { key, orig, pl };
+  dynamic(R, def, pl, ud, null);
+  R.owners.push(ud); R.groups.push(ud.dyn);
+}
+function toggleDoor(ud) {
+  const R = ud.R, { key, orig, pl } = ud.door;
+  if (ud.dead) return;
+  ud.dead = 1;
+  const oi = R.owners.indexOf(ud); if (oi >= 0) R.owners.splice(oi, 1);
+  const gi = R.groups.indexOf(ud.dyn); if (gi >= 0) R.groups.splice(gi, 1);
+  disposeMesh(ud.dyn);
+  const next = toggledPlacement(pl), home = next.id === orig.id && next.gx === orig.gx && next.gy === orig.gy && next.rot === orig.rot;
+  if (home) locOverrides.delete(key); else locOverrides.set(key, next);
+  spawnDoor(R, key, orig, next);
+}
+function doorPartner(ud) {   /* the other leaf of a double door: along the same wall line, in the same state */
+  const o = ud.door.orig, closed = doorPairs.get(ud.door.pl.id).closed, along = o.rot & 1 ? [[1, 0], [-1, 0]] : [[0, 1], [0, -1]];
+  for (const R of regions.values()) for (const d of R.owners) {
+    if (!d.door || d === ud) continue;
+    const q = d.door.orig;
+    if (q.plane !== o.plane || q.rot !== o.rot || q.type !== o.type) continue;
+    if (along.some(([ax, ay]) => q.gx === o.gx + ax && q.gy === o.gy + ay) && doorPairs.get(d.door.pl.id).closed === closed) return d;
+  }
+  return null;
+}
+function unloadRegion(rid) {
+  const R = regions.get(rid);
+  if (!R) return;
+  regions.delete(rid); lastR = null;
+  if (R.ready && H.onUnload) H.onUnload(R);
+  for (const m of R.terr) if (m) disposeMesh(m);
+  for (const g of R.groups) disposeMesh(g);
+}
+
+/* ---- streaming: every square within reach of the player, nearest first, two at a time; far ones go ---- */
+let queue = [], busy = 0;
+function update(gx, gy, reach) {
+  if (!loaded) return;
+  const dist = rid => { const x0 = (rid >> 8) * 64, y0 = (rid & 255) * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
+  for (const rid of [...regions.keys()]) if (dist(rid) > reach + 48) unloadRegion(rid);
+  const rx = gx >> 6, ry = gy >> 6, n = Math.ceil(reach / 64) + 1, list = [];
+  for (let dx = -n; dx <= n; dx++) for (let dy = -n; dy <= n; dy++) {
+    const rid = ((rx + dx) << 8) | (ry + dy);
+    if (rx + dx >= 0 && ry + dy >= 0 && manifest.has(rid) && !regions.has(rid) && dist(rid) <= reach) list.push(rid);
+  }
+  queue = list.sort((a, b) => dist(a) - dist(b));
+  pump();
+}
+function pump() {
+  if (!busy && !queue.length) trimModels();
+  while (busy < 2 && queue.length) {
+    const rid = queue.shift();
+    if (regions.has(rid)) continue;
+    busy++;
+    loadRegion(rid).catch(e => console.warn('[map07] region', rid, e)).then(() => { busy--; pump(); });
+  }
+}
+function clear() {
+  for (const rid of [...regions.keys()]) unloadRegion(rid);
+  queue = []; locOverrides.clear();
+}
+const pending = () => busy + queue.length;
+
+/* ---- picking: the owners' boxes first, then their own triangles, nearest hit wins ---- */
+const _hit = new THREE.Vector3(), _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3();
+function pick(ray, maxPlane, maxDist) {
+  let best = null, bestD = maxDist || 1e9;
+  for (const R of regions.values()) {
+    if (!R.ready || !ray.intersectBox(R.box, _hit)) continue;
+    for (const ud of R.owners) {
+      if (ud.plane > maxPlane || ud.dead) continue;
+      if (ud.dyn && !ud.dyn.visible) continue;
+      if (!ray.intersectBox(ud.box, _hit) || ray.origin.distanceTo(_hit) >= bestD) continue;
+      const tr = ud.tris;
+      for (let k = 0; k < tr.length; k += 3) {
+        const mesh = tr[k];
+        if (!mesh.visible) continue;
+        const p = mesh.geometry.attributes.position.array;
+        for (let f = tr[k + 1]; f < tr[k + 2]; f++) {
+          const o = f * 9;
+          _a.set(p[o], p[o + 1], p[o + 2]); _b.set(p[o + 3], p[o + 4], p[o + 5]); _c.set(p[o + 6], p[o + 7], p[o + 8]);
+          if (!ray.intersectTriangle(_a, _b, _c, false, _hit)) continue;
+          const d = ray.origin.distanceTo(_hit);
+          if (d < bestD) { bestD = d; best = ud; }
+        }
+      }
+    }
+  }
+  return best ? { ud: best, d: bestD } : null;
+}
+
+/* ---- transports (stairs, trapdoors, dungeon doors): keyed by loc id + option, matched to the exact placement ---- */
+const opKey = s => String(s).toLowerCase().replace(/[^a-z]/g, '');
+function transport(ud, op, px, py) {
+  const list = (transByLoc[ud.locId] || []).filter(t => t.lx === ud.gx && t.ly === ud.gy && t.lp === ud.cachePlane && opKey(t.o) === opKey(op));
+  if (!list.length) return null;
+  const cost = t => (t.bad ? 1e6 : 0) + Math.abs(t.x - px) + Math.abs(t.y - py);
+  const t = list.sort((a, b) => cost(a) - cost(b))[0];
+  return { x: t.d[0], y: t.d[1], p: Math.min(Math.max(t.d[2], 0), 3) };
+}
+function solidAt(p, gx, gy) { const r = regionAt(gx, gy); return r ? r.solid[p * 4096 + (gx & 63) * 64 + (gy & 63)] : 0; }
+function coveredAt(p, gx, gy) { for (let q = p + 1; q < 4; q++) if (solidAt(q, gx, gy)) return true; return false; }
+function climbTarget(ud, op, plane) {   /* a ladder or staircase the transport table does not know: a floor up or down in place */
+  const t = op.toLowerCase();
+  let to = null;
+  if (t.includes('up')) to = plane + 1;
+  else if (t.includes('down')) to = plane - 1;
+  else if (t.includes('top')) { to = plane; for (let p = plane + 1; p < 4; p++) if (solidAt(p, ud.gx, ud.gy)) to = p; }
+  else if (t.includes('bottom')) to = 0;
+  else to = plane < 3 && coveredAt(plane, ud.gx, ud.gy) ? plane + 1 : plane - 1;
+  return to === null || to < 0 || to > 3 || to === plane ? null : to;
+}
+
+/* ---- animated figures (npcs): the part models merged, classic frame archives applied, translucent faces apart ---- */
+const SINE = new Int32Array(2048), COSINE = new Int32Array(2048);
+for (let i = 0; i < 2048; i++) { SINE[i] = (65536 * Math.sin(i * Math.PI / 1024)) | 0; COSINE[i] = (65536 * Math.cos(i * Math.PI / 1024)) | 0; }
+function mergeAnim(parts) {
+  let vc = 0;
+  for (const p of parts) vc += p.model.vc;
+  const verts = new Int16Array(vc * 3), vg = new Uint8Array(vc).fill(255), tris = [], colors = [], trisT = [], colorsT = [];
+  let vo = 0;
+  for (const p of parts) {
+    const m = p.model;
+    verts.set(m.verts, vo * 3);
+    if (m.vgroups) vg.set(m.vgroups, vo);
+    for (let f = 0; f < m.fc; f++) {
+      if (faceHidden(m, f)) continue;
+      const alpha = m.alphas ? m.alphas[f] : 0, [r, g, b] = faceColor(m, f, p.recol, p.retex);
+      if (alpha > 0) { trisT.push(m.idx[f * 3] + vo, m.idx[f * 3 + 1] + vo, m.idx[f * 3 + 2] + vo); colorsT.push(r, g, b, (255 - alpha) / 255); }
+      else { tris.push(m.idx[f * 3] + vo, m.idx[f * 3 + 1] + vo, m.idx[f * 3 + 2] + vo); colors.push(r, g, b); }
+    }
+    vo += m.vc;
+  }
+  const groups = new Map();
+  for (let i = 0; i < vc; i++) { if (vg[i] === 255) continue; let a = groups.get(vg[i]); if (!a) groups.set(vg[i], a = []); a.push(i); }
+  return { vc, verts, tris: Uint32Array.from(tris), colors, trisT: Uint32Array.from(trisT), colorsT, groups };
+}
+let matNpc = null, matNpcT = null;
+class Entity {
+  constructor(mg, scale) {
+    if (!matNpc) {
+      matNpc = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
+      matNpcT = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 });
+    }
+    this.mg = mg; this.scale = scale; this.work = new Int32Array(mg.vc * 3);
+    const geom = (tris, colors, stride) => {
+      const n = tris.length / 3, pos = new Float32Array(n * 9), col = new Float32Array(n * 3 * stride);
+      for (let f = 0; f < n; f++) for (let k = 0; k < 3; k++) for (let c = 0; c < stride; c++) col[(f * 3 + k) * stride + c] = colors[f * stride + c];
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      g.setAttribute('color', new THREE.BufferAttribute(col, stride));
+      return g;
+    };
+    this.mesh = new THREE.Mesh(geom(mg.tris, mg.colors, 3), matNpc);
+    this.mesh.frustumCulled = false;
+    this.meshT = null;
+    if (mg.trisT.length) { this.meshT = new THREE.Mesh(geom(mg.trisT, mg.colorsT, 4), matNpcT); this.meshT.frustumCulled = false; this.mesh.add(this.meshT); }
+    this.frames = null; this.idx = -1; this.t = 0; this.total = 0;
+    this.writePose(mg.verts);
+    this.mesh.geometry.computeBoundingBox();
+    this.height = Math.max(0.5, this.mesh.geometry.boundingBox.max.y);
+  }
+  play(frames) {
+    if (frames === this.frames) return;
+    this.frames = frames; this.t = 0; this.idx = -1; this.total = 0;
+    if (frames) for (const f of frames) this.total += f.ms; else this.writePose(this.mg.verts);
+  }
+  update(dtMs, lod) {   /* lod 0: pose and relight; 1: pose on the old normals (the eye cannot tell at range); 2: hold the pose */
+    if (!this.frames || !this.total) return;
+    this.t = (this.t + dtMs) % this.total;
+    if (lod === 2) return;
+    let acc = 0, idx = 0;
+    for (let i = 0; i < this.frames.length; i++) { acc += this.frames[i].ms; if (this.t < acc) { idx = i; break; } }
+    if (idx === this.idx) return;
+    this.idx = idx;
+    this.lite = lod === 1;
+    this.apply(this.frames[idx]);
+  }
+  apply(frame) {   /* the client's Model.transform group operations */
+    const w = this.work, mg = this.mg, { bases, ds } = frame.tr, fm = frame.fm;
+    w.set(mg.verts);
+    let ox = 0, oy = 0, oz = 0;
+    for (let ti = 0; ti < bases.length; ti++) {
+      const base = bases[ti];
+      if (base >= fm.types.length) continue;
+      const type = fm.types[base], labels = fm.labels[base], dx = ds[ti * 3], dy = ds[ti * 3 + 1], dz = ds[ti * 3 + 2];
+      if (type === 0) {
+        let sx = 0, sy = 0, sz = 0, n = 0;
+        for (const lb of labels) { const g = mg.groups.get(lb); if (g) for (const vi of g) { sx += w[vi * 3]; sy += w[vi * 3 + 1]; sz += w[vi * 3 + 2]; n++; } }
+        if (n) { ox = ((sx / n) | 0) + dx; oy = ((sy / n) | 0) + dy; oz = ((sz / n) | 0) + dz; } else { ox = dx; oy = dy; oz = dz; }
+      } else if (type === 1) {
+        for (const lb of labels) { const g = mg.groups.get(lb); if (g) for (const vi of g) { w[vi * 3] += dx; w[vi * 3 + 1] += dy; w[vi * 3 + 2] += dz; } }
+      } else if (type === 2) {
+        const ax = (dx << 3) & 2047, ay = (dy << 3) & 2047, az = (dz << 3) & 2047;
+        for (const lb of labels) {
+          const g = mg.groups.get(lb);
+          if (!g) continue;
+          for (const vi of g) {
+            let x = w[vi * 3] - ox, y = w[vi * 3 + 1] - oy, z = w[vi * 3 + 2] - oz;
+            if (az) { const s = SINE[az], c = COSINE[az], q = (y * s + x * c) >> 16; y = (y * c - x * s) >> 16; x = q; }
+            if (ax) { const s = SINE[ax], c = COSINE[ax], q = (y * c - z * s) >> 16; z = (y * s + z * c) >> 16; y = q; }
+            if (ay) { const s = SINE[ay], c = COSINE[ay], q = (z * s + x * c) >> 16; z = (z * c - x * s) >> 16; x = q; }
+            w[vi * 3] = x + ox; w[vi * 3 + 1] = y + oy; w[vi * 3 + 2] = z + oz;
+          }
+        }
+      } else if (type === 3) {
+        for (const lb of labels) {
+          const g = mg.groups.get(lb);
+          if (g) for (const vi of g) { w[vi * 3] = ox + (((w[vi * 3] - ox) * dx) >> 7); w[vi * 3 + 1] = oy + (((w[vi * 3 + 1] - oy) * dy) >> 7); w[vi * 3 + 2] = oz + (((w[vi * 3 + 2] - oz) * dz) >> 7); }
+        }
+      }   /* type 5 = alpha, ignored */
+    }
+    this.writePose(w);
+  }
+  writePose(src) {   /* cache space -> this world's (x, -y, -z), in tiles */
+    const [sx, sh, sy] = this.scale;
+    const write = (tris, mesh) => {
+      const pos = mesh.geometry.attributes.position.array;
+      for (let i = 0; i < tris.length; i++) { const vi = tris[i]; pos[i * 3] = src[vi * 3] * sx * U; pos[i * 3 + 1] = -src[vi * 3 + 1] * sh * U; pos[i * 3 + 2] = -src[vi * 3 + 2] * sy * U; }
+      mesh.geometry.attributes.position.needsUpdate = true;
+      if (!this.lite || !mesh.geometry.attributes.normal) mesh.geometry.computeVertexNormals();
+    };
+    write(this.mg.tris, this.mesh);
+    if (this.meshT) write(this.mg.trisT, this.meshT);
+  }
+  dispose() { disposeMesh(this.mesh); }
+}
+/* the look of a spawn: the def (or the child the observing account saw), merged, with its stand and walk frames */
+function npcDefOf(id, as) {
+  const d = defSync('npc', id);
+  if (!d || d.models) return d;
+  const c = defSync('npc', defaultChild(d));
+  if (c && c.models) return c;
+  return as !== undefined ? defSync('npc', as) : null;
+}
+async function npcFigure(def) {
+  if (!def || !def.models) return null;
+  await Promise.all([models(def.models), loadSeqs([def.standingAnimation, def.walkingAnimation])]);
+  const { recol, retex } = colorMaps(def);
+  const parts = def.models.map(m => ({ model: model(m), recol, retex })).filter(p => p.model);
+  if (!parts.length) return null;
+  const ws = (def.widthScale || 128) / 128, ent = new Entity(mergeAnim(parts), [ws, (def.heightScale || 128) / 128, ws]);
+  /* walkingAnimation === standingAnimation marks a figure that never walks (a merchant at a post); a def sharing the
+     player's skeleton, or a dressed biped with no usable frames, borrows the player's stand and walk */
+  let standF = seqs.get(def.standingAnimation) || null, walkF = seqs.get(def.walkingAnimation) || null;
+  const still = def.walkingAnimation !== undefined && def.walkingAnimation === def.standingAnimation;
+  if (still) walkF = null;
+  if (!standF || (!walkF && !still)) {
+    const pW = seqs.get(PLAYER_WALK), pS = seqs.get(PLAYER_STAND);
+    const biped = (def.size || 1) === 1 && parts.length >= 4, fmMatch = standF && pW && standF[0].fm === pW[0].fm;
+    if (pW && (fmMatch || biped)) { standF = standF || pS; if (!still) walkF = walkF || pW; }
+  }
+  ent.play(standF);
+  return { ent, mesh: ent.mesh, standF, walkF, still: still || !walkF, height: ent.height * ((def.heightScale || 128) / 128), size: def.size || 1 };
+}
+function animate(fig, moving, dtMs, lod) {
+  fig.ent.play(moving ? (fig.walkF || fig.standF) : fig.standF);
+  fig.ent.update(dtMs, lod || 0);
+}
+
+/* ---- ground items: the inventory model lying on its tile, one geometry an item ---- */
+const itemGeoP = new Map();
+function itemGeo(cacheId) {
+  let p = itemGeoP.get(cacheId);
+  if (p) return p;
+  p = (async () => {
+    const d = (await defs('item', [cacheId]))[cacheId];
+    if (!d || d.inventoryModel === undefined) return null;
+    await models([d.inventoryModel]);
+    const m = model(d.inventoryModel);
+    if (!m) return null;
+    const s = makeSink();
+    appendModel(s, m, Object.assign({ cx: 0, cz: 0, gy: 0, sx: (d.resizeX || 128) / 128, sh: (d.resizeY || 128) / 128, sy: (d.resizeZ || 128) / 128 }, colorMaps(d)), true);
+    if (!s.pos.length) return null;
+    flatMats();
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(s.pos, 3));
+    g.setAttribute('color', new THREE.Float32BufferAttribute(s.col, 3));
+    g.computeVertexNormals(); g.computeBoundingSphere();
+    return g;
+  })().catch(() => null);
+  itemGeoP.set(cacheId, p);
+  return p;
+}
+const itemNameIds = name => resolveItem[String(name).toLowerCase()] || null;
+/* the lowest id carrying an inventory model and no note template: the item itself, not its bank note */
+const itemPick = new Map();
+function itemFor(name) {
+  const k = String(name).toLowerCase();
+  if (itemPick.has(k)) return itemPick.get(k);
+  itemPick.set(k, null);
+  const ids = resolveItem[k];
+  if (ids) defs('item', ids).then(dd => {
+    for (const id of ids) { const d = dd[id]; if (d && d.inventoryModel !== undefined && d.noteTemplate === undefined) { itemPick.set(k, id); return; } }
+  });
+  return null;
+}
+function itemMesh(geo) { flatMats(); return new THREE.Mesh(geo, matFlat); }
+
+/* ---- maps ---- */
+function tileRGB(plane, gx, gy) {   /* the colour the minimap paints for a tile on the viewer's plane; lower floors show through dim */
+  const r = regionAt(gx, gy);
+  if (!r) return -1;
+  const i = (gx & 63) * 64 + (gy & 63);
+  for (let p = plane, dim = 1; p >= 0; p--, dim *= 0.55) {
+    for (let cp = p; cp <= Math.min(3, p + 1); cp++) {   /* a bridge deck's tiles are stored a plane up */
+      if (cp !== p && !r.bridge[i]) continue;
+      const c = tileColor(r.OL[cp * 4096 + i], r.UL[cp * 4096 + i]);
+      if (c >= 0) return dim === 1 ? c : (((c >> 16 & 255) * dim) << 16) | (((c >> 8 & 255) * dim) << 8) | ((c & 255) * dim);
+    }
+  }
+  return -1;
+}
+function wallBits(plane, gx, gy) { const r = regionAt(gx, gy); return r ? r.walls[plane * 4096 + (gx & 63) * 64 + (gy & 63)] : 0; }
+/* the 2007 world map composite (wm/img/5.0.png): mapsquares x 18..60, y 39..64, sixteen pixels a square */
+const WORLD_IMG = { src: OUT + '/wm/img/5.0.png', gx0: 18 * 64, gy1: 65 * 64, tpp: 4 };
+function worldImage() {
+  if (!worldImg) { worldImg = new Image(); worldImg.src = WORLD_IMG.src; }
+  return worldImg.complete && worldImg.naturalWidth ? worldImg : null;
+}
+let landPx = null, landW = 0, landH = 0;
+function worldRGB(gx, gy) {   /* the composite's pixel under a tile, or -1 off it (the minimap's backdrop past the loaded squares) */
+  const im = worldImage();
+  if (!im) return -1;
+  if (!landPx) {
+    const c = document.createElement('canvas'); c.width = landW = im.naturalWidth; c.height = landH = im.naturalHeight;
+    const g = c.getContext('2d'); g.drawImage(im, 0, 0); landPx = g.getImageData(0, 0, landW, landH).data;
+  }
+  const px = Math.floor((gx - WORLD_IMG.gx0) / WORLD_IMG.tpp), py = Math.floor((WORLD_IMG.gy1 - gy) / WORLD_IMG.tpp);
+  if (px < 0 || py < 0 || px >= landW || py >= landH) return -1;
+  const o = (py * landW + px) * 4;
+  return (landPx[o] << 16) | (landPx[o + 1] << 8) | landPx[o + 2];
+}
+function isLand(gx, gy) {   /* for placing a clue: the composite's own colour says water or void */
+  const c = worldRGB(gx, gy);
+  if (c < 0) return false;
+  const r = c >> 16 & 255, g = c >> 8 & 255, b = c & 255;
+  return !(r < 12 && g < 12 && b < 12) && !(b > r + 30 && b > g + 20);
+}
+/* an edge flag between two orthogonal neighbours: can a hand reach across, whatever stands on the far tile */
+function wallBetween(rp, x, y, dx, dy) {
+  if (dy > 0) return !!(flagAt(rp, x, y + 1) & F_S);
+  if (dy < 0) return !!(flagAt(rp, x, y - 1) & F_N);
+  if (dx > 0) return !!(flagAt(rp, x + 1, y) & F_W);
+  if (dx < 0) return !!(flagAt(rp, x - 1, y) & F_E);
+  return false;
+}
+const squareP = new Map();   /* rid -> canvas (128x128, two pixels a tile, walls on the edges) | null while fetching or absent */
+let squareBusy = 0;
+function squareCanvas(rid) {
+  if (squareP.has(rid)) return squareP.get(rid);
+  if (!manifest.has(rid) || squareBusy >= 12) return null;
+  if (squareP.size > 900) for (const k of [...squareP.keys()].slice(0, 300)) squareP.delete(k);
+  squareP.set(rid, null); squareBusy++;
+  Promise.all([getBin(OUT + '/t/' + rid + '.bin'), getBin(OUT + '/l/' + rid + '.bin').catch(() => null)]).then(([tb, lb]) => {
+    const t = parseTerrain(tb), c = document.createElement('canvas'); c.width = c.height = 128;
+    const g = c.getContext('2d'), im = g.createImageData(128, 128);
+    for (let x = 0; x < 64; x++) for (let y = 0; y < 64; y++) {
+      let col = -1;
+      for (let p = 0; p < 2 && col < 0; p++) col = tileColor(t.OL[p * 4096 + x * 64 + y], t.UL[p * 4096 + x * 64 + y]);
+      if (col < 0) col = 0x101418;
+      for (let a = 0; a < 2; a++) for (let b = 0; b < 2; b++) { const o = ((63 - y) * 2 + b) * 128 * 4 + (x * 2 + a) * 4; im.data[o] = col >> 16 & 255; im.data[o + 1] = col >> 8 & 255; im.data[o + 2] = col & 255; im.data[o + 3] = 255; }
+    }
+    g.putImageData(im, 0, 0);
+    if (lb) {
+      g.fillStyle = 'rgba(238,238,238,0.9)';
+      for (const p of parseLocs(lb)) {
+        if (p.plane !== 0 || (p.type !== 0 && p.type !== 2)) continue;
+        const X = p.x * 2, Y = (63 - p.y) * 2, edge = r => r === 0 ? g.fillRect(X, Y, 1, 2) : r === 1 ? g.fillRect(X, Y, 2, 1) : r === 2 ? g.fillRect(X + 1, Y, 1, 2) : g.fillRect(X, Y + 1, 2, 1);
+        edge(p.rot); if (p.type === 2) edge((p.rot + 1) & 3);
+      }
+    }
+    squareP.set(rid, c); squareBusy--;
+    if (H.onSquare) H.onSquare(rid);
+  }, () => { squareBusy--; });
+  return null;
+}
+
+/* ---- load: the catalogs, the four tables, the lights ---- */
+function load() {
+  if (typeof location !== 'undefined' && location.protocol === 'file:') return Promise.reject(new Error('the game must be served over http — double-click play-local.cmd (or node tools/server.js) and use the localhost tab'));
+  if (loading) return loading;
+  return loading = Promise.all([
+    catalog('underlay'), catalog('overlay'), catalog('texture'),
+    getJson(DATA + '/regions.json'), getJson(DATA + '/spawns.json'), getJson(DATA + '/transports.json'), getJson(DATA + '/doors.json'),
+    getJson(OUT + '/resolve/item.json'), getJson(OUT + '/resolve/loc.json'), getJson(DATA + '/roofs.json').catch(() => ({})),
+  ]).then(async ([ul, ol, tx, man, sp, tr, dr, ri, rl, rf]) => {
+    underlays = ul; overlays = ol; textures = tx;
+    roofFix = rf.fix || {};   /* before the first loc shard: every def arrives already mended */
+    for (const r of man.regions) manifest.add(r);
+    sp.npcs.forEach((s, i) => {
+      const rid = ridOf(s.x, s.y);
+      let a = spawnsByRegion.get(rid);
+      if (!a) spawnsByRegion.set(rid, a = []);
+      a.push(Object.assign({ i }, s));
+    });
+    itemSpawns = (sp.items || []).map((s, i) => Object.assign({ i }, s));
+    transByLoc = tr.byLoc || {};
+    for (const [cid, [oid, conv]] of Object.entries(dr.pairs)) {
+      doorPairs.set(+cid, { other: oid, conv, closed: true });
+      if (!doorPairs.has(oid)) doorPairs.set(oid, { other: +cid, conv, closed: false });
+    }
+    resolveItem = ri; resolveLoc = rl;
+    const stumpIds = (rl['tree stump'] || []).slice(0, 24), sd = await defs('loc', stumpIds);
+    stumps = stumpIds.map(id => sd[id]).filter(d => d && d.models && d.models.some(m => m.shape === 10));
+    for (const d of stumps) for (const m of d.models) pinned.add(m.model);
+    await models(pinned);
+    if (itemSpawns.length) await defs('item', itemSpawns.map(s => s.id));
+    await loadSeqs([PLAYER_STAND, PLAYER_WALK]);
+    worldImage();
+    loaded = true;
+    return true;
+  }).catch(e => { loading = null; throw e; });
+}
+function init(o) {
+  scene = o.scene; fogCenter = o.fogCenter; H = o.hooks || {};
+  THREE.MeshLambertMaterial.prototype.onBeforeCompile = function (shader) { shader.uniforms.fogCenter = fogCenter; };   /* the fog is measured from the player, as every seedworld material's is */
+  root = new THREE.Group(); root.visible = false;
+  planeG = [0, 1, 2, 3].map(() => { const g = new THREE.Group(); root.add(g); return g; });
+  amb = new THREE.AmbientLight(0xffffff, 0.65); sun = new THREE.DirectionalLight(0xffffff, 0.9);
+  sun.position.set(-0.6, 1, 0.4);
+  root.add(amb, sun);
+  scene.add(root);
+}
+function setActive(on) {
+  active = !!on;
+  if (root) root.visible = active;
+  if (!active) clear();
+}
+function setBrightness(v) { bright = v; if (amb) { amb.intensity = 0.65 * v; sun.intensity = 0.9 * v; } }
+function setViewPlane(maxPlane) { if (planeG) for (let p = 0; p < 4; p++) planeG[p].visible = p <= maxPlane; }
+
+return {
+  OUT, init, load, setActive, setBrightness, setViewPlane, ready: () => loaded, active: () => active,
+  update, regions, clear, regionAt, pending, manifest: () => manifest,
+  yAt, heightAt, bridgeAt, renderPlane, coveredAt, solidAt,
+  canMove: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0), los, openTile, flagAt, snapWalkable, wallBetween, F_FULL,
+  pick, transport, climbTarget, toggleDoor, doorPartner, doorPairs,
+  npcDefOf, npcFigure, animate, defSync, itemGeo, itemMesh, itemFor, itemNameIds, itemSpawns: () => itemSpawns,
+  tileRGB, wallBits, worldImage, worldRGB, WORLD_IMG, isLand, squareCanvas, clean, opsOf,
+};
+})();

@@ -395,7 +395,7 @@ export class World extends DurableObject {
         const first = !me.pos;
         me.x = x; me.z = z; me.pos = 1;
         me.face = (face | 0) & 15;
-        me.flags = (flags | 0) & 3;
+        me.flags = (flags | 0) & 15;   // bits 0-1 afloat/run, 2-3 the Gielinor floor (a plane-0 world never sets them)
         this.queue('1:' + me.pid, [1, [[me.pid, tick | 0, x, z, me.face, me.flags]]]);
    /* The attachment refreshes every 16th step: a walk needs no precision across a
            hibernation wake — the next move fixes it. A teleport is not a step: hibernate

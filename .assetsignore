@@ -1,22 +1,29 @@
+# `wrangler deploy` publishes this folder as static assets: nothing listed here is ever served.
+# Keep in step with .gitignore (SHIP.md lists what ships). _headers must NOT be listed — wrangler reads it.
 /src
 wrangler.toml
 .assetsignore
 .gitignore
-.rgignore
+.git
 .wrangler
 .claude
-.git
-CLAUDE.md
-MAP.md
-EQUIPMENT.md
-EQUIPMENT-NAMES.md
-WORLD-ASSETS.md
+.rgignore
+node_modules/
+
+# notes and docs
+*.md
+
+# build-time tooling and its inputs
 tools/
-# build-time tooling and its inputs — never served (covers icons07-tint/sync.mjs and the csvs when restored)
 *.mjs
 *.csv
 sql/
 
-# temporary icon staging folders - 20k sprites that must never be published
-c07-full2/
-i07-full2/
+# the osrs-r2 transcode tree (~1.9GB): too big for Workers Assets; R2 later
+out/
+play-local.cmd
+
+# retired: the temporary wiki sprite dumps and the old model bundle
+assets/c07-full2/
+assets/i07-full2/
+assets/osrs/

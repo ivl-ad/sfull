@@ -44,26 +44,32 @@ let transByLoc = {}, itemSpawns = [], resolveItem = {}, resolveLoc = {}, worldIm
 let roofFix = {};   /* loc id -> { as, m: { shape: model } }: roof kits this cache ships blank borrow a sibling's models (roofs.json) */
 
 const getJson = url => fetch(url).then(r => r.ok ? r.json() : Promise.reject(new Error(url + ' -> HTTP ' + r.status)));
-const getBin = url => fetch(url).then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(url + ' -> HTTP ' + r.status)));
+const getBin = url => fetch(url).then(r => r.ok ? r.arrayBuffer() : Promise.reject(Object.assign(new Error(url + ' -> HTTP ' + r.status), { status: r.status })));
+/* an answer (a missing or broken file) vs a blip (no connection, a server error): only answers are remembered */
+const transient = e => e instanceof TypeError || (e && e.status >= 500);
 /* a frame's breath between region builds; the timer backs the frame up, since an occluded window can starve rAF without ever reporting itself hidden */
 const nextFrame = () => new Promise(r => { let done = 0; const go = () => { if (!done) { done = 1; r(); } }; if (typeof requestAnimationFrame === 'function' && !document.hidden) requestAnimationFrame(go); setTimeout(go, 50); });
 const clean = s => (typeof s === 'string' ? s.replace(/<[^>]*>/g, '').trim() : '');
 const opsOf = def => Object.entries((def && def.ops) || {}).filter(([, o]) => o && o.text).sort(([a], [b]) => a - b).map(([, o]) => clean(o.text));
 
-/* ---- assets: one loader for everything under OUT ---- */
+/* ---- assets: config shards come through OSRSK's cache (one download, one parsed copy for the whole game); atoms, frames
+   and textures load here. Nothing that failed for a passing reason is remembered: the next build asks again. ---- */
 const shardP = new Map(), shardE = new Map(), modelM = new Map(), fmP = new Map(), faP = new Map(), texMats = new Map(), texMatsT = new Map(), texMatsG = new Map(), texMaps = new Map();
 const WHITE = [1, 1, 1];
+const mended = new WeakSet();
 function shard(type, s) {
   const key = type + '/' + s;
   let p = shardP.get(key);
   if (!p) {
-    p = getJson(OUT + '/cfg/' + key + '.json').then(j => {
-      const e = j.entries || {};
-      if (type === 'loc') for (const id in e) { const f = roofFix[id], d = e[id]; if (f && d.models) d.models = d.models.map(q => f.m[q.shape] !== undefined ? { model: f.m[q.shape], shape: q.shape } : q); }
+    p = OSRSK.cfgShard(type, s).then(e => {
+      if (type === 'loc' && !mended.has(e)) {   /* the shared entries are mended once: the blank roof kits borrow their sibling's models */
+        mended.add(e);
+        for (const id in e) { const f = roofFix[id], d = e[id]; if (f && d.models) d.models = d.models.map(q => f.m[q.shape] !== undefined ? { model: f.m[q.shape], shape: q.shape } : q); }
+      }
       shardE.set(key, e);
       return e;
-    }, () => { shardE.set(key, {}); return {}; });
-    shardP.set(key, p);
+    });
+    shardP.set(key, p); p.catch(() => shardP.delete(key));
   }
   return p;
 }
@@ -75,52 +81,76 @@ async function defs(type, ids) {   /* sharded on-demand defs; shard = floor(id/2
 const defSync = (type, id) => { const e = shardE.get(type + '/' + ((id / 256) | 0)); return e ? e[id] : undefined; };
 async function catalog(type) {      /* the small whole catalogs: underlay, overlay, texture */
   const idx = await getJson(OUT + '/cfg/' + type + '/index.json'), out = {};
-  for (const s of idx.shards) Object.assign(out, (await getJson(OUT + '/cfg/' + type + '/' + s + '.json')).entries);
+  for (const e of await Promise.all(idx.shards.map(s => OSRSK.cfgShard(type, s)))) Object.assign(out, e);
   return out;
 }
 const modelP = new Map();
+/* atoms share 32 lanes, first asked first served: a dozen squares filling in at once never stack hundreds of requests and parses into one moment */
+const ATOM_LANES = 32, atomWait = [];
+let atomBusy = 0;
+const atomSlot = () => atomBusy < ATOM_LANES ? (atomBusy++, Promise.resolve()) : new Promise(r => atomWait.push(r));
+const atomFree = () => { const next = atomWait.shift(); if (next) next(); else atomBusy--; };
 function models(ids) {
   const ps = [];
   for (const id of ids) {
-    if (!(id >= 0) || modelM.has(id)) continue;
+    if (!(id >= 0)) continue;
+    if (modelM.has(id)) { const m = modelM.get(id); modelM.delete(id); modelM.set(id, m); continue; }   /* a hit moves to the back: the trim drops the least recently used */
     let p = modelP.get(id);
-    if (!p) { p = getBin(OUT + '/m/' + id + '.bin').then(b => parseModel(b), () => null).then(m => { modelM.set(id, m); modelP.delete(id); }); modelP.set(id, p); }
+    if (!p) {
+      p = atomSlot().then(() => getBin(OUT + '/m/' + id + '.bin')).then(parseModel).then(m => { modelM.set(id, m); }, e => { if (!transient(e)) modelM.set(id, null); })   /* a missing or broken atom is an answer (null); a blip is asked again */
+        .then(() => { atomFree(); modelP.delete(id); });
+      modelP.set(id, p);
+    }
     ps.push(p);
   }
   return Promise.all(ps);
 }
+const modelsMissing = ids => { for (const id of ids) if (id >= 0 && !modelM.has(id)) return true; return false; };
+const pinned = new Set(), pinN = new Map();   /* pinned: the stumps, for good; pinN: models a live square or a figure mid-build still needs */
+const pin = ids => { for (const id of ids) pinN.set(id, (pinN.get(id) || 0) + 1); };
+const unpin = ids => { for (const id of ids) { const n = (pinN.get(id) || 0) - 1; if (n > 0) pinN.set(id, n); else pinN.delete(id); } };
 function trimModels() {   /* only between builds: a model a build is about to read must never vanish under it */
   if (modelM.size <= MODEL_MAX) return;
   let drop = modelM.size - ((MODEL_MAX * 0.8) | 0);
-  for (const key of modelM.keys()) { if (drop-- <= 0) break; if (!pinned.has(key)) modelM.delete(key); }
+  for (const key of modelM.keys()) { if (drop <= 0) break; if (!pinned.has(key) && !pinN.has(key)) { modelM.delete(key); drop--; } }
 }
-const pinned = new Set();
 const model = id => modelM.get(id);
-const framemap = id => { if (!fmP.has(id)) fmP.set(id, getBin(OUT + '/fm/' + id + '.bin').then(parseFramemap)); return fmP.get(id); };
+const framemap = id => { let p = fmP.get(id); if (!p) { p = getBin(OUT + '/fm/' + id + '.bin').then(parseFramemap); fmP.set(id, p); p.catch(() => fmP.delete(id)); } return p; };
 const frameArchive = id => {
-  if (!faP.has(id)) faP.set(id, getBin(OUT + '/a/' + id + '.bin').then(async b => { const fa = parseFrames(b); fa.fm = await framemap(fa.framemapId); return fa; }));
-  return faP.get(id);
+  let p = faP.get(id);
+  if (!p) { p = getBin(OUT + '/a/' + id + '.bin').then(async b => { const fa = parseFrames(b); fa.fm = await framemap(fa.framemapId); return fa; }); faP.set(id, p); p.catch(() => faP.delete(id)); }
+  return p;
 };
+/* a texture's image, and the materials waiting on it: until it lands a material wears the texture's average colour, never the
+   black of an empty map; a failed image keeps that colour and the next material to ask tries again */
 function texMap(id) {
-  let tex = texMaps.get(id);
-  if (!tex) { tex = new THREE.TextureLoader().load(OUT + '/tx/' + id + '.png'); tex.wrapS = tex.wrapT = THREE.RepeatWrapping; texMaps.set(id, tex); }
-  return tex;
+  let t = texMaps.get(id);
+  if (!t) {
+    t = { tex: null, mats: [] };
+    texMaps.set(id, t);
+    new THREE.TextureLoader().load(OUT + '/tx/' + id + '.png', tex => {
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      t.tex = tex;
+      for (const m of t.mats) { m.map = tex; m.color.setRGB(1, 1, 1); m.needsUpdate = true; }
+      t.mats.length = 0;
+    }, undefined, () => { if (texMaps.get(id) === t) texMaps.delete(id); });
+  }
+  return t;
 }
-function texMaterial(id) {
-  let m = texMats.get(id);
-  if (!m) { m = new THREE.MeshLambertMaterial({ map: texMap(id), side: THREE.DoubleSide, alphaTest: 0.4 }); texMats.set(id, m); }
-  return m;
-}
-/* a translucent textured face: the texture times its vertex alpha, drawn after the solid world without writing depth,
-   pulled a hair toward the eye so a wash laid flat on the floor never fights the floor */
-function texMaterialT(id) {
-  let m = texMatsT.get(id);
+function texMat(cache, id, make) {
+  let m = cache.get(id);
   if (!m) {
-    m = new THREE.MeshLambertMaterial({ map: texMap(id), side: THREE.DoubleSide, vertexColors: true, transparent: true, depthWrite: false, alphaTest: 0.01, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
-    texMatsT.set(id, m);
+    const t = texMap(id);
+    m = make(t.tex);
+    if (!t.tex) { const c = textures[id] ? rgbI(textures[id].avgRgbAdjusted) : WHITE; m.color.setRGB(c[0], c[1], c[2]); t.mats.push(m); }
+    cache.set(id, m);
   }
   return m;
 }
+const texMaterial = id => texMat(texMats, id, map => new THREE.MeshLambertMaterial({ map, side: THREE.DoubleSide, alphaTest: 0.4 }));
+/* a translucent textured face: the texture times its vertex alpha, drawn after the solid world without writing depth,
+   pulled a hair toward the eye so a wash laid flat on the floor never fights the floor */
+const texMaterialT = id => texMat(texMatsT, id, map => new THREE.MeshLambertMaterial({ map, side: THREE.DoubleSide, vertexColors: true, transparent: true, depthWrite: false, alphaTest: 0.01, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 }));
 
 /* ---- atoms (little-endian; ../osrs-r2/GUIDE.md) ---- */
 const magic = dv => String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
@@ -204,7 +234,7 @@ async function loadSeqs(ids) {
       const frames = [];
       s.frameIDs.forEach(([a, f], i) => { const tr = archs[a] && archs[a].byFile.get(f); if (tr) frames.push({ tr, fm: archs[a].fm, ms: ((s.frameLengths && s.frameLengths[i]) || 2) * 20 }); });
       seqs.set(id, frames.length ? frames : null);
-    } catch { seqs.set(id, null); }
+    } catch (e) { if (!transient(e)) seqs.set(id, null); }   /* a blip leaves it unasked: the next figure asks again */
   }));
 }
 
@@ -363,6 +393,7 @@ function appendModel(sink, m, t, flat) {
     if (t.mirror) z = -z;
     for (let r = 0; r < rot; r++) { const q = x; x = z; z = -q; }   /* client rotateY90 */
     if (t.extra45) { const q = x; x = (q + z) * S; z = (z - q) * S; }
+    if (t.decor) { x += t.decor[0]; z += t.decor[1]; }   /* a diagonal wall decoration: the client's (45, 0, -45) after its 45-degree turn, turned with the placement */
     x = x * sx + (t.ox || 0); y = y * sh + (t.oh || 0); z = z * sy + (t.oy || 0);
     vX[i] = x; vY[i] = y; vZ[i] = z;
     if (y < minY) minY = y;
@@ -525,11 +556,8 @@ function blendAt(x, y) {   /* square-local tile (0..64): its blended HSL16, or -
   const [sH, sS, sL, sM, sN] = blendS, nn = q(sN), mm = q(sM);
   return nn && mm ? packHsl((q(sH) * 256 / mm) | 0, (q(sS) / nn) | 0, (q(sL) / nn) | 0) : -1;
 }
-function groundTex(id) {   /* a textured overlay (water, lava, cobbles) wears its texture, one repeat a tile, lit like the ground */
-  let m = texMatsG.get(id);
-  if (!m) { m = new THREE.MeshLambertMaterial({ map: texMap(id), side: THREE.FrontSide }); texMatsG.set(id, m); }
-  return m;
-}
+/* a textured overlay (water, lava, cobbles) wears its texture, one repeat a tile, lit like the ground */
+const groundTex = id => texMat(texMatsG, id, map => new THREE.MeshLambertMaterial({ map, side: THREE.FrontSide }));
 function buildTerrain(R) {
   const lv = [0, 1, 2, 3].map(() => ({ pos: [], col: [], tex: new Map() }));
   const vx = new Float32Array(6), vz = new Float32Array(6), vh = new Float32Array(6), vu = new Float32Array(6), vv = new Float32Array(6), vc = new Array(6);
@@ -620,6 +648,8 @@ function groundCenter(plane, gx, gy, w, l) {   /* the modern client's rule: the 
   const h = (cornerH(plane, ex, ey, r) + cornerH(plane, sx, ey, r) + cornerH(plane, sx, sy, r) + cornerH(plane, ex, sy, r)) >> 2;
   return { cx: gx + w / 2 - 0.5, cz: -(gy + l / 2) + 0.5, gy: -h * U, r, plane, base: h, px: gx * 128 + w * 64, py: gy * 128 + l * 64 };
 }
+/* the client's (45, 0, -45) for a diagonal wall decoration, in cache x/z, turned by the placement's quarter turns (rotateY90 each) */
+const DECOR45 = [[45, -45], [-45, -45], [-45, 45], [45, 45]];
 /* draws one placement {id, plane, gx, gy, type, rot} into a sink under owner ud (null: not pickable) */
 function drawLoc(sink, def, pl, ud, bare) {
   const [w, l] = footprint(def, pl.rot);
@@ -634,7 +664,7 @@ function drawLoc(sink, def, pl, ud, bare) {
   const draw = (rot, e45) => {
     const t = groundCenter(pl.plane, pl.gx, pl.gy, w, l);   /* heights from the CACHE plane: a deck stays raised */
     if (!t) return;
-    Object.assign(t, cm, { rot, extra45: e45, mirror: !!def.isRotated,
+    Object.assign(t, cm, { rot, extra45: e45, decor: e45 && pl.type >= 6 && pl.type <= 8 ? DECOR45[rot & 3] : null, mirror: !!def.isRotated,
       sx: (def.modelSizeX || 128) / 128, sh: (def.modelSizeHeight || 128) / 128, sy: (def.modelSizeY || 128) / 128,
       ox: def.offsetX || 0, oh: def.offsetHeight || 0, oy: def.offsetY || 0, contour: def.contouredGround === undefined ? -1 : def.contouredGround });
     for (const e of entries) { const mod = model(e.model); if (mod) appendModel(sink, mod, t); }
@@ -644,8 +674,15 @@ function drawLoc(sink, def, pl, ud, bare) {
   sink.ud = null;
   return true;
 }
-const newOwner = (R, pl, def, id, w, l) => ({ kind: 'loc', R, locId: id, def, name: clean(def.name) || 'loc ' + id, ops: opsOf(def), plane: renderPlane(pl.plane, pl.gx, pl.gy),
-  cachePlane: pl.plane, gx: pl.gx, gy: pl.gy, w, l, type: pl.type, rot: pl.rot, tris: [], box: new THREE.Box3(new THREE.Vector3(1e9, 1e9, 1e9), new THREE.Vector3(-1e9, -1e9, -1e9)) });
+/* a placement's menu: the def's own verbs, plus a recorded link's verb when the menu offers no way to move (a spirit tree's Travel,
+   carried on a child state the map never shows) */
+function newOwner(R, pl, def, id, w, l) {
+  let ops = opsOf(def);
+  const links = transByLoc[id];
+  if (links && !ops.some(o => MOVE_OP.test(o))) for (const t of links) if (t.lx === pl.gx && t.ly === pl.gy && t.lp === pl.plane && t.o && !ops.some(o => opKey(o) === opKey(t.o))) ops = ops.concat(String(t.o).replace(/^./, c => c.toUpperCase()));
+  return { kind: 'loc', R, locId: id, def, name: clean(def.name) || 'loc ' + id, ops, plane: renderPlane(pl.plane, pl.gx, pl.gy),
+    cachePlane: pl.plane, gx: pl.gx, gy: pl.gy, w, l, type: pl.type, rot: pl.rot, tris: [], box: new THREE.Box3(new THREE.Vector3(1e9, 1e9, 1e9), new THREE.Vector3(-1e9, -1e9, -1e9)) };
+}
 
 /* ---- openable locs: pairs from doors.json; a toggled placement survives a region reload ---- */
 const locOverrides = new Map();
@@ -670,13 +707,15 @@ function dynamic(R, def, pl, ud, spec) {
   for (const m of spent) m.visible = false;
   let state = 0;
   ud.dyn = g;
-  ud.vis = st => {
+  ud.setVis = st => {
     st = st ? 1 : 0;
     if (st === state) return;
     state = st;
     for (const m of whole) m.visible = !st;
     for (const m of spent) m.visible = !!st;
   };
+  if (!ud.vis) ud.vis = st => { ud.st = st ? 1 : 0; ud.setVis(ud.st); };
+  if (ud.st) ud.setVis(1);   /* felled or emptied before its meshes existed: the state waited in ud.st */
   return g;
 }
 let stumps = null;   /* tree stump defs, resolved once at load; matched to the tree's footprint */
@@ -691,22 +730,63 @@ function spentLook(def, pl, spec, g) {
   return flushSink(s, g);
 }
 
-/* ---- regions: parse, collide, draw ---- */
+/* ---- regions: parse, collide, draw ----
+   A square comes up in three steps, so the ground under a player never waits on its scenery: the terrain draws the moment t/ and
+   l/ are in; the loc and npc defs follow, and with them the walls, the menus and the monsters, so the square walks true (until
+   then it collides solid: regionAt answers only a ready square); its models come last, laid a few milliseconds a frame, one square
+   at a time. A square that fails for a passing reason is dropped and asked for again after a growing rest. */
 function newRegion(rid) {
   return { rid, sqX: rid >> 8, sqY: rid & 255, ready: 0, terr: [null, null, null, null], groups: [], owners: [], objs: [], ext: [], solid: new Uint8Array(16384),
-    clip: new Int32Array(16384), walls: new Uint8Array(16384), box: new THREE.Box3() };
+    clip: new Int32Array(16384), walls: new Uint8Array(16384), box: new THREE.Box3(), pins: null };
+}
+const retryAt = new Map(), tries = new Map();
+function failed(rid, e) {
+  const n = (tries.get(rid) || 0) + 1;
+  tries.set(rid, n); retryAt.set(rid, performance.now() + Math.min(30000, 1000 * 2 ** n));
+  console.warn('[map07] region ' + rid + ' will be asked for again', e && e.message);
+}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+let sliceT = 0;
+const overBudget = () => performance.now() - sliceT > 6;   /* a build hands the frame back once it has held it this long */
+const breathe = () => nextFrame().then(() => { sliceT = performance.now(); });
+/* a neighbour's terrain is rebuilt on a later frame, once however many squares land beside it: its seams and its edge blends */
+const terrDirty = new Set();
+let terrBusy = 0;
+function markTerrain(R) {
+  terrDirty.add(R.rid);
+  if (terrBusy) return;
+  terrBusy = 1;
+  (async () => {
+    while (terrDirty.size) {
+      await nextFrame();
+      const rid = terrDirty.values().next().value;
+      terrDirty.delete(rid);
+      const n = regions.get(rid);
+      if (n && n.H) buildTerrain(n);
+    }
+    terrBusy = 0;
+  })();
 }
 async function loadRegion(rid) {
   if (!manifest.has(rid) || regions.has(rid)) return;
-  const R = newRegion(rid);
+  const R = newRegion(rid), gone = () => regions.get(rid) !== R;
   regions.set(rid, R);
-  let t, placed;
+  R.groundP = new Promise(res => { R.groundDone = res; });
   try {
-    const [tb, lb] = await Promise.all([getBin(OUT + '/t/' + rid + '.bin'), getBin(OUT + '/l/' + rid + '.bin').catch(() => null)]);
-    t = parseTerrain(tb); placed = lb ? parseLocs(lb) : [];
-  } catch (e) { regions.delete(rid); console.warn('[map07] region ' + rid + ' failed', e); return; }
-  if (regions.get(rid) !== R) return;
-  Object.assign(R, t);
+    if (!(await groundStage(R)) || gone() || !(await defsStage(R)) || gone()) return;
+  } catch (e) {
+    if (!gone()) { unloadRegion(rid); failed(rid, e); }
+    return;
+  } finally { R.groundDone(); }
+  tries.delete(rid);
+  sceneryStage(R).catch(e => console.warn('[map07] scenery ' + rid, e));   /* the lane frees now: the square stands and walks while its models fill in */
+}
+async function groundStage(R) {
+  const rid = R.rid;
+  const [tb, lb] = await Promise.all([getBin(OUT + '/t/' + rid + '.bin'), getBin(OUT + '/l/' + rid + '.bin').catch(e => { if (e.status === 404) return null; throw e; })]);
+  if (regions.get(rid) !== R) return false;
+  Object.assign(R, parseTerrain(tb));
+  R.placed = lb ? parseLocs(lb) : [];
   const bx = R.sqX * 64, by = R.sqY * 64;
   R.box.set(new THREE.Vector3(bx - 0.5, -60, -(by + 64) + 0.5), new THREE.Vector3(bx + 63.5, 200, -by + 0.5));
   /* floor tiles: roof hiding reads solid; a blocked tile setting collides on its render plane */
@@ -715,29 +795,29 @@ async function loadRegion(rid) {
     if (R.UL[p * 4096 + i] || R.OL[p * 4096 + i]) R.solid[rp * 4096 + i] = 1;
     if (R.FL[p * 4096 + i] & 1 && !(p === 0 && R.bridge[i])) R.clip[rp * 4096 + i] |= F_FLOOR;
   }
-  /* defs: every placed id, both states of every door, varbit children; then the models they name */
+  buildTerrain(R);
+  R.groundDone();
+  /* the neighbours close their seams on our heights, and their edge blends reach five tiles into us */
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const n = (dx || dy) && regions.get(((R.sqX + dx) << 8) | (R.sqY + dy)); if (n && n.H) markTerrain(n); }
+  return true;
+}
+async function defsStage(R) {
+  const rid = R.rid, placed = R.placed, bx = R.sqX * 64, by = R.sqY * 64;
+  /* defs: every placed id, both states of every door, varbit children; the spawns' too, so game.js can name and type a monster the
+     moment the square is up (their models and frames are fetched per figure, when one stands near enough to be drawn) */
   const ids = new Set(placed.map(p => p.id));
   for (const p of placed) { const pr = doorPairs.get(p.id); if (pr) ids.add(pr.other); }
-  const dd = await defs('loc', ids), kids = new Set();
-  for (const i of ids) { const d = dd[i]; if (d && !d.models) { const c = defaultChild(d); if (c >= 0) kids.add(c); } }
-  if (kids.size) Object.assign(dd, await defs('loc', kids));
-  const mids = new Set();
-  for (const i of [...ids, ...kids]) for (const m of ((dd[i] && dd[i].models) || [])) mids.add(m.model);
-  /* the spawns' defs too (children included), so game.js can name and type a monster the moment the square is up;
-     their models and frames are fetched per figure (npcFigure), when one actually stands near enough to be drawn */
-  const spawnList = spawnsByRegion.get(rid) || [];
-  const npcIds = new Set();
+  const spawnList = spawnsByRegion.get(rid) || [], npcIds = new Set();
   for (const s of spawnList) { npcIds.add(s.id); if (s.as !== undefined) npcIds.add(s.as); }
-  const nd = npcIds.size ? await defs('npc', npcIds) : {}, nkids = new Set();
+  const [dd, nd] = await Promise.all([defs('loc', ids), npcIds.size ? defs('npc', npcIds) : {}]);
+  const kids = new Set(), nkids = new Set();
+  for (const i of ids) { const d = dd[i]; if (d && !d.models) { const c = defaultChild(d); if (c >= 0) kids.add(c); } }
   for (const s of spawnList) { const d = nd[s.id]; if (d && !d.models) { const c = defaultChild(d); if (c >= 0) nkids.add(c); } }
-  if (nkids.size) await defs('npc', nkids);
-  await models(mids);
-  if (regions.get(rid) !== R) return;
-  R.locDefs = dd;
-  await nextFrame();
-  if (regions.get(rid) !== R) return;
-  /* collision, roofs, the minimap's walls; then the static sink, with doors and classified pieces on their own */
-  const sinks = [0, 1, 2, 3].map(() => makeSink()), dynList = [];
+  await Promise.all([kids.size ? defs('loc', kids).then(k => { Object.assign(dd, k); }) : 0, nkids.size ? defs('npc', nkids) : 0]);
+  if (regions.get(rid) !== R) return false;
+  R.locDefs = dd; R.mids = new Set(); R.work = [];
+  for (const i of [...ids, ...kids]) for (const m of ((dd[i] && dd[i].models) || [])) R.mids.add(m.model);
+  /* collision, roofs, the minimap's walls and the menus; the drawing waits for the models */
   for (const p of placed) {
     const def = resolveDef(dd, p.id);
     if (!def || !def.models) continue;
@@ -752,36 +832,77 @@ async function loadRegion(rid) {
       const e = p.type === 2 ? (1 << p.rot) | (1 << ((p.rot + 1) & 3)) : 1 << p.rot, i = rp * 4096 + p.x * 64 + p.y;
       R.walls[i] |= e | (openable(def, p.id) ? 16 : 0);
     }
-    if (doorPairs.has(p.id)) { dynList.push({ pl, door: 1 }); continue; }
-    /* only a piece with a menu is pickable, and every kind game.js can put to work has one (Chop down, Mine, Bank...) */
-    const ud = def.ops ? newOwner(R, pl, def, p.id, w, l) : null;
-    if (ud && !ud.ops.length) { drawLoc(sinks[rp], def, pl, null, false); continue; }
+    if (doorPairs.has(p.id)) { R.work.push({ pl, door: 1 }); continue; }
+    /* only a piece with a menu is pickable, and every kind game.js can put to work has one (Chop down, Mine, Bank...); a recorded
+       link lends a menu to a piece the map shows without one */
+    const linked = !def.ops && transByLoc[p.id] && transByLoc[p.id].some(t => t.lx === gx && t.ly === gy && t.lp === p.plane);
+    const ud = def.ops || linked ? newOwner(R, pl, def, p.id, w, l) : null;
+    if (ud && !ud.ops.length) { R.work.push({ pl, def, ud: null, rp }); continue; }
     const spec = ud && H.classify ? H.classify(ud) : null;
     if (spec) ud.spec = spec;
-    if (spec && spec.dyn) { dynList.push({ pl, def, ud, spec }); continue; }
-    drawLoc(sinks[rp], def, pl, ud, false);
+    if (spec && spec.dyn) {
+      ud.vis = st => { ud.st = st ? 1 : 0; if (ud.setVis) ud.setVis(ud.st); };   /* the object answers now; its meshes take the state when they exist */
+      R.work.push({ pl, def, ud, spec, dyn: 1 }); R.owners.push(ud); R.objs.push(ud);
+      continue;
+    }
+    R.work.push({ pl, def, ud, rp });
     if (ud) { R.owners.push(ud); if (spec) R.objs.push(ud); }
   }
-  for (let p = 0; p < 4; p++) {
-    const g = new THREE.Group();
-    planeG[p].add(g); R.groups.push(g);
-    flushSink(sinks[p], g);
-  }
-  for (const q of dynList) {
-    if (q.door) {
-      const key = q.pl.plane + ',' + q.pl.gx + ',' + q.pl.gy + ',' + q.pl.type;
-      spawnDoor(R, key, q.pl, locOverrides.get(key) || q.pl);
-    } else { dynamic(R, q.def, q.pl, q.ud, q.spec); R.owners.push(q.ud); R.objs.push(q.ud); R.groups.push(q.ud.dyn); }
-  }
+  R.placed = null;
   /* writes past the edges: ours into loaded neighbours, theirs into us */
   applyExt(R, R);
   for (const n of regions.values()) if (n !== R && n.clip && n.ext.length) applyExt(n, R);
   R.spawns = spawnList;
   R.ready = 1; lastR = null;
-  buildTerrain(R);
-  /* the neighbours close their seams on our heights, and their edge blends reach five tiles into us */
-  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const n = (dx || dy) && regions.get(((R.sqX + dx) << 8) | (R.sqY + dy)); if (n && n.ready) buildTerrain(n); }
   if (H.onRegion) H.onRegion(R);
+  return true;
+}
+let buildLane = Promise.resolve(), scenic = 0;
+async function sceneryStage(R) {
+  const rid = R.rid, gone = () => regions.get(rid) !== R;
+  scenic++; pin(R.mids);   /* a trim leaves what a waiting build will read */
+  try {
+    const doorMods = [];   /* both states of every door stay for the square's life: a toggle redraws the other from the cache */
+    for (const q of R.work) if (q.door) for (const id of [q.pl.id, doorPairs.get(q.pl.id).other]) { const d = resolveDef(R.locDefs, id); if (d && d.models) for (const m of d.models) doorMods.push(m.model); }
+    pin(doorMods); R.pins = doorMods;
+    for (let a = 0; ; a++) {   /* a blip leaves holes: ask again a few times before building with what came */
+      await models(R.mids);
+      if (gone()) return;
+      if (!modelsMissing(R.mids) || a === 3) break;
+      await sleep(1500 * (a + 1));
+      if (gone()) return;
+    }
+    /* the seams: the east, north and north-east neighbours lend the heights our edge pieces stand on */
+    const nb = [[1, 0], [0, 1], [1, 1]].map(([dx, dy]) => regions.get(((R.sqX + dx) << 8) | (R.sqY + dy))).filter(n => n && !n.H);
+    if (nb.length) { await Promise.race([Promise.all(nb.map(n => n.groundP)), sleep(2500)]); if (gone()) return; }
+    const run = buildLane.then(() => gone() ? 0 : buildScenery(R));
+    buildLane = run.catch(() => {});
+    await run;
+  } finally { scenic--; unpin(R.mids); }
+}
+async function buildScenery(R) {
+  const rid = R.rid, gone = () => regions.get(rid) !== R, sinks = [0, 1, 2, 3].map(() => makeSink()), later = [];
+  await breathe();
+  if (gone()) return;
+  for (const q of R.work) {
+    if (q.door || q.dyn) { later.push(q); continue; }
+    drawLoc(sinks[q.rp], q.def, q.pl, q.ud, false);
+    if (overBudget()) { await breathe(); if (gone()) return; }
+  }
+  for (let p = 0; p < 4; p++) {
+    const g = new THREE.Group();
+    planeG[p].add(g); R.groups.push(g);
+    flushSink(sinks[p], g);
+    if (overBudget()) { await breathe(); if (gone()) return; }
+  }
+  for (const q of later) {
+    if (q.door) {
+      const key = q.pl.plane + ',' + q.pl.gx + ',' + q.pl.gy + ',' + q.pl.type;
+      spawnDoor(R, key, q.pl, locOverrides.get(key) || q.pl);
+    } else { dynamic(R, q.def, q.pl, q.ud, q.spec); R.groups.push(q.ud.dyn); }
+    if (overBudget()) { await breathe(); if (gone()) return; }
+  }
+  R.work = null; R.built = 1;
 }
 function applyExt(src, only) {
   const e = src.ext;
@@ -822,29 +943,31 @@ function doorPartner(ud) {   /* the other leaf of a double door: along the same 
 function unloadRegion(rid) {
   const R = regions.get(rid);
   if (!R) return;
-  regions.delete(rid); lastR = null;
+  regions.delete(rid); lastR = null; terrDirty.delete(rid);
   if (R.ready && H.onUnload) H.onUnload(R);
+  if (R.pins) { unpin(R.pins); R.pins = null; }
   for (const m of R.terr) if (m) disposeMesh(m);
   for (const g of R.groups) disposeMesh(g);
 }
 
-/* ---- streaming: every square within reach of the player, nearest first, two at a time; far ones go ---- */
+/* ---- streaming: every square within reach of the player, nearest first, four fetching at once; far ones go ---- */
+const LANES = 4;
 let queue = [], busy = 0;
 function update(gx, gy, reach) {
   if (!loaded) return;
   const dist = rid => { const x0 = (rid >> 8) * 64, y0 = (rid & 255) * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
   for (const rid of [...regions.keys()]) if (dist(rid) > reach + 48) unloadRegion(rid);
-  const rx = gx >> 6, ry = gy >> 6, n = Math.ceil(reach / 64) + 1, list = [];
+  const rx = gx >> 6, ry = gy >> 6, n = Math.ceil(reach / 64) + 1, list = [], now = performance.now();
   for (let dx = -n; dx <= n; dx++) for (let dy = -n; dy <= n; dy++) {
     const rid = ((rx + dx) << 8) | (ry + dy);
-    if (rx + dx >= 0 && ry + dy >= 0 && manifest.has(rid) && !regions.has(rid) && dist(rid) <= reach) list.push(rid);
+    if (rx + dx >= 0 && ry + dy >= 0 && manifest.has(rid) && !regions.has(rid) && dist(rid) <= reach && !(retryAt.get(rid) > now)) list.push(rid);   // a square resting after a failure waits out its rest
   }
   queue = list.sort((a, b) => dist(a) - dist(b));
   pump();
 }
 function pump() {
-  if (!busy && !queue.length) trimModels();
-  while (busy < 2 && queue.length) {
+  if (!busy && !queue.length && !scenic) trimModels();   /* only while no square is laying its scenery */
+  while (busy < LANES && queue.length) {
     const rid = queue.shift();
     if (regions.has(rid)) continue;
     busy++;
@@ -853,7 +976,7 @@ function pump() {
 }
 function clear() {
   for (const rid of [...regions.keys()]) unloadRegion(rid);
-  queue = []; locOverrides.clear();
+  queue = []; locOverrides.clear(); retryAt.clear(); tries.clear();
 }
 const pending = () => busy + queue.length;
 
@@ -887,8 +1010,15 @@ function pick(ray, maxPlane, maxDist) {
 
 /* ---- transports (stairs, trapdoors, dungeon doors): keyed by loc id + option, matched to the exact placement ---- */
 const opKey = s => String(s).toLowerCase().replace(/[^a-z]/g, '');
+/* verbs that move you: only these may take a recorded link whose own verb the cache's menu no longer offers */
+const MOVE_OP = /climb|walk|enter|exit|jump|go-?(up|down|through)|squeeze|crawl|cross|pass|travel|descend|ascend|board|dive|swim|leave|step/i;
+const linksAt = ud => (transByLoc[ud.locId] || []).filter(t => t.lx === ud.gx && t.ly === ud.gy && t.lp === ud.cachePlane);
 function transport(ud, op, px, py) {
-  const list = (transByLoc[ud.locId] || []).filter(t => t.lx === ud.gx && t.ly === ud.gy && t.lp === ud.cachePlane && opKey(t.o) === opKey(op));
+  const here = linksAt(ud), k = opKey(op);
+  let list = here.filter(t => opKey(t.o) === k);
+  /* the dump kept some links under a verb the menu no longer has (walk-down for Climb-down, enter for Jump-down): a moving verb
+     with no link of its own takes those orphans */
+  if (!list.length && MOVE_OP.test(op)) { const own = new Set(ud.ops.map(opKey)); list = here.filter(t => !own.has(opKey(t.o))); }
   if (!list.length) return null;
   const cost = t => (t.bad ? 1e6 : 0) + Math.abs(t.x - px) + Math.abs(t.y - py);
   const t = list.sort((a, b) => cost(a) - cost(b))[0];
@@ -1031,7 +1161,9 @@ function npcDefOf(id, as) {
 }
 async function npcFigure(def) {
   if (!def || !def.models) return null;
-  await Promise.all([models(def.models), loadSeqs([def.standingAnimation, def.walkingAnimation])]);
+  pin(def.models);   /* a trim between the fetch and the build must not take a part away */
+  try { await Promise.all([models(def.models), loadSeqs([def.standingAnimation, def.walkingAnimation])]); } finally { unpin(def.models); }
+  if (modelsMissing(def.models)) throw Object.assign(new Error('figure parts did not load'), { status: 503 });   /* a blip: the caller asks again */
   const { recol, retex } = colorMaps(def);
   const parts = def.models.map(m => ({ model: model(m), recol, retex })).filter(p => p.model);
   if (!parts.length) return null;
@@ -1047,7 +1179,7 @@ async function npcFigure(def) {
     if (pW && (fmMatch || biped)) { standF = standF || pS; if (!still) walkF = walkF || pW; }
   }
   ent.play(standF);
-  return { ent, mesh: ent.mesh, standF, walkF, still: still || !walkF, height: ent.height * ((def.heightScale || 128) / 128), size: def.size || 1 };
+  return { ent, mesh: ent.mesh, standF, walkF, still: still || !walkF, height: ent.height, size: def.size || 1 };   // writePose already scaled the mesh by heightScale
 }
 function animate(fig, moving, dtMs, lod) {
   fig.ent.play(moving ? (fig.walkF || fig.standF) : fig.standF);
@@ -1110,9 +1242,13 @@ function tileRGB(plane, gx, gy) {   /* the colour the minimap paints for a tile 
 function wallBits(plane, gx, gy) { const r = regionAt(gx, gy); return r ? r.walls[plane * 4096 + (gx & 63) * 64 + (gy & 63)] : 0; }
 /* the 2007 world map composite (wm/img/5.0.png): mapsquares x 18..60, y 39..64, sixteen pixels a square */
 const WORLD_IMG = { src: OUT + '/wm/img/5.0.png', gx0: 18 * 64, gy1: 65 * 64, tpp: 4 };
-function worldImage() {
-  if (!worldImg) { worldImg = new Image(); worldImg.crossOrigin = 'anonymous'; worldImg.src = WORLD_IMG.src; }   /* getImageData below */
-  return worldImg.complete && worldImg.naturalWidth ? worldImg : null;
+let worldImgT = 0;
+function worldImage() {   /* fetched as a blob, so the pixel read below never meets a copy cached without CORS; a failure rests ten seconds */
+  if (!worldImg && performance.now() >= worldImgT) {
+    const im = worldImg = new Image(), get = cache => fetch(WORLD_IMG.src, { cache }).then(r => r.ok ? r.blob() : Promise.reject(new Error('world map ' + r.status)));
+    get('default').catch(() => get('reload')).then(b => { im.src = URL.createObjectURL(b); }, () => { if (worldImg === im) { worldImg = null; worldImgT = performance.now() + 10000; } });
+  }
+  return worldImg && worldImg.complete && worldImg.naturalWidth ? worldImg : null;
 }
 let landPx = null, landW = 0, landH = 0;
 function worldRGB(gx, gy) {   /* the composite's pixel under a tile, or -1 off it (the minimap's backdrop past the loaded squares) */
@@ -1120,7 +1256,8 @@ function worldRGB(gx, gy) {   /* the composite's pixel under a tile, or -1 off i
   if (!im) return -1;
   if (!landPx) {
     const c = document.createElement('canvas'); c.width = landW = im.naturalWidth; c.height = landH = im.naturalHeight;
-    const g = c.getContext('2d'); g.drawImage(im, 0, 0); landPx = g.getImageData(0, 0, landW, landH).data;
+    const g = c.getContext('2d'); g.drawImage(im, 0, 0);
+    try { landPx = g.getImageData(0, 0, landW, landH).data; } catch (e) { landPx = new Uint8ClampedArray(0); landW = landH = 0; }   /* an unreadable picture is no backdrop, not an error every frame */
   }
   const px = Math.floor((gx - WORLD_IMG.gx0) / WORLD_IMG.tpp), py = Math.floor((WORLD_IMG.gy1 - gy) / WORLD_IMG.tpp);
   if (px < 0 || py < 0 || px >= landW || py >= landH) return -1;
@@ -1229,6 +1366,7 @@ return {
   OUT, init, load, setActive, setBrightness, setViewPlane, ready: () => loaded, active: () => active,
   update, regions, clear, regionAt, pending, manifest: () => manifest,
   yAt, heightAt, bridgeAt, renderPlane, coveredAt, solidAt,
+  roofedAt: (p, gx, gy) => { const r = regionAt(gx, gy); if (!r) return false; const i = (gx & 63) * 64 + (gy & 63); return !!(r.FL[p * 4096 + i] & 4 || (p < 3 && r.bridge[i] && r.FL[(p + 1) * 4096 + i] & 4)); },   /* the client's under-a-roof tile flag (settings bit 4), not "anything above": an eave or a balcony lifts nothing */
   canMove: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0), los, openTile, flagAt, snapWalkable, wallBetween, F_FULL,
   pick, transport, climbTarget, toggleDoor, doorPartner, doorPairs,
   npcDefOf, npcFigure, animate, defSync, itemGeo, itemMesh, itemFor, itemNameIds, itemSpawns: () => itemSpawns,

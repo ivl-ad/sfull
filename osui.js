@@ -37,11 +37,33 @@ const enumOf = id => cfg('enum', id).then(e => (e && e.map) || {});
 
 /* ---- sprites ---- */
 const spriteURL = id => OUT + '/s/' + id + '.png';
+/* A sprite is fetched once, with CORS, and kept as a blob: every <img>, background and pixel read points at its object URL.
+   An <img> or url() aimed at the bucket itself caches the bucket's answer without CORS headers, and every later canvas read of
+   that URL (the masks, the alpha audit, the fonts) then fails for as long as the browser keeps the file. A copy that still
+   comes back unreadable is fetched once more past the cache, which also repairs the entry. */
+const blobP = new Map(), urlP = new Map(), urlNow = new Map();
+function spriteBlob(id) {
+  let p = blobP.get(id);
+  if (!p) {
+    const get = cache => fetch(spriteURL(id), { cache }).then(r => r.ok ? r.blob() : Promise.reject(new Error('sprite ' + id + ' ' + r.status)));
+    p = get('default').catch(() => get('reload'));
+    blobP.set(id, p); p.catch(() => blobP.delete(id));
+  }
+  return p;
+}
+function spriteObjURL(id) {
+  let p = urlP.get(id);
+  if (!p) {
+    p = spriteBlob(id).then(b => { const u = URL.createObjectURL(b); urlNow.set(id, u); return u; });
+    urlP.set(id, p); p.catch(() => urlP.delete(id));
+  }
+  return p;
+}
 const imgP = new Map();
 function image(id) {
   let p = imgP.get(id);
   if (!p) {
-    p = new Promise((res, rej) => { const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = () => res(im); im.onerror = () => rej(new Error('sprite ' + id)); im.src = spriteURL(id); });   /* read back by the masks and the alpha audit: an R2 base must send CORS */
+    p = spriteObjURL(id).then(u => new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('sprite ' + id)); im.src = u; }));
     imgP.set(id, p); p.catch(() => imgP.delete(id));
   }
   return p;
@@ -56,7 +78,7 @@ const fixedURL = new Map(), auditP = new Map();
 function audit(id) {
   let p = auditP.get(id);
   if (!p) {
-    p = image(id).then(im => {
+    const check = () => image(id).then(im => {
       const w = im.width, h = im.height;
       if (!w || !h) return null;
       const cv = document.createElement('canvas');
@@ -65,7 +87,7 @@ function audit(id) {
       g.drawImage(im, 0, 0);
       const a = g.getImageData(0, 0, w, h).data;
       for (let i = 3; i < a.length; i += 4) if (a[i]) return null;
-      return fetch(spriteURL(id)).then(r => r.arrayBuffer()).then(inflatePNG).then(px => {
+      return spriteBlob(id).then(b => b.arrayBuffer()).then(inflatePNG).then(px => {
         if (!px || px.length !== w * h * 4) return null;
         let any = 0;
         for (let i = 0; i < px.length; i += 4) { const on = px[i] | px[i + 1] | px[i + 2]; px[i + 3] = on ? 255 : 0; any |= on; }
@@ -75,7 +97,9 @@ function audit(id) {
         fixedURL.set(id, u);
         return u;
       });
-    }).catch(() => null);
+    });
+    const attempt = n => check().catch(() => n < 3 ? new Promise(r => setTimeout(r, 1500 * (n + 1))).then(() => attempt(n + 1)) : null);   /* a failed read is not an answer: try again before settling for the file as it is */
+    p = attempt(0);
     auditP.set(id, p);
   }
   return p;
@@ -114,7 +138,9 @@ async function inflatePNG(buf) {
 function setSprite(el, id) {
   const put = u => { if (el.tagName === 'IMG') el.src = u; else el.style.backgroundImage = 'url("' + u + '")'; };
   el.osSprite = id;
-  put(fixedURL.get(id) || spriteURL(id));
+  const now = fixedURL.get(id) || urlNow.get(id);
+  if (now) put(now);
+  else spriteObjURL(id).then(u => { if (el.osSprite === id && !fixedURL.has(id)) put(u); }, () => {});
   if (!fixedURL.has(id)) audit(id).then(u => { if (u && el.osSprite === id) put(u); });
   return el;
 }
@@ -186,7 +212,7 @@ const fontP = new Map(), fontNow = new Map();
 function font(id) {
   let p = fontP.get(id);
   if (p) return p;
-  if (!fontIndex) fontIndex = getJson('f/index.json');
+  if (!fontIndex) { fontIndex = getJson('f/index.json'); fontIndex.catch(() => { fontIndex = null; }); }   /* a failed index is asked for again, not chained off for the session */
   p = fontIndex.then(ix => {
     const row = (ix.fonts || []).find(f => f.id === id);
     if (!row) throw new Error('font ' + id);
@@ -207,7 +233,8 @@ const CP1252 = { 8364: 128, 8218: 130, 402: 131, 8222: 132, 8230: 133, 8224: 134
 const code = ch => { const c = ch.charCodeAt(0); return c < 256 ? c : CP1252[c] || 63; };
 function tinted(f, rgb) {
   let c = f.tint.get(rgb);
-  if (!c) {
+  if (c) { f.tint.delete(rgb); f.tint.set(rgb, c); }   /* a hit moves to the back: the steady colours (white, the shadow) outlive the orbs' passing ones */
+  else {
     c = document.createElement('canvas'); c.width = f.img.width; c.height = f.img.height;
     const g = c.getContext('2d');
     g.drawImage(f.img, 0, 0);
@@ -239,7 +266,7 @@ function runs(s, base) {
   }
   return out;
 }
-const plain = s => s.replace(/<lt>/g, '<').replace(/<gt>/g, '>').replace(/<[^>]*>/g, '');
+const plain = s => s.replace(/<(?!lt>|gt>)[^>]*>/g, '').replace(/<lt>/g, '<').replace(/<gt>/g, '>');   /* tags out first, then the escaped brackets back: a typed "<3>" is text with a width */
 function width(f, s) { let w = 0; for (const ch of plain(s)) w += f.adv[code(ch)] || 0; return w; }
 /* AbstractFont.draw: y is the baseline; the shadow is the whole string one pixel down and right, drawn first */
 function drawString(g, f, s, x, y, rgb, shadow) {
@@ -310,7 +337,7 @@ function setText(cv, s, o) {
     if (s) drawLines(g, f, String(s), 0, 0, cv.width, cv.height, o.colour | 0, o.shadow ? (o.shadowColour !== undefined ? o.shadowColour : 0) : null, o.xa | 0, o.ya | 0, o.lh | 0);
   };
   const f = fontNow.get(o.font);
-  if (f) paint(f); else font(o.font).then(paint, () => {});
+  if (f) paint(f); else font(o.font).then(paint, () => { if (cv.osKey === key) cv.osKey = null; });   /* unpainted: the same string set again tries again */
 }
 
 /* ---- interfaces ---- */
@@ -386,5 +413,5 @@ function at(parent, el, x, y, w, h) {
   return el;
 }
 
-return { OUT, cfg, iface, enumOf, spriteURL, setSprite, image, spriteMeta, spriteFx, pixelFx, ring, graphic, nine, font, fontNow: id => fontNow.get(id), width, drawString, drawLines, lines, text, mount, at, hex, getJson };
+return { OUT, cfg, iface, enumOf, spriteURL, spriteObjURL, setSprite, image, spriteMeta, spriteFx, pixelFx, ring, graphic, nine, font, fontNow: id => fontNow.get(id), width, drawString, drawLines, lines, text, mount, at, hex, getJson };
 })();

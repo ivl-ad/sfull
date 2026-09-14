@@ -154,7 +154,7 @@ function makePart(m, off, rc, pin) {
   if (off) { verts = Int16Array.from(m.verts); for (let i = 1; i < verts.length; i += 3) verts[i] += off; }
   if (rc && rc.length) {
     colors = Uint16Array.from(m.colors);
-    for (let i = 0; i < colors.length; i++) for (const p of rc) if (colors[i] === p[0]) { colors[i] = p[1]; break; }
+    for (const p of rc) for (let i = 0; i < colors.length; i++) if (colors[i] === p[0]) colors[i] = p[1];   /* pair by pair over every face, as ModelData.recolor does: a -> b then b -> c ends at c */
   }
   return { m, verts, colors, pin };
 }
@@ -267,8 +267,9 @@ function toGeometry(g, lit, o) {
     ((g.alphas && (g.alphas[f] & 255)) ? clear : solid).push(f);
   }
   const draw = solid.concat(clear), n = draw.length;
+  const skin = !(o && o.noSkin);   /* scenery is a plain mesh: no bones, so no skin buffers to fill or upload */
   const position = new Float32Array(n * 9), color = new Float32Array(n * 12);
-  const si = new Uint16Array(n * 12), sw = new Float32Array(n * 12);
+  const si = skin ? new Uint16Array(n * 12) : null, sw = skin ? new Float32Array(n * 12) : null;
   let lo = 1e9, hi = -1e9, rad = 0;
   for (let i = 0; i < n; i++) {
     const f = draw[i], flat = lit.c3[f] === -1;
@@ -282,7 +283,7 @@ function toGeometry(g, lit, o) {
       if (py > hi) hi = py;
       const r2 = px * px + pz * pz; if (r2 > rad) rad = r2;
       const c = i * 12 + k * 4;
-      si[c] = g.vb[v]; sw[c] = 1;                                  /* one bone a vertex: the cache labels them singly */
+      if (skin) { si[c] = g.vb[v]; sw[c] = 1; }                     /* one bone a vertex: the cache labels them singly */
       const l = flat || k === 0 ? lit.c1[f] : k === 1 ? lit.c2[f] : lit.c3[f];
       let rgb;
       if (textured) {                                              /* v1: the texture's average, modulated by the baked light */
@@ -295,8 +296,7 @@ function toGeometry(g, lit, o) {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(position, 3));
   geo.setAttribute('color', new THREE.BufferAttribute(color, 4));
-  geo.setAttribute('skinIndex', new THREE.BufferAttribute(si, 4));
-  geo.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4));
+  if (skin) { geo.setAttribute('skinIndex', new THREE.BufferAttribute(si, 4)); geo.setAttribute('skinWeight', new THREE.BufferAttribute(sw, 4)); }
   geo.addGroup(0, solid.length * 3, 0);
   if (clear.length) geo.addGroup(solid.length * 3, clear.length * 3, 1);
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, (lo + hi) / 2, 0), Math.hypot(Math.sqrt(rad), (hi - lo) / 2) + 0.6);
@@ -322,12 +322,16 @@ const shardCache = new Map();                                     /* type/shard 
 const atomInflight = new Map();
 
 function fetchJSON(path) { return fetch(OUT + '/' + path).then(r => r.ok ? r.json() : Promise.reject(new Error(path + ' ' + r.status))); }
+/* the game's one shard cache: map07.js and osui.js read config through it too, so a shard downloads and parses once.
+   A failed fetch is forgotten, never kept as the answer. */
 function cfgShard(type, shard) {
   const key = type + '/' + shard;
   let p = shardCache.get(key);
-  if (!p) { p = fetchJSON('cfg/' + type + '/' + shard + '.json').then(j => j.entries || {}); shardCache.set(key, p); }
+  if (!p) { p = fetchJSON('cfg/' + type + '/' + shard + '.json').then(j => j.entries || {}); shardCache.set(key, p); p.catch(() => { if (shardCache.get(key) === p) shardCache.delete(key); }); }
   return p;
 }
+const resolveP = new Map();   /* the display-name maps, shared with map07.js */
+const resolveJSON = type => { let p = resolveP.get(type); if (!p) { p = fetchJSON('resolve/' + type + '.json'); resolveP.set(type, p); p.catch(() => resolveP.delete(type)); } return p; };
 function cfgEntry(type, id) { return cfgShard(type, Math.floor(id / 256)).then(e => e[id]); }
 function fetchAtom(id) {
   if (models.has(id)) return Promise.resolve();
@@ -387,7 +391,7 @@ function defaultBody(allKits, offset) {
 function load() {
   if (loading) return loading;
   return loading = Promise.all([
-    fetchJSON('resolve/item.json'), fetchJSON('resolve/npc.json'), fetchJSON('resolve/loc.json'),
+    resolveJSON('item'), resolveJSON('npc'), resolveJSON('loc'),
     cfgShard('kit', 0), cfgShard('kit', 1), cfgShard('texture', 0),
   ]).then(([ri, rn, rl, k0, k1, tex]) => {
     for (const k in ri) itemIndex.set(k, ri[k]);
@@ -404,7 +408,9 @@ function load() {
       for (const m of k.models || []) kitAtoms.add(m);
     }
     for (const id in tex) texMap[id] = tex[id].avgRgbRaw != null ? tex[id].avgRgbRaw : (tex[id].averageRGB || 0);
-    return Promise.all([fetchAtoms([...kitAtoms]), ...LOC_WARM.map(n => resolveLoc(n.toLowerCase()).catch(() => {}))]);
+    return Promise.all([fetchAtoms([...kitAtoms]), ...LOC_WARM.map(n => resolveLoc(n.toLowerCase()).catch(() => {}))]).then(() => {
+      for (const m of kitAtoms) if (!models.has(m)) throw new Error('kit model ' + m + ' did not load');   /* a body missing a part is not a body: fail, and the next ask loads again */
+    });
   }).then(() => { loaded = true; return true; }).catch(e => { loading = null; throw e; });
 }
 
@@ -451,10 +457,13 @@ async function resolveItem(k) {
   if (def) itemById.set(def.id, def);
   onItemResolved();
 }
+/* a name whose fetch failed rests half a minute and is asked again: a blip is never remembered as "no such thing" */
+const missT = new Map();
+const resting = k => { const t = missT.get(k); return t !== undefined && performance.now() - t < 30000; };
 function kickResolveItem(k) {
-  if (itemDefs.has(k) || itemInflight.has(k)) return;
+  if (itemDefs.has(k) || itemInflight.has(k) || resting('i' + k)) return;
   itemInflight.add(k);
-  resolveItem(k).catch(() => { if (!itemDefs.has(k)) itemDefs.set(k, null); }).then(() => itemInflight.delete(k));
+  resolveItem(k).catch(() => { missT.set('i' + k, performance.now()); setTimeout(onItemResolved, 30500); }).then(() => itemInflight.delete(k));   // the waiting rigs re-dress, which asks again
 }
 /* Rings and every kind of ammunition have no worn model in the cache, so a miss here is usually the right answer
    rather than a gap. Cached per item id once resolved (never 0 before then, or it would stick). */
@@ -573,7 +582,9 @@ function redress(parts) {
   parts._dressKey = key;
   if (waiting) dressPending.add(parts);
   const need = itemAtoms(ids, body).filter(id => !models.has(id));
-  parts.mesh.geometry = geometryFor(ids, body);
+  const was = parts.mesh.geometry, geo = geometryFor(ids, body);
+  parts.mesh.geometry = geo;
+  if (was !== geo && !geoInCache(was)) was.dispose();   /* the transient build this dress replaces takes its buffers with it */
   if (need.length) fetchAtoms(need).then(() => {
     if (parts._dressKey !== key) return;
     const old = parts.mesh.geometry;
@@ -642,9 +653,9 @@ async function resolveNpc(k) {
   nByName.set(k, out);
 }
 function kickResolveNpc(k) {
-  if (nByName.has(k) || npcInflight.has(k)) return;
+  if (nByName.has(k) || npcInflight.has(k) || resting('n' + k)) return;
   npcInflight.add(k);
-  resolveNpc(k).catch(() => { if (!nByName.has(k)) nByName.set(k, []); }).then(() => npcInflight.delete(k));
+  resolveNpc(k).catch(() => { missT.set('n' + k, performance.now()); }).then(() => npcInflight.delete(k));   // npcMesh answers null meanwhile: the box rig stands and asks again
 }
 function resolvedNpc(name) {
   const k = name.toLowerCase();
@@ -975,9 +986,9 @@ async function resolveLoc(k) {
   lByName.set(k, out);
 }
 function kickResolveLoc(k) {
-  if (lByName.has(k) || locInflight.has(k)) return;
+  if (lByName.has(k) || locInflight.has(k) || resting('l' + k)) return;
   locInflight.add(k);
-  resolveLoc(k).catch(() => { if (!lByName.has(k)) lByName.set(k, []); }).then(() => locInflight.delete(k));
+  resolveLoc(k).catch(() => { missT.set('l' + k, performance.now()); }).then(() => locInflight.delete(k));   // the proc look stands meanwhile and asks again
 }
 function locResolved(name) {
   const k = name.toLowerCase();
@@ -1003,12 +1014,12 @@ function locPart(m, st) {
   let colors = m.colors;
   if (st.rc && st.rc.length) {
     colors = Uint16Array.from(m.colors);
-    for (let i = 0; i < colors.length; i++) for (const p of st.rc) if (colors[i] === p[0]) { colors[i] = p[1]; break; }
+    for (const p of st.rc) for (let i = 0; i < colors.length; i++) if (colors[i] === p[0]) colors[i] = p[1];   /* pair by pair over every face, as the client recolours */
   }
   let tex = null;
   if (st.rt && st.rt.length && m.textures) {   /* stored +1 so 0 means untextured */
     tex = Uint16Array.from(m.textures);
-    for (let i = 0; i < tex.length; i++) for (const p of st.rt) if (tex[i] === p[0] + 1) { tex[i] = p[1] + 1; break; }
+    for (const p of st.rt) for (let i = 0; i < tex.length; i++) if (tex[i] === p[0] + 1) tex[i] = p[1] + 1;
   }
   return { m, verts, colors, pin: 0, tex };
 }
@@ -1047,7 +1058,7 @@ function locGeometry(name, vi, spent) {
   for (const id of st.m) { const m = models.get(id); if (m) list.push(locPart(m, st)); }
   if (!list.length) return null;
   const g = merge(list);
-  e = { geo: toGeometry(g, light(g, st.amb, st.con, LOC_LIT), { sx: S128, sy: S128, sz: S128 }) };
+  e = { geo: toGeometry(g, light(g, st.amb, st.con, LOC_LIT), { sx: S128, sy: S128, sz: S128, noSkin: 1 }) };
   lGeoCache.set(key, e);
   if (lGeoCache.size > LGEO_MAX) for (const [k2, e2] of lGeoCache) {
     if (k2 === key || lLive.some(m => m.geometry === e2.geo)) continue;
@@ -1415,17 +1426,25 @@ function texturesFor(m, d) {
   const rf = d.retextureFrom || [], rt = d.retextureTo || [];
   for (let f = 0; f < m.fc; f++) { let t = m.textures[f] - 1; if (t < 0) continue; for (let k = 0; k < rf.length; k++) if (t === u16(rf[k])) { t = u16(rt[k]); break; } ids.add(t); }
   if (!ids.size) return null;
-  if (!texCfg) texCfg = cfgShard('texture', 0).then(c => (texCfgV = c || {}), () => (texCfgV = {}));
+  if (!texCfg) { texCfg = cfgShard('texture', 0).then(c => (texCfgV = c || {})); texCfg.catch(() => { texCfg = null; }); }
   return Promise.all([texCfg, ...[...ids].map(texImage)]);
 }
+/* a texture's pixels, fetched once however many sprites ask. A 404 is an answer (the texture's average stands in); a blip rejects,
+   so the sprite waiting on it is drawn later instead of being kept, for good, without its picture */
+const texInflight = new Map();
 function texImage(t) {
   if (texPng.has(t)) return Promise.resolve();
-  return fetch(OUT + '/tx/' + t + '.png').then(r => r.ok ? r.blob() : Promise.reject(new Error('tx ' + t)))
-    .then(b => typeof createImageBitmap === 'function' ? createImageBitmap(b) : new Promise((ok, no) => { const im = new Image(); im.onload = () => ok(im); im.onerror = no; im.src = URL.createObjectURL(b); })).then(bm => {
+  let p = texInflight.get(t);
+  if (p) return p;
+  p = fetch(OUT + '/tx/' + t + '.png').then(r => r.status === 404 ? null : r.ok ? r.blob() : Promise.reject(new Error('tx ' + t)))
+    .then(b => b && (typeof createImageBitmap === 'function' ? createImageBitmap(b) : new Promise((ok, no) => { const im = new Image(); im.onload = () => ok(im); im.onerror = no; im.src = URL.createObjectURL(b); }))).then(bm => {
+      if (!bm) { texPng.set(t, null); return; }
       const cv = document.createElement('canvas'); cv.width = bm.width; cv.height = bm.height;
       const cx2 = cv.getContext('2d'); cx2.drawImage(bm, 0, 0);
       texPng.set(t, { w: bm.width, h: bm.height, px: cx2.getImageData(0, 0, bm.width, bm.height).data });
-    }).catch(() => { texPng.set(t, null); });
+    }).finally(() => texInflight.delete(t));
+  texInflight.set(t, p);
+  return p;
 }
 function drainIcons() {
   icTimer = 0;
@@ -1451,7 +1470,7 @@ function drainIcons() {
 const itemDef = cid => cfgEntry('item', cid);   /* the cache's own row (examine text and all), fetched with its shard */
 const aliasName = k => { for (const [re, to] of ALIASES) if (re.test(k)) return k.replace(re, to).toLowerCase(); return null; };   /* a seedworld name's cache spelling, where it has one */
 
-const api = { OUT, SITE, load, rig, dress, brightness, idFor, npcVariants, npcMesh, npcFree, locVariants, locPools, locMesh, locFree, locBatch, icon, iconNow, iconXY: iconXYNow, iconStore: storeReady, itemDef, aliasName, ready: () => loaded };   /* OUT: map07.js reads the tree from the same base */
+const api = { OUT, SITE, cfgShard, resolveJSON, load, rig, dress, brightness, idFor, npcVariants, npcMesh, npcFree, locVariants, locPools, locMesh, locFree, locBatch, icon, iconNow, iconXY: iconXYNow, iconStore: storeReady, itemDef, aliasName, ready: () => loaded };   /* OUT: map07.js reads the tree from the same base */
 /* dead in the game (the flag is never set there); the parity self-test sets globalThis.OSRS_TEST to reach the resolvers */
 if (typeof globalThis !== 'undefined' && globalThis.OSRS_TEST) api._t = { nByName, lByName, itemDefs, itemById, resolveItem, resolveNpc, resolveLoc, fetchAtoms, models, npcIndex, locIndex, itemIndex, iconPixels, readModel };
 return api;

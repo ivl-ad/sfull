@@ -282,7 +282,7 @@ export class World extends DurableObject {
        connection ever reported a position — rides the record so nobody is announced,
        or seated at 0,0, before a real move arrives. */
     const rec = { pid, name, seed, x: (old && old.x) | 0, z: (old && old.z) | 0,
-                  pos: (old && old.pos) ? 1 : 0, face: 0, flags: 0, eq: (old && old.eq) || [],
+                  pos: (old && old.pos) ? 1 : 0, face: 0, flags: (old && old.flags) | 0, eq: (old && old.eq) || [],   // a reconnect keeps its floor (flags bits 2-3) until the next move says otherwise
                   savedSeed: u.searchParams.get('last') || null };
     server.serializeAttachment(rec);
    /* The movement clock, the teleport bucket and the pile ceiling ride the record rather than the attachment, so a
@@ -516,7 +516,7 @@ export class World extends DurableObject {
         if (now - (me.dmgT || 0) > HIT_WIN) { me.dmgT = now; me.dmgSum = 0; }
         if ((me.dmgSum = (me.dmgSum || 0) + d) > HIT_SUM) return;
         const target = this.players.get(String(m[1] || ''));
-        if (target && near(me, target)) {
+        if (target && near(me, target) && !((me.flags ^ target.flags) & 12)) {   // flags bits 2-3 are the Gielinor floor: a blade never reaches another storey (a seeded world never sets them)
           const cls = typeof m[4] === 'string' ? m[4].slice(0, 1) : 0;   // element 4 carries the attack class so the victim's overhead can answer
           try { target.ws.send(JSON.stringify([[11, me.pid, d, m[3] ? 1 : 0, cls]])); } catch {}   // element 3 carries Smite
         }
@@ -570,7 +570,7 @@ export class World extends DurableObject {
         if (!this.piles) this.piles = new Map();
         this.piles.set(dx + ':' + dz + ':' + me.pid, { t: now, rows: new Map(items) });
         if (this.piles.size > 500) for (const [k, v] of this.piles) if (now - v.t > 960000) this.piles.delete(k);   // a pile lives 1500 ticks
-        this.queue('12:' + me.pid + ':' + now, [12, me.pid, dx, dz, items, kp && near(me, kp) ? kp.pid : '', wTick()]);
+        this.queue('12:' + me.pid + ':' + now, [12, me.pid, dx, dz, items, kp && near(me, kp) ? kp.pid : '', wTick(), (me.flags >> 2) & 3]);   // element 7: the floor it fell on, read off the sender's own flags
         break;
       }
 
@@ -839,7 +839,7 @@ export class World extends DurableObject {
           if (q.pid === p.pid || p.seen.has(q.pid) || !q.pos) continue;   // an unreported position is not a location to announce
           if (Math.abs(q.x - p.x) <= VIEW && Math.abs(q.z - p.z) <= VIEW) {
             p.seen.add(q.pid);
-            out.push([6, q.pid, q.name, q.x, q.z, q.eq]);
+            out.push([6, q.pid, q.name, q.x, q.z, q.eq, q.flags | 0]);   // flags ride along (bits 2-3 the Gielinor floor): an idle player upstairs is drawn upstairs; older clients ignore the field
           }
         }
       }

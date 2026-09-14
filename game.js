@@ -1733,7 +1733,7 @@ function castFx(o, sp, dmg) {
     spellBurst(o.rx, o.ry + 1.1, o.rz, sp.tint); hitsplat(o.rx, o.ry + 1.5, o.rz, dmg);
   }
 }
-const remoteBolt = (R, sp, tx, tz) => launch(sp.tint, R.rx, R.ry + 1.3, R.rz, aimAt(tx, groundY(tx, tz), tz), null, BOLT_SPEED, 0.10, 0.9, { sp });
+const remoteBolt = (R, sp, tx, tz) => launch(sp.tint, R.rx, R.ry + 1.3, R.rz, aimAt(tx, M7 ? m7Y(tx, tz, R.pl | 0) : groundY(tx, tz), tz), null, BOLT_SPEED, 0.10, 0.9, { sp });   // aimed on the caster's floor, as arrows are
 function shootArrow(from, o, dmg, tint) {
   launch(tint, from.rx !== undefined ? from.rx : from.tx, (from.ry !== undefined ? from.ry : 0) + 1.25, from.rz !== undefined ? from.rz : from.tz,
          o, dmg, BOLT_SPEED * 1.5, 0.08, 0.7, { arw: 1 });
@@ -3260,7 +3260,8 @@ const STUCK_CLIMB = 8.5;   // stuck mode clears the 6.5-unit ledges; masonry sta
    worst lot the claim allows (2.2 of fall plus the floor's own 0.2) so a door is never a one-way trip. */
 const DOORSTEP = 2.6;
 function canStep(fx, fz, tx, tz, own, pl) {
-    if (shut(tk(tx, tz), own) && !shut(tk(fx, fz), own)) return false;   // already inside something that isn't ours: walk out through it
+    const fk = M7 ? ((pl === undefined ? P.plane : pl) | 0) * 68719476736 : 0;   // Gielinor footprints are keyed by floor: a body upstairs never blocks the room below
+    if (shut(tk(tx, tz) + fk, own) && !shut(tk(fx, fz) + fk, own)) return false;   // already inside something that isn't ours: walk out through it
   if (M7) return MAP07.canMove(pl === undefined ? P.plane : pl, fx, -fz, tx - fx, fz - tz);   // the map's own walls and floors, on the walker's plane
   const a = walkY(fx, fz), b = walkY(tx, tz), aw = isWater(a), bw = isWater(b);
   if (aw !== bw) return Math.abs(a - b) < 8;
@@ -3270,7 +3271,7 @@ function canStep(fx, fz, tx, tz, own, pl) {
   if (!ra !== !rb && (fl.house !== undefined || fl.sill)) return Math.abs(a - b) <= Math.max(DOORSTEP, OPT.stuck ? STUCK_CLIMB : CLIMB);
   return Math.abs(a - b) <= (OPT.stuck ? STUCK_CLIMB : CLIMB);
 }
-const dry = (x, z) => M7 ? MAP07.openTile(P.plane, x, -z) && !blocked.has(tk(x, z)) : !isWater(walkY(x, z)) && !blocked.has(tk(x, z));
+const dry = (x, z) => M7 ? MAP07.openTile(P.plane, x, -z) && !blocked.has(tk(x, z) + P.plane * 68719476736) : !isWater(walkY(x, z)) && !blocked.has(tk(x, z));   // Gielinor keys a big body's footprint by its floor too (npcFoot), as m7Key does
 const dryOpen = (x, z) => dry(x, z) && !floorMap.has(tk(x, z));
 
 /* ---- LINE OF SIGHT: a walk down the tile line, not a ray. A tile hides what is behind it when something opaque stands on it
@@ -3706,7 +3707,7 @@ function npcLod(n) {
   n.k07 = (dx * dx + dy * dy + dz * dz <= OSRS_CAM2 * s * s
     || Math.abs(n.tx - P.tx) + Math.abs(n.tz - P.tz) <= OSRS_NEAR * s) ? 1 : 0;
   if (n.k07 && !n.o7) {   // >>>: a dev spawn's private seed can be negative
-    const m = OSRSK.npcMesh(n.t.n, (n.kh >>> 0) % n.o7v, npcH(n.t), npcPlan(n.t));
+    const m = OSRSK.npcMesh(n.t.n, n.kh >>> 0, npcH(n.t), npcPlan(n.t));   // the raw hash: osrs.js takes it modulo the resolved list, so every client lands on the same look
     if (m) { n.o7 = m; scene.add(m); } else n.k07 = 0;   // null: atoms still fetching — the box rig stays this frame
   }
   return n.k07;
@@ -4338,7 +4339,8 @@ function npcFoot(n) {
   if (!fp || (n.fpX === n.tx && n.fpZ === n.tz)) return;
   if (n.fpK) for (const k of n.fpK) unblock(k, 1);
   n.fpK = new Set();
-  for (let a = -fp; a <= fp; a++) for (let b = -fp; b <= fp; b++) { const k = tk(n.tx + a, n.tz + b); block(k, 1); n.fpK.add(k); }
+  const fk = M7 ? (n.pl | 0) * 68719476736 : 0;   // on its own floor: canStep and dry read the same keys
+  for (let a = -fp; a <= fp; a++) for (let b = -fp; b <= fp; b++) { const k = tk(n.tx + a, n.tz + b) + fk; block(k, 1); n.fpK.add(k); }
   n.fpX = n.tx; n.fpZ = n.tz;
 }
 function npcStep(n, tx, tz, strict) {
@@ -4585,7 +4587,7 @@ function skullFrame() {   // the mark floats over every skulled head, yours incl
   if (on && !mySkull) { mySkull = mkSkull(); scene.add(mySkull); }
   if (mySkull) { mySkull.visible = on; if (on) mySkull.position.set(P.rx, P.ry + 2.75, P.rz); }
   for (const R of remotes.values()) {
-    const rOn = !!(R.eq && R.eq.indexOf('sk:1') >= 0);
+    const rOn = !!(R.eq && R.eq.indexOf('sk:1') >= 0) && !R.hid;   // a hidden remote's skull hides with it
     if (rOn && !R.skullSpr) { R.skullSpr = mkSkull(); scene.add(R.skullSpr); }
     if (R.skullSpr) { R.skullSpr.visible = rOn; if (rOn) R.skullSpr.position.set(R.rx, R.ry + 2.75, R.rz); }
   }
@@ -4637,8 +4639,8 @@ function die(byPlayer) {
   if (spill.length) {
     netWorld([12, dx, dz, spill.slice(0, 40), byPlayer || '', tickN]);   // monsters' kills go out too: the pile turns public after its safe half
    // your pile is your right: one saved record survives any relog, and after a killer's minute even a PvP corpse may be reclaimed
-    P.dpile = { x: dx, z: dz, t: tickN, pv: byPlayer ? 1 : 0, rows: spill.slice(0, 40).map(r => [r[0], r[1]]) };
-    if (byPlayer) pendingPiles.push({ due: tickN + 100, x: dx, z: dz, rows: P.dpile.rows, life: 1400, own: PID });
+    P.dpile = { x: dx, z: dz, t: tickN, pv: byPlayer ? 1 : 0, rows: spill.slice(0, 40).map(r => [r[0], r[1]]), pl: P.plane };   // pl: the floor it lies on, kept through a respawn downstairs and a relog
+    if (byPlayer) pendingPiles.push({ due: tickN + 100, x: dx, z: dz, rows: P.dpile.rows, life: 1400, own: PID, pl: P.plane });
     say(byPlayer
     ? (wasSkulled ? 'The skull takes its due: ' + (K - keep ? 'you clutch one thing; the rest' : 'everything you carried') + ' falls to your killer.'
                   : 'You keep your ' + (K - keep) + ' most valuable items; the rest falls to your killer.')
@@ -5414,7 +5416,7 @@ function say(msg, cls) {
   chatEl.appendChild(d);
   while (chatEl.childNodes.length > 120) chatEl.removeChild(chatEl.firstChild);
   if (stick) chatEl.scrollTop = chatEl.scrollHeight;
-  if (osCh) osChatAdd(msg, cls);
+  if (osCh && OS.on) osChatAdd(msg, cls);   // the frame's copy only while it stands; it catches up from the log when it comes back
 }
 const div = (parent, cls, html) => { const d = document.createElement('div'); d.className = cls; if (html) d.innerHTML = html; parent.appendChild(d); return d; };
 const invGrid = el('invGrid'), slotEls = [];
@@ -6068,14 +6070,14 @@ function optionsFor(o) {
     return opts;
   }
   if (o.remote) {   // the harmless option first; attacking lives one menu down, and only in the wilds
-    opts.push({ t: 'Trade with', o: o.name, f: act(o, tradeRequest) });
-    if (!pvpGate(o)) opts.push({ t: 'Attack', o: o.name + (remoteCb(o) ? ' <span class="lvl">(level ' + remoteCb(o) + ')</span>' : ''), f: act(o, 'attack', 1) });
+    opts.push({ t: 'Trade with', o: o.name, kind: 'plr', f: act(o, tradeRequest) });   // kind: whose name this is, for the 2007 menu's colours (player white, npc yellow, scenery cyan)
+    if (!pvpGate(o)) opts.push({ t: 'Attack', o: o.name + (remoteCb(o) ? ' <span class="lvl">(level ' + remoteCb(o) + ')</span>' : ''), kind: 'plr', f: act(o, 'attack', 1) });
   }
-  else if (o.npc && o.t.k === 'genie') opts.push({ t: 'Talk to', o: 'Genie', f: act(o, o2 => { if (!invAdd('genie_lamp', 1)) return say(FULL, 'bad'); say('"Rub it well, master." The genie folds back into smoke.', 'lv'); removeNpc(o2); }) });
-  else if (o.npc && o.c7 !== undefined) opts.push(...m7NpcOpts(o));   // a Gielinor figure's own menu, off its cache def (46.)
+  else if (o.npc && o.t.k === 'genie') opts.push({ t: 'Talk to', o: 'Genie', kind: 'npc', f: act(o, o2 => { if (!invAdd('genie_lamp', 1)) return say(FULL, 'bad'); say('"Rub it well, master." The genie folds back into smoke.', 'lv'); removeNpc(o2); }) });
+  else if (o.npc && o.c7 !== undefined) opts.push(...m7NpcOpts(o).map(q => Object.assign(q, { kind: 'npc' })));   // a Gielinor figure's own menu, off its cache def (46.)
   else if (o.m7loc) opts.push(...m7LocOpts(o));
   else if (o.m7item) opts.push(...m7ItemOpts(o));
-  else if (o.npc) { opts.push({ t: 'Attack', o: o.name + ' <span class="lvl">(level ' + o.t.lv + ')</span>', f: act(o, 'attack', 1) }); if (o.t.pick) opts.push({ t: 'Pickpocket', o: o.name, f: act(o, 'pick') }); }
+  else if (o.npc) { opts.push({ t: 'Attack', o: o.name + ' <span class="lvl">(level ' + o.t.lv + ')</span>', kind: 'npc', f: act(o, 'attack', 1) }); if (o.t.pick) opts.push({ t: 'Pickpocket', o: o.name, kind: 'npc', f: act(o, 'pick') }); }
   else if (o.drop) {   // a death spills a whole pack onto one tile: list the heap, this one first
     if (P.teleG) return [{ t: 'Grab', o: (o.n > 1 ? o.n + ' x ' : '') + o.name, cls: 'itm', f: () => teleGrab(o) }];
     const heap = drops.filter(d => Math.abs(d.x - o.x) <= 1 && Math.abs(d.z - o.z) <= 1).sort((a, b) => (a === o ? -1 : b === o ? 1 : 0));
@@ -6132,7 +6134,7 @@ function examine(it) {
   if (it.fire) return it.name + '. A bundle of firewood.';
   return it.name + '.';
 }
-const optLabel = o => o.t + ' <span class="' + (o.cls === 'itm' ? 'itm' : 'obj') + '">' + o.o + '</span>';
+const optLabel = o => o.t + ' <span class="' + (o.cls === 'itm' ? 'itm' : 'obj' + (o.kind ? ' t' + o.kind : '')) + '">' + o.o + '</span>';   // tnpc / tplr: whose name it is, for the 2007 menu's colours
 function openCtx(x, y, opts) {
   if (!opts.length) return;
   if (OS.on && osMenu(x, y, opts)) return;   // the 2007 frame's own menu (section 48)
@@ -6692,7 +6694,7 @@ function loadSeed(str) {
   for (const L of pickLists) { for (const o of L) o.dead = 1; L.length = 0; }   // fires, traps, campsite furniture, house ghosts: a world's litter dies with it, and a live task drops it
   litMap.clear(); bmOn = 0; moveSel = null;
   hsAsked = 0; if (hsBarEl) hsBarEl.style.display = 'none'; hsHintClear();   // a fresh world asks fresh questions
-  for (const n of npcs) scene.remove(n.mesh);
+  for (const n of npcs) { npcFree7(n); if (n.fig) { n.fig.ent.dispose(); n.fig = null; } scene.remove(n.mesh); }   // a 2007 overlay or figure is a scene child of its own: it leaves with the world instead of standing frozen where it was
   npcs.length = 0;
   closeOverlays();
   if (M7) return m7Arrive();   // Lumbridge, as every 2007 account began
@@ -6798,7 +6800,7 @@ function gameTick() {
   for (let i = drops.length - 1; i >= 0; i--) if (tickN >= drops[i].until) drops.splice(i, 1);
   for (let i = pendingPiles.length - 1; i >= 0; i--) if (tickN >= pendingPiles[i].due) {   // a sealed spill comes due: the pile appears for everyone
     const p = pendingPiles.splice(i, 1)[0];
-    for (const it of p.rows) dropItem(it[0], it[1] | 0, p.x, p.z, p.life, p.own || PID);
+    for (const it of p.rows) dropItem(it[0], it[1] | 0, p.x, p.z, p.life, p.own || PID, p.pl);   // on the floor it fell on (unrecorded: yours, as before)
   }
   if (P.dpile && tickN > P.dpile.t + 1500) { P.dpile = null; markDirty(); }   // the quarter hour is spent; the record dies with the pile
   for (let i = fires.length - 1; i >= 0; i--) if (tickN >= fires[i].until) fires.splice(i, 1)[0].dead = 1;
@@ -7299,8 +7301,9 @@ function applySave(b) {
     const rows = dp.rows.map(r => [idOf(r[0]), r[1] | 0]).filter(r => ITEMS[r[0]] && r[1] > 0).slice(0, 40);
     const t = dp.t | 0, due = Math.max(t + (dp.pv ? 100 : 0), tickN), life = t + 1500 - due;
     if (rows.length && life > 0) {
-      P.dpile = { x: dp.x | 0, z: dp.z | 0, t, pv: dp.pv ? 1 : 0, rows };
-      pendingPiles.push({ due, x: dp.x | 0, z: dp.z | 0, rows, life, own: PID });   // your own saved reclaim: yours to retract, nobody else's
+      const pl = M7 ? clamp(dp.pl | 0, 0, 3) : 0;   // the floor it lies on (an older save carries none: the ground)
+      P.dpile = { x: dp.x | 0, z: dp.z | 0, t, pv: dp.pv ? 1 : 0, rows, pl };
+      pendingPiles.push({ due, x: dp.x | 0, z: dp.z | 0, rows, life, own: PID, pl });   // your own saved reclaim: yours to retract, nobody else's
     }
   }
   dirty.inv = dirty.eq = dirty.sk = dirty.orb = 1;
@@ -7627,9 +7630,9 @@ function onNet(m) {
       if (q) { if (P.task && P.task.o === q) P.task = null; q.dead = 1; if (q.plate) { freePlate(q.plate); q.plate = null; } removeNpc(q); }
       break;
     }
-    case 19: { const R = ensureRemote(m[1]); if (R) { shootArrow(R, aimAt(m[2] | 0, groundY(m[2] | 0, m[3] | 0), m[3] | 0), null, (m[4] | 0) || 0xc3c8d0); sfxAt(2692, R.tx, R.tz, 14, 0.7); } break; }
-    case 18: { const R = ensureRemote(m[1]), sp = SPELLS[m[2] | 0]; if (R && sp) { remoteBolt(R, sp, m[3] | 0, m[4] | 0); sfxAt(spellSnd(sp), R.tx, R.tz, 14, 0.8); } break; }
-    case 13: { const R = ensureRemote(m[1]); if (!R) break; R.hp = m[2] | 0; R.maxhp = Math.max(1, m[3] | 0); R.hurt = tickN; if (R.hp < R.maxhp) healthBar(R, 2.0); break; }
+    case 19: { const R = ensureRemote(m[1]); if (R) { if (!R.hid) shootArrow(R, aimAt(m[2] | 0, M7 ? m7Y(m[2] | 0, m[3] | 0, R.pl | 0) : groundY(m[2] | 0, m[3] | 0), m[3] | 0), null, (m[4] | 0) || 0xc3c8d0); sfxAt(2692, R.tx, R.tz, 14, 0.7); } break; }   // aimed on the shooter's floor; a hidden shooter looses nothing you can see
+    case 18: { const R = ensureRemote(m[1]), sp = SPELLS[m[2] | 0]; if (R && sp) { if (!R.hid) remoteBolt(R, sp, m[3] | 0, m[4] | 0); sfxAt(spellSnd(sp), R.tx, R.tz, 14, 0.8); } break; }
+    case 13: { const R = ensureRemote(m[1]); if (!R) break; R.hp = m[2] | 0; R.maxhp = Math.max(1, m[3] | 0); R.hurt = tickN; if (R.hp < R.maxhp && !R.hid) healthBar(R, 2.0); break; }
     case 16: losePile(m[2] | 0, m[3] | 0, Array.isArray(m[4]) ? m[4] : [], String(m[5] || '')); break;   // someone took from a broadcast pile: retract our mirror
     case 12: {   // a player died near us and spilled; the pile answers to its clock
       const R = remotes.get(m[1]), rows = (m[4] || []).filter(it => ITEMS[it[0]] && (it[1] | 0) > 0);
@@ -7637,8 +7640,9 @@ function onNet(m) {
       sfxAt(512, m[2] | 0, m[3] | 0);
       say((R ? R.name : 'Someone') + ' has been defeated.', 'lv');
       if (!rows.length) break;
-      if (!t0 || killer === PID) { for (const it of rows) dropItem(it[0], it[1] | 0, m[2] | 0, m[3] | 0, 1500, String(m[1])); break; }   // your kill: the pile is yours this minute
-      if (pendingPiles.length < 40) pendingPiles.push({ due: t0 + (killer ? 100 : 750), x: m[2] | 0, z: m[3] | 0, rows, life: killer ? 1400 : 750, own: String(m[1]) });
+      const pl = m[7] | 0;   // the floor it fell on: the room stamps it from the sender's own flags (0 from an older room)
+      if (!t0 || killer === PID) { for (const it of rows) dropItem(it[0], it[1] | 0, m[2] | 0, m[3] | 0, 1500, String(m[1]), pl); break; }   // your kill: the pile is yours this minute
+      if (pendingPiles.length < 40) pendingPiles.push({ due: t0 + (killer ? 100 : 750), x: m[2] | 0, z: m[3] | 0, rows, life: killer ? 1400 : 750, own: String(m[1]), pl });
       break;   // a killer's minute, or the fallen's safe half, then the pile opens to all
     }
     case 10:   // write confirmed
@@ -7886,7 +7890,8 @@ function updateRemotes(dt, alpha) {
     }
     R.rx = R.px + (R.tx - R.px) * alpha; R.rz = R.pz + (R.tz - R.pz) * alpha; R.ry = R.afloat ? 0 : M7 ? m7Y(R.rx, R.rz, R.pl | 0) : groundY(R.rx, R.rz);
     if (R.bubbleT > 0) R.bubbleT -= dt;   // ahead of the stack test: a bubble held frozen under a stack would pop out stale
-    if (stackTop.get(stackKey(R.tx, R.tz, R.pl)) !== R || (M7 && !m7Shown(R.pl | 0))) { hideRemote(R); continue; }   // buried in a stack (or on a floor the roof hides): kept up to date, drawn by nobody
+    R.hid = stackTop.get(stackKey(R.tx, R.tz, R.pl)) !== R || (M7 && !m7Shown(R.pl | 0)) ? 1 : 0;   // buried in a stack (or on a floor the roof hides): kept up to date, drawn by nobody, and neither are its bar, skull or bolts
+    if (R.hid) { hideRemote(R); continue; }
     const far = Math.abs(R.rx - P.rx) > cut || Math.abs(R.rz - P.rz) > cut, wantLod = far ? 2 : (i < REMOTE_FULL ? 0 : 1);
     const k07 = wantLod === 0 ? osrsKind(R) : 0;
     const wrongKind = R.g && !!R.g.parts.osrs !== !!k07;   // the camera moved, or the setting did, under a rig already out
@@ -8037,12 +8042,14 @@ async function enterWorld(seed) {
     applySave(blob);
     saveArmed = 1;
     if (Number.isInteger(blob.tx) && m7Resumable(blob)) teleport(blob.tx, blob.tz, 300, P.plane);   // resume where you stood, on the floor you stood on
+    else m7Restart();
     say('Welcome back, ' + (NAME || 'Adventurer') + '.', 'lv');
   } else if (OFFLINE) {   // offline: this browser is the database
     let ob = null; try { ob = JSON.parse(store.get('seedworld.off.' + seed) || 'null'); } catch {}
     if (readableSave(ob)) {
       applySave(ob);
       if (Number.isInteger(ob.tx) && m7Resumable(ob)) teleport(ob.tx, ob.tz, 300, P.plane);
+      else m7Restart();
       say('Welcome back. This device remembered your character.', 'lv');
     } else { freshCharacter(); say('A new life begins in ' + seed + ', kept on this device.', 'lv'); }
     saveArmed = 1;
@@ -10913,7 +10920,7 @@ function pet7() {
   if (petV7 < 0 && osrsOn) petV7 = OSRSK.npcVariants(petT7.n);
   let on = osrsSelf && petV7 > 0 ? 1 : 0;
   if (on && !petO7) {
-    const m = OSRSK.npcMesh(petT7.n, hashSeed(petFor) % petV7, petH7, npcPlan(petT7));
+    const m = OSRSK.npcMesh(petT7.n, hashSeed(petFor), petH7, npcPlan(petT7));   // the raw hash, as npcLod passes it
     if (m) { petO7 = m; scene.add(m); } else on = 0;   // null: atoms still fetching — the box pet stays
   }
   if (petO7) {
@@ -11690,18 +11697,34 @@ function m7Type(def) {
 function m7Npcs() {
   for (let i = npcs.length - 1; i >= 0; i--) { const n = npcs[i]; if (Math.abs(n.tx - P.tx) > M7_DESPAWN_R || Math.abs(n.tz - P.tz) > M7_DESPAWN_R) removeNpc(n); }
   for (let i = m7Props.length - 1; i >= 0; i--) { const p = m7Props[i]; if (Math.abs(p.x - P.tx) > M7_DESPAWN_R || Math.abs(p.z - P.tz) > M7_DESPAWN_R) m7PropGone(i); }
-  const gx = P.tx, gy = -P.tz;
-  let room = M7_CAP - npcs.length;
+  const gx = P.tx, gy = -P.tz, want = [];
+  /* nearest first, your own floor before the others: the cap is spent on what stands round you, not on whichever square loaded first */
   for (const R of MAP07.regions.values()) {
-    if (!R.ready || !R.spawns || !R.spawns.length || room <= 0) continue;
+    if (!R.ready || !R.spawns || !R.spawns.length) continue;
     const x0 = R.sqX * 64, y0 = R.sqY * 64;
     if (gx < x0 - M7_SPAWN_R || gx > x0 + 63 + M7_SPAWN_R || gy < y0 - M7_SPAWN_R || gy > y0 + 63 + M7_SPAWN_R) continue;
     for (const s of R.spawns) {
-      if (room <= 0) break;
       if (Math.abs(s.x - gx) > M7_SPAWN_R || Math.abs(s.y - gy) > M7_SPAWN_R) continue;
       const key = 'g' + s.i;
       if (m7Live.has(key) || npcDead.has(key)) continue;
-      if (m7Spawn(s, key)) room--;
+      want.push([Math.max(Math.abs(s.x - gx), Math.abs(s.y - gy)) + ((s.plane | 0) === P.plane ? 0 : 1000), s, key]);
+    }
+  }
+  if (want.length) {
+    want.sort((a, b) => a[0] - b[0]);
+    /* a full cap gives a nearer spawn the farthest figure standing past spawning reach (other floors first), never one in a fight */
+    const far = () => {
+      let best = null, bd = M7_SPAWN_R;
+      for (const n of npcs) {
+        if (n.c7 === undefined || n.target || (P.task && P.task.o === n)) continue;
+        const d = Math.max(Math.abs(n.tx - P.tx), Math.abs(n.tz - P.tz)) + ((n.pl | 0) === P.plane ? 0 : 1000);
+        if (d > bd) { bd = d; best = n; }
+      }
+      return best;
+    };
+    for (const [d, s, key] of want) {
+      if (npcs.length >= M7_CAP) { if (d > M7_SPAWN_R) break; const n = far(); if (!n) break; removeNpc(n); }
+      m7Spawn(s, key);
     }
   }
   m7Items();
@@ -11725,7 +11748,7 @@ function m7Spawn(s, key) {
     if (n.dead || npcs.indexOf(n) < 0) return fig.ent.dispose();
     n.fig = fig; n.h7 = fig.height; if (fig.still) n.still = 1;
     mesh.add(fig.mesh);
-  }, e => console.warn('[seedworld] figure ' + s.id, e));
+  }, e => { if (npcs.indexOf(n) >= 0) removeNpc(n); console.warn('[seedworld] figure ' + s.id + ' will be asked for again', e && e.message); });   // a blip: m7Npcs raises the spawn again on its next pass
   return 1;
 }
 /* after the lunge and the bob have placed the group: an even-sized body centres between tiles. A hundred-odd figures
@@ -11736,13 +11759,11 @@ let m7FrusF = -1;
 function m7Figure(n, dt) {
   if (n.vo) { n.mesh.position.x += n.vo; n.mesh.position.z -= n.vo; }
   const d = Math.max(Math.abs(n.tx - P.tx), Math.abs(n.tz - P.tz)), moving = n.tx !== n.px || n.tz !== n.pz;
-  let lod = d > 40 ? 2 : d <= 12 ? 0 : 1;
-  if (lod < 2) {
-    if (m7FrusF !== hoverFrame) { m7FrusF = hoverFrame; m7Frus.setFromProjectionMatrix(m7PM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)); }
-    m7Sph.center.copy(n.mesh.position); m7Sph.center.y += n.h7 / 2; m7Sph.radius = Math.max(1, n.h7) * Math.max(1, n.t.sz);
-    if (!m7Frus.intersectsSphere(m7Sph)) lod = 2;
-  }
-  MAP07.animate(n.fig, moving, dt * 1000, lod);
+  if (m7FrusF !== hoverFrame) { m7FrusF = hoverFrame; m7Frus.setFromProjectionMatrix(m7PM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)); }
+  m7Sph.center.copy(n.mesh.position); m7Sph.center.y += n.h7 / 2; m7Sph.radius = Math.max(1, n.h7) * Math.max(1, n.t.sz);
+  const seen = m7Frus.intersectsSphere(m7Sph);
+  n.fig.mesh.visible = seen;   // off screen is not drawn at all: the figure opts out of three's own culling (its poses move past any fixed bound); the pick sphere and the bars read n.mesh, which stays
+  MAP07.animate(n.fig, moving, dt * 1000, !seen || d > 40 ? 2 : d <= 12 ? 0 : 1);   // the clock runs either way, so a figure never snaps when it comes back into view
 }
 /* a fishing spot is an object to the Fishing skill (net or harpoon water) that happens to wear an npc's rippling model */
 function m7Spot(s, key, def, name, pl) {
@@ -11855,9 +11876,10 @@ const m7Say = (op, name) => 'You ' + op.toLowerCase().replace(/-/g, ' ') + ' the
 function m7LocOpts(o) {
   const ud = o.ud, out = [];
   for (const op of ud.ops) {
-    const low = op.toLowerCase();
-    if (ud.door && /^(open|close|shut)$/.test(low)) out.push({ t: op, o: ud.name, f: act(o, () => m7Door(ud, op)) });
-    else if (MAP07.transport(ud, op, P.tx, -P.tz)) out.push({ t: op, o: ud.name, f: act(o, () => m7Travel(ud, op)) });
+    const low = op.toLowerCase(), tr = MAP07.transport(ud, op, P.tx, -P.tz);
+    const away = tr && (tr.p !== ud.cachePlane || Math.max(Math.abs(tr.x - ud.gx), Math.abs(tr.y - ud.gy)) > 2);   // a coffin, a cave or a floor-changing door: the link is the point, not the leaf
+    if (ud.door && /^(open|close|shut)$/.test(low) && !away) out.push({ t: op, o: ud.name, f: act(o, () => m7Door(ud, op)) });
+    else if (tr) out.push({ t: op, o: ud.name, f: act(o, () => m7Travel(ud, op)) });
     else if (/^climb|floor/.test(low)) out.push({ t: op, o: ud.name, f: act(o, () => m7Climb(ud, op)) });
     else out.push({ t: op, o: ud.name, f: act(o, () => say('Nothing interesting happens.')) });
   }
@@ -11887,7 +11909,7 @@ function m7Climb(ud, op) {
 
 /* ---- the world, frame by frame: floors, the spots' ripples, ground items in their own models ---- */
 function m7Frame(dt) {
-  const vp = OPT.hideRoofs || P.plane > 0 || MAP07.coveredAt(P.plane, P.tx, -P.tz) ? P.plane : 3;   // under a roof, upstairs, or "Hide all roofs" (the client's roof removal: always), the floors above lift away
+  const vp = OPT.hideRoofs || P.plane > 0 || MAP07.roofedAt(P.plane, P.tx, -P.tz) ? P.plane : 3;   // under a roof, upstairs, or "Hide all roofs" (the client's roof removal: always), the floors above lift away
   if (vp !== m7ViewPlane) { m7ViewPlane = vp; MAP07.setViewPlane(vp); }
   if (P.plane !== m7PlaneWas) { m7PlaneWas = P.plane; mapOX = 1e9; mapRow = MW; }
   if (P.snap7 && MAP07.regionAt(P.tx, -P.tz)) {   // a landing square is up: step off whatever the tile holds
@@ -11987,8 +12009,9 @@ function m7Mode(on) {
     for (const m of m7DropMeshes.values()) scene.remove(m);
     m7DropMeshes.clear(); m7Live.clear(); m7ItemState.clear();
   }
+  if (on) OS.fail = 0;   // a frame that failed to load gets another try on each entry
   M7 = on;
-  if (m7Inited) MAP07.setActive(on);
+  if (m7Inited) { if (on && !flip) MAP07.clear(); MAP07.setActive(on); }   // back in from the world list: loadSeed has emptied objIndex, so every square returns through onRegion
   water.visible = !on;
   player.scale.setScalar(on ? M7_FIG : 1);
   P.plane = 0; m7ViewPlane = 3; m7PlaneWas = -1;
@@ -12004,6 +12027,10 @@ function m7Arrive() {
   say('You arrive in Lumbridge. Welcome to Gielinor.', 'lv');
 }
 const m7Resumable = b => !M7 || MAP07.manifest().has(((b.tx >> 6) << 8) | ((-b.tz) >> 6));   // a Gielinor save names a real square, or you begin again in Lumbridge
+function m7Restart() {   // ...and then home and floor begin there too: a saved home off the map would strand Home and Respawn Teleport on a square that never loads
+  if (!M7) return;
+  P.plane = 0; P.home.x = M7_HOME[0]; P.home.z = -M7_HOME[1];
+}
 
 /* ---- 47. GIELINOR'S SPELLBOOKS: the client's own four books, read from the cache — the procedural worlds keep theirs ----
    enum 1981 names the books (0 standard, 1 ancient, 2 lunar, 3 arceuus), each an enum of spell objs in the book's order;
@@ -12048,8 +12075,8 @@ function m7Spell(obj, d, bk, idOf) {
   const s = { obj, n, d: p[602] || '', lv: p[604] | 0, mem: p[603] | 0, bk, need, on: p[597], off: p[598], on2: p[599], off2: p[600], comp: (p[596] | 0) & 0xffff, kind: p[605] | 0,
     bare: p[1884] === 1, stat: p[1187] > 0 ? [p[1187], p[1188] | 0] : null };
   const sp = SPELLS.find(q => q.n.toLowerCase() === n.toLowerCase());
-  const us = !sp && USPELLS.find(q => q.n === n);
   const tp = M7_TP[obj] || M7_TP[n];
+  const us = !sp && !tp && USPELLS.find(q => q.n === n);   // a teleport with a Gielinor landing takes it: the seeded worlds' row of the same name looks for villages
   if (sp) s.sp = sp;
   else if (us) s.us = us;
   else if (n === 'Lumbridge Home Teleport' || n === 'Arceuus Home Teleport') s.cast = Object.assign({ n, lv: 0, xp: 0, need: [], tint: 0xd8e4ee }, { f: n === 'Arceuus Home Teleport' ? () => { say('Arceuus lies beyond this map; the spell carries you home to Lumbridge.', 'lv'); return homeTp(); } : homeTp });
@@ -12105,7 +12132,7 @@ let osTopC = null, osBuildP = null, osTabNow = 'inv';
 for (const k of ['cl', 'ac', 'fr', 'lo', 'em', 'mu']) { const p = div(el('panes'), 'pane'); p.id = 'pane-' + k; PANES.push(k); }
 function osBuild() {
   if (osBuildP) return osBuildP;
-  osBuildP = OSUI.mount(548, osTop, 765, 503, { names: 1 }).then(c => {
+  osBuildP = OSUI.mount(548, osTop, 765, 503).then(c => {
     osTopC = c;
     for (const i of [21, 22]) if (c[i]) c[i].el.hidden = true;   // the map and compass masks shape what the client draws there; they are not pictures
     for (const i of [12, 13, 14, 15, 17]) if (c[i]) c[i].el.classList.add('osBelow');   // what folds away with the pack
@@ -12121,7 +12148,7 @@ function osBuild() {
     osMapInit(c); osOrbsInit(c);
     OS.ready = 1;
     osStones();
-  }, e => { osBuildP = null; console.warn('[seedworld] the 2007 interface could not load', e); OPT.osrs = 0; icons07Apply(1); osuiApply(); });
+  }, e => { osBuildP = null; console.warn('[seedworld] the 2007 interface could not load', e); OS.fail = 1; osuiApply(); });   // the game's own panels stand in until the next world entry tries again; the saved setting is left alone
   return osBuildP;
 }
 /* only the open tab's stone is lit */
@@ -12132,16 +12159,18 @@ function osStones() {
 }
 function osuiApply() {
   if (!OS.boot) return;
-  const on = M7 && OPT.osrs ? 1 : 0;
+  const on = M7 && OPT.osrs && !OS.fail ? 1 : 0;
   if (on === OS.on) return;
   OS.on = on;
   document.body.classList.toggle('osui', !!on);
   if (on) {
     osPanes.appendChild(el('panes'));
     document.body.appendChild(el('invmin')); document.body.appendChild(el('chatmin'));   // the fold handles stand beside the 2007 frame
+    const had = !!osCh;
     osBuild(); osChatBuild(); osFit();
+    if (had) { for (const ln of osCh.lines) if (ln.cv) ln.cv.remove(); osCh.lines = []; for (const d of chatEl.children) osChatAdd(d.textContent, d.className); }   // what was said while the frame was away
     osCh.body.appendChild(el('chatbar'));   // the real input rides over the drawn line, unseen
-    for (const id of [297, 535, 536, 897, 1358, 1359, 2176, 2177]) document.documentElement.style.setProperty('--os' + id, 'url("' + OSUI.spriteURL(id) + '")');   // stone for the plain panes' buttons; the hitsplats (block 1358, damage 1359) and the health bar (2176 over 2177)
+    for (const id of [297, 535, 536, 897, 1358, 1359, 2176, 2177]) OSUI.spriteObjURL(id).then(u => document.documentElement.style.setProperty('--os' + id, 'url("' + u + '")'), () => {});   // stone for the plain panes' buttons; the hitsplats (block 1358, damage 1359) and the health bar (2176 over 2177). The sprite's own blob: a url() on the bucket would cache it without CORS
     for (const id of [494, 495, 496, 497]) OSUI.font(id);   // the menu and the mouseover text draw at once, so their fonts must already stand
   } else {
     el('side').insertBefore(el('invmin'), el('side').firstChild); el('side').appendChild(el('panes'));
@@ -12149,6 +12178,8 @@ function osuiApply() {
     document.body.insertBefore(el('chatbar'), el('chatwrap').nextSibling);
   }
   osTabNow = (document.querySelector('.pane.on') || { id: 'pane-inv' }).id.slice(5);
+  if (!on && !document.querySelector('.tab[data-p="' + osTabNow + '"]')) showTab('inv');   // a pane only the frame has a stone for (logout, emotes, music...) gives way to the pack
+  else if (!on && PANE_DRAW[osTabNow]) PANE_DRAW[osTabNow]();   // and the one it drew (settings) is the game's own again
   osStones();
   dirty.inv = dirty.eq = dirty.sk = dirty.orb = 1;
   drawSpells(); drawPrayers(); drawStyles();
@@ -12482,7 +12513,10 @@ function osSkills() {
       osSk.total = c[32] && c[32].el;
       osSk.ready = 1;
       osSkills();
-    }, e => console.warn('[seedworld] the 2007 skills tab could not load', e));
+    }, e => {   // the game's own grid stands in, and the next draw tries the 2007 tab again
+      console.warn('[seedworld] the 2007 skills tab could not load', e);
+      osSk.host.remove(); el('pane-sk').classList.remove('osLive'); osSk = null;
+    });
     on(osSk.host, 'click', e => { const d = e.target.closest('[data-ossk]'); if (d) skillGuide(+d.dataset.ossk); });
     on(osSk.host, 'pointerover', e => {
       const d = e.target.closest('[data-ossk]');
@@ -12523,6 +12557,7 @@ function osPrayers() {
           if (!slot) return;
           const s = slot.el;
           s.hidden = false; s.style.left = (i % 5 * 37) + 'px'; s.style.top = (Math.floor(i / 5) * 37) + 'px';
+          slot.x = i % 5 * 37; slot.y = Math.floor(i / 5) * 37;   // where it now stands, for the tooltip (the definition has every slot at 0, 0)
           const glow = OSUI.at(s, OSUI.graphic(4892, 34, 34), 0, 0), icon = OSUI.at(s, OSUI.graphic(p[1757], 30, 30), 2, 2);
           const pr = PRAYERS.find(q => PR07[q.k] === p[1757]);
           if (pr) { s.dataset.ospr = pr.k; s.classList.add('osHit'); }
@@ -12534,7 +12569,10 @@ function osPrayers() {
         OSUI.at(fb, OSUI.text(46, 18, 'Filters', { font: 494, colour: 0xff981f, shadow: true, xa: 1, ya: 1 }), 0, 0);
         osPr.ready = 1;
         osPrayers();
-      })).catch(e => console.warn('[seedworld] the 2007 prayer tab could not load', e));
+      })).catch(e => {   // the game's own list stands in, and the next draw tries the 2007 book again
+        console.warn('[seedworld] the 2007 prayer tab could not load', e);
+        osPr.host.remove(); el('pane-pr').classList.remove('osLive'); osPr = null;
+      });
     on(osPr.host, 'click', e => { const d = e.target.closest('[data-ospr]'); if (d) prayToggle(d.dataset.ospr); });
     on(osPr.host, 'pointerover', e => {
       const d = e.target.closest('[data-ospr]');
@@ -12577,7 +12615,7 @@ function osMagic() {
     });
     on(osMg.host, 'pointerout', e => { if (!e.relatedTarget || !e.relatedTarget.closest || !e.relatedTarget.closest('[data-osmg]')) osTipHide(osMg.host); });
   }
-  const books = m7SpellBooks();
+  const books = m7Books || (osTabNow === 'mg' ? m7SpellBooks() : null);   // the books (33 item shards) load when the Magic tab first opens, not on entry
   if (!books) return;
   const bk = clamp(P.book | 0, 0, 3), sub = osMg.sub && books[bk] && books[bk].sub.get(osMg.sub), list = sub || books[bk] || [];
   if (!sub) osMg.sub = 0;
@@ -12722,7 +12760,10 @@ function osEquip() {
       }
       osEq.c = c; osEq.ready = 1;
       osEquip();
-    }, e => console.warn('[seedworld] the 2007 equipment tab could not load', e));
+    }, e => {   // the game's own sheet stands in, and the next draw tries the 2007 tab again
+      console.warn('[seedworld] the 2007 equipment tab could not load', e);
+      osEq.host.remove(); el('pane-eq').classList.remove('osLive'); osEq = null;
+    });
     on(osEq.host, 'click', e => {
       if (ctxAte) { ctxAte = 0; return; }
       const b = e.target.closest('[data-oseqb]');
@@ -12769,7 +12810,7 @@ function osKeptOnDeath() {
   for (const s of EQ_SLOTS) if (eq[s]) all.push({ id: eq[s], n: s === 'ammo' ? P.ammoN : 1 });
   for (let i = 0; i < INV_N; i++) if (inv[i]) all.push({ id: inv[i].id, n: inv[i].n });
   all.sort((a, b) => ITEMS[b.id].val - ITEMS[a.id].val);
-  let keep = skulled() ? (prayHas('item') ? 1 : 0) : 3 + (prayHas('item') ? 1 : 0);   // die()'s own count
+  let keep = 3 + (prayHas('item') ? 1 : 0);   // die()'s count for any death but a player's kill while skulled, which the footer names
   const kept = [], lost = [];
   for (const s of all) {
     if (s.id.startsWith('pet_')) continue;
@@ -12779,7 +12820,7 @@ function osKeptOnDeath() {
   }
   showModal('Items Kept on Death', '<p class="blab">Items you will keep on death</p>' + (kept.length ? gridOf(kept) : '<p class="gesEmpty">None.</p>')
     + '<p class="blab">Items you will lose on death</p>' + (lost.length ? gridOf(lost) : '<p class="gesEmpty">None.</p>'),
-    'The most valuable three are kept, four with Protect Item; a skull keeps none.', 1);
+    'The most valuable three are kept, four with Protect Item. Killed by a player while skulled, only Protect Item keeps one.', 1);
 }
 function osCallFollower() {
   if (!P.pet || !petMesh) return say("You don't have a follower.", 'bad');
@@ -12908,6 +12949,11 @@ function osCombat() {
     const cur = mode === 'r' ? P.rstyle : mode === 'p' ? P.cstyle : mode === 'g' && P.spell !== null ? -1 : P.style;
     let sel = btns.findIndex(b => b.i === cur && b.s.slot === osCbSlot);
     if (sel < 0) sel = btns.findIndex(b => b.i === cur);
+    if (sel < 0 && btns.length && (mode === 'm' || (mode === 'g' && P.spell === null))) {   // a stance this weapon has no button for (Lash, then a dagger): the same place, or the first
+      const b = btns.find(x => x.s.slot === osCbSlot) || btns[0];
+      P.style = b.i; osCbSlot = b.s.slot; markDirty(1);
+      return drawStyles();
+    }
     const key = cat + ':' + sel + ':' + (P.spell === null ? '' : P.spell + '/' + P.cstyle) + ':' + rows.length;
     if (osCb.key !== key) {
       osCb.key = key;
@@ -13011,7 +13057,10 @@ function osStoneBtn(host, x, y, w, h, label, font) {
    a 1px #5d5848 line under the row broken beneath the selected tab */
 function osTallTabs(host, icons, sel, onPick) {
   const box = div(host, 'osc'); box.style.cssText = 'left:0;top:0;width:190px;height:30px';
+  let hov = null;
   const draw = hover => {
+    if (hover === hov) return;   // a rebuild replaces the node under the pointer, which fires pointerover again: redraw only on a real change
+    hov = hover;
     box.textContent = '';
     icons.forEach(([ic, iw, ih, ix, iy], i) => {
       const x = [2, 65, 128][i], s = i === sel ? [2283, 2284] : i === hover ? [2287, 2288] : [2285, 2286];
@@ -13084,7 +13133,7 @@ function osSettings() {
     osSlider(mid, 60, 661, 2860, () => sfxVol, v => setSfxVol(v));
   } else {
     const B = OPT_ROWS.find(r => r.k === 'brightness'), V = OPT_ROWS.find(r => r.k === 'viewRadius');
-    osSlider(mid, 19, 659, 2858, () => (OPT.brightness - B.min) / (B.max - B.min), v => { OPT.brightness = Math.round((B.min + v * (B.max - B.min)) * 10) / 10; applyOpts(B); });
+    osSlider(mid, 19, 659, 2858, () => (OPT.brightness - B.min) / (B.max - B.min), v => { const b = Math.round((B.min + v * (B.max - B.min)) * 10) / 10; if (b !== OPT.brightness) { OPT.brightness = b; applyOpts(B); } });   // a drag writes the options only when the step changes
     osSlider(mid, 56, 1162, 1201, () => (OPT.viewRadius - V.min) / (V.max - V.min), v => { const n = Math.round(V.min + v * (V.max - V.min)); if (n !== OPT.viewRadius) { OPT.viewRadius = n; applyOpts(V); } });
     const L = osClip(mid, 6, 80, 180, 96);
     osCheck(L, 0, '2007 models', osOpt('osrs'), v => { OPT.osrs = v; icons07Apply(1); osrsApply(); applyOpts(OPT_ROWS.find(r => r.k === 'osrs')); });
@@ -13260,7 +13309,7 @@ function osLabel(html) {   // this game's label markup as the client's colour ta
   for (const m of html.match(/<[^>]*>|[^<]+/g) || []) {
     if (m[0] !== '<') out += ent(m);
     else if (m.indexOf('class="itm"') >= 0) out += '<col=ff9040>';
-    else if (m.indexOf('class="obj"') >= 0) out += npc ? '<col=ffff00>' : '<col=00ffff>';
+    else if (m.indexOf('class="obj') >= 0) out += m.indexOf('tplr') >= 0 ? '<col=ffffff>' : m.indexOf('tnpc') >= 0 || npc ? '<col=ffff00>' : '<col=00ffff>';   // a player white, a monster or townsperson yellow, scenery cyan
     else if (m.indexOf('class="lvl"') >= 0) out += '<col=' + '000000' + '>';
     else if (m === '</span>') out += '</col>';
   }

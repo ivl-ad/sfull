@@ -378,12 +378,14 @@
   /* ---- OSRS INTERFACE: Gielinor with the 2007 layer on (body.osui; osui.js draws, game.js section 48 wires). Every
      piece is the cache's own sprite at its own pixel size; --oss scales the whole frame down on screens too small for it. */
   .osc{position:absolute;margin:0;padding:0;box-sizing:content-box}
-  .osg,.ost{display:block;image-rendering:pixelated;image-rendering:crisp-edges}
+  .osg,.ost{display:block;object-fit:fill;image-rendering:pixelated;image-rendering:crisp-edges}   /* fill: the client stretches a sprite to its box; the global img rule would letterbox it */
+  .osc[hidden],.osg[hidden],.ost[hidden]{display:none!important}   /* a component the cache marks hidden stays hidden under display:block */
   #osCol,#osChat{display:none;position:fixed;z-index:25;pointer-events:none}
   body.osui #osCol,body.osui #osChat{display:block}
   #osCol{top:0;right:0;width:249px;height:503px;overflow:hidden;transform:scale(var(--oss,1));transform-origin:top right}
   #osTop{position:absolute;left:-516px;top:0;width:765px;height:503px}
   #osCol [data-ostab],#osCol .osHit{pointer-events:auto;cursor:pointer}
+  #osTop .osg,#osTop .ost,#osChat .osg,#osChat .ost{pointer-events:auto}   /* the frame is solid, as the client's is: a click on its stone never walks the world behind it */
   body.osui #side,body.osui #orbs,body.osui #mm{display:none}
   body.osui #osPanes{pointer-events:auto}
   #osPanes{position:absolute;left:31px;top:205px;width:190px;height:261px;overflow:hidden}
@@ -393,6 +395,7 @@
   .osPane{display:none;position:absolute;left:0;top:0;width:190px;height:261px;overflow:hidden}
   body.osui .osPane{display:block}
   body.osui .pane.osLive>:not(.osPane){display:none!important}
+  body.osui .pane:not(.osLive)>.osPane{display:none}   /* All Settings hands the pane back to the game's own list */
   .osTip{position:absolute;z-index:3;pointer-events:none}
   .osItem{position:absolute;left:0;top:0;width:36px;height:32px;overflow:hidden;pointer-events:none}
   .osItem img{position:absolute;left:0;top:0;width:auto;height:auto;max-width:none}

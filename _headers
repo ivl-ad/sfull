@@ -12,3 +12,7 @@
   Cache-Control: public, max-age=86400
 /assets/sound/*
   Cache-Control: public, max-age=86400
+  Access-Control-Allow-Origin: *
+# a page opened straight from disk (file://) reads the map tables and sounds from the live site
+/assets/map07/*
+  Access-Control-Allow-Origin: *

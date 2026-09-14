@@ -37,6 +37,9 @@ const OSRSK = (() => {
    public on its own domain (CORS for vla.dev + localhost, cache rule in front), so no Worker runs per file and the
    local out/ folder is never read. */
 const OUT = 'https://assets.vla.dev';
+/* The game's own files (assets/map07 tables, sounds): this folder when served, the live site when index.html is opened
+   straight from disk — a file:// page cannot fetch its neighbours, but it can read vla.dev (CORS in _headers). */
+const SITE = typeof location !== 'undefined' && location.protocol === 'file:' ? 'https://vla.dev/' : '';
 
 /* JagexColor's brightness exponent. The client offers 0.6-0.9 and the wiki's equipped renders use 0.6, which is
    also the only value at which every sampled wiki pixel resolves to an exact palette entry. */
@@ -380,9 +383,8 @@ function defaultBody(allKits, offset) {
    Fetch the resolve maps + kit/texture config, build the palette and the default bodies, preload the kit atoms
    (naked player renders at once) and warm the fixed scenery names the world plants (LOC_WARM) so the loc calls
    stay synchronous. Items and monsters resolve lazily, on first use. On any failure reject — game.js turns the
-   setting off. A file:// page has an opaque origin and every fetch fails as a bare NetworkError; name the fix. */
+   setting off. */
 function load() {
-  if (typeof location !== 'undefined' && location.protocol === 'file:') return Promise.reject(new Error('the game must be served over http — double-click play-local.cmd (or node tools/server.js) and use the localhost tab'));
   if (loading) return loading;
   return loading = Promise.all([
     fetchJSON('resolve/item.json'), fetchJSON('resolve/npc.json'), fetchJSON('resolve/loc.json'),
@@ -1449,7 +1451,7 @@ function drainIcons() {
 const itemDef = cid => cfgEntry('item', cid);   /* the cache's own row (examine text and all), fetched with its shard */
 const aliasName = k => { for (const [re, to] of ALIASES) if (re.test(k)) return k.replace(re, to).toLowerCase(); return null; };   /* a seedworld name's cache spelling, where it has one */
 
-const api = { OUT, load, rig, dress, brightness, idFor, npcVariants, npcMesh, npcFree, locVariants, locPools, locMesh, locFree, locBatch, icon, iconNow, iconXY: iconXYNow, iconStore: storeReady, itemDef, aliasName, ready: () => loaded };   /* OUT: map07.js reads the tree from the same base */
+const api = { OUT, SITE, load, rig, dress, brightness, idFor, npcVariants, npcMesh, npcFree, locVariants, locPools, locMesh, locFree, locBatch, icon, iconNow, iconXY: iconXYNow, iconStore: storeReady, itemDef, aliasName, ready: () => loaded };   /* OUT: map07.js reads the tree from the same base */
 /* dead in the game (the flag is never set there); the parity self-test sets globalThis.OSRS_TEST to reach the resolvers */
 if (typeof globalThis !== 'undefined' && globalThis.OSRS_TEST) api._t = { nByName, lByName, itemDefs, itemById, resolveItem, resolveNpc, resolveLoc, fetchAtoms, models, npcIndex, locIndex, itemIndex, iconPixels, readModel };
 return api;

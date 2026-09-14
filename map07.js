@@ -25,7 +25,7 @@
 const MAP07 = (() => {
 'use strict';
 
-const OUT = OSRSK.OUT, DATA = 'assets/map07';
+const OUT = OSRSK.OUT, DATA = OSRSK.SITE + 'assets/map07';
 const BRIGHT = 0.7;                  /* the viewer's palette exponent for model faces */
 const U = 1 / 128;                   /* cache units -> tiles */
 const MODEL_MAX = 7000;              /* parsed model records kept before trimming the oldest (a trimmed one just refetches) */
@@ -1174,7 +1174,6 @@ function squareCanvas(rid) {
 
 /* ---- load: the catalogs, the four tables, the lights ---- */
 function load() {
-  if (typeof location !== 'undefined' && location.protocol === 'file:') return Promise.reject(new Error('the game must be served over http — double-click play-local.cmd (or node tools/server.js) and use the localhost tab'));
   if (loading) return loading;
   return loading = Promise.all([
     catalog('underlay'), catalog('overlay'), catalog('texture'),

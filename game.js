@@ -7122,7 +7122,7 @@ on(window, 'pointerdown keydown', sndUnlock, { passive: true });
 function sndLoad(id) {
   let b = sndBufs.get(id);
   if (b === undefined) {
-    b = fetch('assets/sound/' + id + '.wav').then(r => r.arrayBuffer()).then(a => acx.decodeAudioData(a))
+    b = fetch(OSRSK.SITE + 'assets/sound/' + id + '.wav').then(r => r.arrayBuffer()).then(a => acx.decodeAudioData(a))
       .then(bf => (sndBufs.set(id, bf), bf), () => sndBufs.set(id, null));
     sndBufs.set(id, b);
   }

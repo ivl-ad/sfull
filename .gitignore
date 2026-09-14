@@ -1,27 +1,35 @@
-# The repo tracks only what the Cloudflare Worker serves and deploys; SHIP.md lists it (and, like every .md, stays local).
-# Everything below is local-only. These files still exist on disk, so .assetsignore lists them too —
-# otherwise `wrangler deploy` from this folder would publish them.
+# A whitelist: the repo carries only what the game and its deploy need, everything else stays local.
+# The 07 asset tree lives in R2 (https://assets.vla.dev), so out/ is never here. Docs (*.md), build tools (tools/,
+# *.mjs, *.csv), play-local.cmd, .claude/ and .wrangler/ are all skipped by the first line.
+# A new file the game loads must be listed below, or it silently never reaches GitHub (and so never deploys).
+/*
 
-# the osrs-r2 cache transcode (~1.9GB): served beside the game for now, remapped to R2 later; never committed
-out/
+# the deploy: Worker, its config, the static-asset headers and exclusions
+!/.gitignore
+!/.assetsignore
+!/_headers
+!/wrangler.toml
+!/src/
+/src/*
+!/src/worker.js
 
-# notes and docs
-*.md
+# the page and its scripts (load order is in index.html)
+!/index.html
+!/style.css
+!/game.js
+!/icons07.js
+!/data07.js
+!/data07-stats.js
+!/data07-npcstats.js
+!/data07-items.js
+!/osrs.js
+!/map07.js
+!/osui.js
 
-# build tooling and its inputs: the bakers, the Gielinor map builder, the icon pipeline, the dev server and harness
-tools/
-mapgen.mjs
-icons07-*.mjs
-icons07-*.csv
-
-# local state and dev conveniences
-.wrangler/
-node_modules/
-.claude/
-.rgignore
-play-local.cmd
-
-# retired: the temporary wiki sprite dumps, and the model bundle osrs.js no longer reads (it streams out/)
-assets/c07-full2/
-assets/i07-full2/
-assets/osrs/
+# the few files the game still fetches from this folder
+!/assets/
+/assets/*
+!/assets/map07/
+!/assets/sound/
+!/assets/i07/
+!/assets/c07/

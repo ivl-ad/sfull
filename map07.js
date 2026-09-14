@@ -1111,7 +1111,7 @@ function wallBits(plane, gx, gy) { const r = regionAt(gx, gy); return r ? r.wall
 /* the 2007 world map composite (wm/img/5.0.png): mapsquares x 18..60, y 39..64, sixteen pixels a square */
 const WORLD_IMG = { src: OUT + '/wm/img/5.0.png', gx0: 18 * 64, gy1: 65 * 64, tpp: 4 };
 function worldImage() {
-  if (!worldImg) { worldImg = new Image(); worldImg.src = WORLD_IMG.src; }
+  if (!worldImg) { worldImg = new Image(); worldImg.crossOrigin = 'anonymous'; worldImg.src = WORLD_IMG.src; }   /* getImageData below */
   return worldImg.complete && worldImg.naturalWidth ? worldImg : null;
 }
 let landPx = null, landW = 0, landH = 0;

@@ -10,14 +10,15 @@
      it. Styles do (three.js writes element styles), images need data: for the
      drawn icons and blob: for canvases, media needs github.com for the music,
      and connect-src needs wss: for the socket and github.com for the sound
-     effects fetched on first use. -->
+     effects fetched on first use. assets.vla.dev (img + connect) is the 07
+     asset tree, public out of R2. -->
 <meta http-equiv="Content-Security-Policy" content="
   default-src 'self';
   script-src 'self' https://cdnjs.cloudflare.com;
   style-src 'self' 'unsafe-inline';
-  img-src 'self' data: blob:;
+  img-src 'self' https://assets.vla.dev data: blob:;
   media-src 'self' https://github.com https://objects.githubusercontent.com https://raw.githubusercontent.com data: blob:;
-  connect-src 'self' ws: wss: https://github.com https://objects.githubusercontent.com https://raw.githubusercontent.com;
+  connect-src 'self' ws: wss: https://assets.vla.dev https://github.com https://objects.githubusercontent.com https://raw.githubusercontent.com;
   worker-src 'self' blob:;
   base-uri 'none';
   form-action 'none';

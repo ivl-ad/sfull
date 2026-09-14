@@ -19,7 +19,7 @@ tools/
 *.csv
 sql/
 
-# the osrs-r2 transcode tree (~1.9GB): too big for Workers Assets; R2 later
+# the osrs-r2 transcode tree (~1.9GB): too big for Workers Assets; served from R2 bucket test1 at https://assets.vla.dev
 out/
 play-local.cmd
 

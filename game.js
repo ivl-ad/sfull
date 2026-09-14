@@ -1348,6 +1348,7 @@ function sprArt(id) {
       if (!sprT) sprT = setTimeout(sprLanded, 60);
     };
     im.onerror = () => sprArts.set(id, null);
+    im.crossOrigin = 'anonymous';   // toDataURL above: a cross-origin tree must not taint the canvas
     im.src = OSRSK.OUT + '/s/' + id + '.png';
   }
   return '';

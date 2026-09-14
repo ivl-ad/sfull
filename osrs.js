@@ -33,9 +33,10 @@
 const OSRSK = (() => {
 'use strict';
 
-/* The one place the asset tree is named. Localhost/GitHub serve it from the repo; swap this for the R2 base URL
-   (e.g. 'https://<bucket>.r2.dev/v1788780794') to serve the same catalogs and atoms from the edge. */
-const OUT = 'out/v1788780794';
+/* The one place the asset tree is named: the osrs-r2 transcode (revision v1788780794) at the root of R2 bucket `test1`,
+   public on its own domain (CORS for vla.dev + localhost, cache rule in front), so no Worker runs per file and the
+   local out/ folder is never read. */
+const OUT = 'https://assets.vla.dev';
 
 /* JagexColor's brightness exponent. The client offers 0.6-0.9 and the wiki's equipped renders use 0.6, which is
    also the only value at which every sampled wiki pixel resolves to an exact palette entry. */

@@ -1,6 +1,6 @@
   :root{--bevel:#6b5334;--bevel-2:#8a6d45;--bone:#e9dcbe;--dim:#a2906c;--amber:#ff9b21;--jade:#7fc06a;
     --ink:#171209;--well:#191309;--grad:linear-gradient(180deg,#4b4133,#332b20);--grad2:linear-gradient(180deg,#5d5140,#3a3024)}
-  *{box-sizing:border-box}
+  *{box-sizing:border-box} 
   html,body{margin:0;height:100%;overflow:hidden;background:#10131a;font:12px/1.35 Verdana,Geneva,DejaVu Sans,sans-serif;
     color:var(--bone);-webkit-font-smoothing:none;user-select:none;-webkit-user-select:none}
   canvas{display:block}

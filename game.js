@@ -1725,6 +1725,7 @@ function launch(tint, sx, sy, sz, o, dmg, speed, lo, hi, extra) {
   const b = Object.assign({ m, sp: { tint }, o, dmg, sx, sy, sz, t: 0,
     dur: clamp(Math.hypot((o.rx ?? o.x) - sx, (o.rz ?? o.z) - sz) / speed, lo, hi) }, extra);
   bolts.push(b);
+  if (M7 && typeof c7FxBolt === 'function') c7FxBolt(b);   // the cache's cast, flight and splash graphics ride the bolt
   return b;
 }
 const aimAt = (rx, ry, rz) => ({ rx, ry, rz, dead: 1 });
@@ -1746,9 +1747,11 @@ function boltFrame(dt) {
     b.m.position.set(b.sx + (tx - b.sx) * k, b.sy + (ty - b.sy) * k + Math.sin(k * PI) * 1.1, b.sz + (tz - b.sz) * k);
     if (b.arw) { b.m.rotation.set(0, Math.atan2(tx - b.sx, tz - b.sz), 0); b.m.scale.set(0.16, 0.16, 1.5); }
     else { b.m.rotation.y += dt * 13; b.m.rotation.x += dt * 9; b.m.scale.setScalar(0.85 + Math.sin(k * PI) * 0.45); }
+    if (b.g7) c7FxBoltFrame(b, dt, tx, tz);
     if (k >= 1) {
       b.m.visible = false; b.m.scale.setScalar(1);
-      if (!b.arw) spellBurst(tx, ty, tz, b.sp.tint);
+      const g7end = b.fx7 ? c7FxBoltEnd(b, o) : false;
+      if (!b.arw && !g7end) spellBurst(tx, ty, tz, b.sp.tint);
       if (!b.arw && b.sp.k && !b.sp.drain) sfxAt(b.dmg === 0 ? 227 : spellSnd(b.sp, 1), tx, tz);   // splash or strike, where it lands
       if (b.dmg !== null) { hitsplat(tx, o.ry + 1.5, tz, b.dmg); healthBar(o); }   // a killing bolt still draws the bar; fxFrame lets it linger empty
       bolts.splice(i, 1);
@@ -4407,6 +4410,7 @@ function npcTick(n) {
         }
       } else st = npcStyle(n, near, npcReach(n.t));
       n.atkT = 1; n.atkStyle = st; n.netAct = st === 'm' ? 1 : st === 'r' ? 2 : 3;
+      if (n.fig && typeof c7Act === 'function') c7Act(n, 0);
       if (st !== 'm') npcBolt(n, st);
    // monster effective level is level + 9; max hit comes from the shared 2007 formula off its strength and strength bonus.
    // a cast rolls the monster's Magic against 0.7 x your Magic + 0.3 x your Defence and your magic gear; all else rolls your Defence
@@ -4495,6 +4499,7 @@ function killNpc(n) {
   if (n.plate) { freePlate(n.plate); n.plate = null; }
   const due = tickN + (n.t.boss ? 3000 : 60);   // a slain boss stays down half an hour
   if (n.key) { npcDead.set(n.key, due); netWorld([22, n.key, due]); }   // keyless spawns (events, dev) leave no timer behind
+  if (M7 && n.fig && typeof c7Corpse === 'function') c7Corpse(n);   // the figure falls where it stood before the monster goes
   removeNpc(n);
   const p = Math.max(0, n.pw || 0), x = n.tx, z = n.tz, q = 1 + Math.min(1, p * 0.15);   // only coin stacks swell with the ground's power (capped 2x): authored quantities stay wiki-exact
   const drop = (id, k) => { const nq = id === 'coins' ? Math.max(1, Math.round((k || 1) * q)) : (k || 1); if (id === 'coins') gpMade += nq; clogAdd(id); dropItem(id, nq, x, z, 0, 0, n.pl); };
@@ -4972,6 +4977,7 @@ function taskTick() {
     const dmg = swing(o);
     if (dmg < 0) return;
     o.hp -= dmg;
+    if (o.fig && o.hp > 0 && typeof c7Act === 'function') c7Act(o, 1);   // it flinches from the blow
     if (P.pose === 0 || P.pose === 4) healthBar(o);   // a bolt draws the bar when it lands
     if (o.hp <= 0) killNpc(o); else o.target = P;
     return;
@@ -6216,6 +6222,7 @@ function mapMarks() {
   for (const nn of npcs) dot(nn.tx, nn.tz, '#ffe14a', 3);
   if (marker.visible) dot(marker.position.x, marker.position.z, '#ffe14a', 3);
   if (P.hs) dot(P.hs.x + 4, P.hs.z + 4, '#e8d9b0', 4);   // your house
+  if (M7 && typeof c7MiniIcons === 'function') c7MiniIcons(mctx, k, C, yaw + PI);
   if (deathSpot) {   // the skull rides the minimap too, counter-rotated to stay upright
     const px2 = (deathSpot.x - P.rx) * k, pz2 = (deathSpot.z - P.rz) * k;
     if (px2 * px2 + pz2 * pz2 <= (C - 4) * (C - 4)) {
@@ -6844,6 +6851,8 @@ function animate(E, p, dt) {
   E.bobPhase += dt;
   E.face += wrapA(E.faceT - E.face) * Math.min(1, dt * 14);
   if (E.turn) E.turn.rotation.y = E.face;
+  if (M7 && E === P && p.osrs && typeof c7Pose === 'function' && c7Pose(E, p, dt, moving)) return;   // the cache's own seqs on the 2007 kit (content07.js)
+  if (p.a07own) OSRSK.rest07(p);
   const rig = E.rig, bt = E.boat, oL = E.oarL, oR = E.oarR;
   const u = p.wep && p.wep.userData;
   if (u) p.wep.rotation.set(u.tilt || 0, 0, u.roll || 0);
@@ -7236,7 +7245,7 @@ function packSave() {
     dr: P.dunRet || 0, cs: P.cstyle, bs: Array.from(bst), sku: P.skull || 0,   // sku: the skull's expiry on the shared clock — one entry, refreshed per initiated attack
     sp: Math.round(P.spec), ht: Math.max(0, P.homeT), ac: Math.max(0, P.agiCapeT || 0), bk: P.book | 0, bks: P.books | 1,   // a relog used to hand back a full spec bar and an off-cooldown home teleport
     dp: P.dpile || 0,   // dp: the unclaimed death pile, so a relog cannot cost you your right to it
-    fl: P.plane | 0 };   // fl: the Gielinor floor you stood on (always 0 in a seed's world; pl is the lost pets)
+    fl: P.plane | 0, g7: typeof c7Pack === 'function' ? c7Pack() : 0 };   // g7: Gielinor's quests, music, cache slayer task and clue trail (content07.js)   // fl: the Gielinor floor you stood on (always 0 in a seed's world; pl is the lost pets)
 }
 /* What the blob would weigh right now. The bank used to advertise three hundred
    slots against a ceiling that could not hold two hundred of them, and the
@@ -7314,6 +7323,7 @@ function applySave(b) {
       pendingPiles.push({ due, x: dp.x | 0, z: dp.z | 0, rows, life, own: PID, pl });   // your own saved reclaim: yours to retract, nobody else's
     }
   }
+  if (typeof c7Unpack === 'function') c7Unpack(b.g7);
   dirty.inv = dirty.eq = dirty.sk = dirty.orb = 1;
   return b;
 }
@@ -7329,6 +7339,7 @@ function freshCharacter() {
   P.spec = 100; P.specArm = 0; P.souls = 0; P.homeT = P.agiCapeT = -1e9; P.book = 0; P.books = 1; P.veng = 0; P.vengCd = 0; P.dreamT = 0; P.imbueT = 0;
   for (const [id, n] of [['bronze_hatchet', 1], ['bronze_pickaxe', 1], ['tinderbox', 1], ['hammer', 1], ['small_net', 1], ['coins', 120]]) invAdd(id, n);
   eq.weapon = 'bronze_sword';
+  if (typeof c7Unpack === 'function') c7Unpack(null);
   dirty.inv = dirty.eq = dirty.sk = dirty.orb = 1;
 }
 
@@ -7625,6 +7636,7 @@ function onNet(m) {
       q.hp = clamp(m[5] | 0, 0, q.maxhp);
       if (act >= 1 && act <= 3) {
         q.atkT = 1; q.atkStyle = act === 1 ? 'm' : act === 2 ? 'r' : 'g';
+        if (q.fig && typeof c7Act === 'function') c7Act(q, 0);
         const V = remotes.get(owner);
         if (act > 1) npcBolt(q, q.atkStyle, V ? { rx: V.rx, ry: V.ry, rz: V.rz } : null);
       }
@@ -11369,6 +11381,7 @@ for (const p of ['full_helm', 'platebody', 'platelegs', 'plateskirt', 'kiteshiel
 })();
 const holdsClue = () => CLUE_T.some((c, i) => invCount('clue_' + i) || bank.some(b => b.id === 'clue_' + i));
 function clueSpot(i, x, z) {   // dry, wild ground a tier's walk from (x, z)
+  if (M7 && typeof c7ClueSpot === 'function') { const c = c7ClueSpot(i); if (c) return c; }   // Gielinor: the cache's own clue steps (content07b.js)
   if (inDunPlane(z)) z -= DUN_Z;   // a scroll found below points at the daylight above the castle
   if (M7 && -z > 6400) { const tw = m7Town(x, z, 0); if (tw) { x = tw.x; z = -tw.y; } }   // a scroll found underground points at the surface above the nearest town
   for (let k = 0, T = CLUE_T[i]; k < 40; k++) {
@@ -11386,6 +11399,7 @@ onKill.push((n, drop) => {
   if (c && Math.random() * c[1] < 1 && !holdsClue() && (P.clue = clueSpot(c[0], n.tx, n.tz))) { drop('clue_' + c[0], 1); markDirty(1); }
 });
 function readClue(i) {   // a scroll without a spot (an old save) is given one from where you stand
+  if (M7 && typeof c7ReadClue === 'function') return c7ReadClue(i);
   const c = P.clue && P.clue[2] === i ? P.clue : (P.clue = clueSpot(i, P.tx, P.tz));
   if (!c) return say('The ink has run; you cannot make the scroll out here.');
   const dx = c[0] - P.tx, dz = c[1] - P.tz;
@@ -11393,6 +11407,7 @@ function readClue(i) {   // a scroll without a spot (an old save) is given one f
   if (!invCount('spade') && !bank.some(b => b.id === 'spade')) say('You will need a spade to dig it up — any General Store sells one.', 'lv');
 }
 function dig() {
+  if (M7 && typeof c7ClueDig === 'function' && c7ClueDig()) return;
   const c = P.clue;
   kneel(); sfx(1470);
   if (!c || !invCount('clue_' + c[2]) || chebDist(P.tx, P.tz, c[0], c[1]) > 2) return say('You dig a hole, and find nothing.');
@@ -11459,6 +11474,7 @@ const GUIDE = {
   sailing: [[1, 'Deep water puts you in a rowboat']]
 };
 function skillGuide(i) {
+  if (M7 && typeof c7Guide === 'function' && !skillGuide.own) { c7Guide(i).then(ok => { if (!ok) { skillGuide.own = 1; skillGuide(i); skillGuide.own = 0; } }); return; }   // Gielinor reads the client's own guide
   const k = SKILLS[i].k, by = new Map();
   for (const [lv, n] of (GUIDE[k] || []).concat(RECIPES.filter(r => r.sk === k).map(r => [r.lv, mkName(r)]), [[99, SKILLS[i].f + ' cape']])) by.set(lv, (by.get(lv) || new Set()).add(n));
   showModal(SKILLS[i].f + ' guide', [...by].sort((a, b) => a[0] - b[0]).map(([lv, set]) => '<div class="stRow g' + (lvl[i] < lv ? ' no' : '') + '"><i>Level ' + lv + '</i><b>' + [...set].join(', ') + '</b></div>').join(''),
@@ -11774,6 +11790,7 @@ function m7Spawn(s, key) {
     if (!fig) return;
     if (n.dead || npcs.indexOf(n) < 0) return fig.ent.dispose();
     n.fig = fig; n.h7 = fig.height; if (fig.still) n.still = 1;
+    if (typeof c7WarmNpc === 'function') c7WarmNpc(n);   // its attack, flinch and death frames load before the first blow
     mesh.add(fig.mesh);
   }, e => { if (npcs.indexOf(n) >= 0) removeNpc(n); console.warn('[seedworld] figure ' + s.id + ' will be asked for again', e && e.message); });   // a blip: m7Npcs raises the spawn again on its next pass
   return 1;
@@ -11888,13 +11905,13 @@ function m7NpcOpts(n) {
     else if (low === 'bank') out.push({ t: 'Bank', o: name, f: ui(() => openBank()) });
     else if (low === 'exchange') out.push({ t: 'Exchange', o: name, f: ui(() => openGE()) });
     else if (low === 'trade') out.push({ t: 'Trade', o: name, f: ui(() => startShop(Object.assign({ x: n.tx, z: n.tz }, m7Shop(name)))) });
-    else if (low === 'assignment' && M7_SLAYER[nm] !== undefined) out.push({ t: 'Assignment', o: name, f: ui(() => slayerTalk({ t: 12, k: M7_SLAYER[nm], n: name, x: n.tx, z: n.tz })) });
+    else if (low === 'assignment' && M7_SLAYER[nm] !== undefined) out.push({ t: 'Assignment', o: name, f: ui(() => typeof c7Slayer === 'function' ? c7Slayer(n) : slayerTalk({ t: 12, k: M7_SLAYER[nm], n: name, x: n.tx, z: n.tz })) });
     else if (/^hair/.test(low)) out.push({ t: op, o: name, f: ui(() => openBarber()) });
     else if (low === 'teleport' && M7_ESSENCE.has(nm)) out.push({ t: 'Teleport', o: name, f: ui(() => tpTo(2911, -4832, 'to the rune essence mine', TP_CAP_ITEM, 0)) });
     else if (M7_SAIL[nm] !== undefined && /travel|pay|take-boat|charter|sail|port|karamja|entrana/.test(low)) out.push({ t: op, o: name, f: ui(() => m7Sail(n)) });
     else if (low === 'collect' || low === 'history' || low === 'sets' || low === 'rewards') continue;
-    else if (low === 'talk-to') out.push({ t: 'Talk-to', o: name, f: ui(() => say(name + ': ' + (M7_SLAYER[nm] !== undefined ? 'Need a task? Ask me for an assignment.' : M7_CHAT[n.kh % M7_CHAT.length]))) });
-    else out.push({ t: op, o: name, f: ui(() => say('Nothing interesting happens.')) });
+    else if (low === 'talk-to') out.push({ t: 'Talk-to', o: name, f: ui(() => typeof c7TalkTo === 'function' ? c7TalkTo(n) : say(name + ': ' + (M7_SLAYER[nm] !== undefined ? 'Need a task? Ask me for an assignment.' : M7_CHAT[n.kh % M7_CHAT.length]))) });
+    else out.push({ t: op, o: name, f: ui(() => { if (!(typeof c7NpcOp === 'function' && c7NpcOp(n, op))) say('Nothing interesting happens.'); }) });
   }
   out.push({ t: 'Examine', o: name, f: () => say(t.peace7 ? name + '.' : name + ', level ' + t.lv + ' (hitpoints ' + n.hp + '/' + n.maxhp + ').') });
   return out;
@@ -11908,6 +11925,8 @@ function m7LocOpts(o) {
     if (ud.door && /^(open|close|shut)$/.test(low) && !away) out.push({ t: op, o: ud.name, f: act(o, () => m7Door(ud, op)) });
     else if (tr) out.push({ t: op, o: ud.name, f: act(o, () => m7Travel(ud, op)) });
     else if (/^climb|floor/.test(low)) out.push({ t: op, o: ud.name, f: act(o, () => m7Climb(ud, op)) });
+    else if (typeof c7LocOp === 'function' && c7LocOp(ud, op, o, out)) continue;   // quests, clues, fairy rings, the farm's verbs (content07b.js)
+    else if (/^(open|unlock|pick-lock)$/.test(low)) out.push({ t: op, o: ud.name, f: act(o, () => say(/gate|door|grill|bars|barrier/i.test(ud.name) ? 'The ' + ud.name.toLowerCase() + ' is locked.' : 'It\'s locked.')) });
     else out.push({ t: op, o: ud.name, f: act(o, () => say('Nothing interesting happens.')) });
   }
   out.push({ t: 'Examine', o: ud.name, f: () => say('It\'s ' + (/^[aeiou]/i.test(ud.name) ? 'an ' : 'a ') + ud.name.toLowerCase() + '.') });
@@ -11915,8 +11934,8 @@ function m7LocOpts(o) {
 }
 function m7Door(ud, op) {   // both leaves of a double door swing together; the state is this client's own (a door never blocks)
   const partner = MAP07.doorPartner(ud);
-  MAP07.toggleDoor(ud);
-  if (partner) MAP07.toggleDoor(partner);
+  MAP07.toggleDoor(ud, partner);
+  if (partner) MAP07.toggleDoor(partner, ud);
   sfx(62, 0.7); hoverObj = undefined;
   say(m7Say(op, ud.name));
 }
@@ -11965,6 +11984,7 @@ function m7Frame(dt) {
     m.visible = m7Shown(d.pl);
   }
   for (const [d, m] of m7DropMeshes) if (!seen.has(d)) { scene.remove(m); m7DropMeshes.delete(d); d.m7m = 0; }
+  if (typeof c7Frame === 'function') c7Frame(dt);   // animated scenery, falling figures, spell graphics, the content systems' clocks
 }
 /* the minimap: the loaded squares' own tile colours with their walls white and doors red, the world map beyond them */
 function m7MapStale() { if (!m7MapDirty) return false; m7MapDirty = 0; return true; }
@@ -11986,6 +12006,7 @@ function m7WmDraw() {
   const im = MAP07.worldImage(), WI = MAP07.WORLD_IMG;
   if (im) wmCtx.drawImage(im, px(WI.gx0 - 0.5), pz(-WI.gy1 + 0.5), im.naturalWidth * WI.tpp * s, im.naturalHeight * WI.tpp * s);
   else wmDirty = 1;
+  if (typeof c7WmExtras === 'function') c7WmExtras(px, pz, s, W, H, 0);   // the dungeons' own pictures
   if (s >= 1.5) {
     const list = [];
     for (let sx = Math.floor((wmCx - W / 2 / s) / 64); sx <= Math.floor((wmCx + W / 2 / s) / 64); sx++)
@@ -11996,6 +12017,7 @@ function m7WmDraw() {
       if (c) wmCtx.drawImage(c, Math.floor(px(sx * 64 - 0.5)), Math.floor(pz(-(sy * 64 + 63) - 0.5)), Math.ceil(64 * s) + 1, Math.ceil(64 * s) + 1);
     }
   }
+  if (typeof c7WmExtras === 'function') c7WmExtras(px, pz, s, W, H, 1);   // the map-function icons
   if (wmZoom >= 2) {
     wmCtx.font = 'bold ' + Math.round(clamp(9 + wmZoom * 0.4, 10, 16)) + 'px system-ui, sans-serif';
     wmCtx.textAlign = 'center'; wmCtx.textBaseline = 'middle';
@@ -12025,6 +12047,7 @@ function m7Ready() {
     MAP07.init({ scene, fogCenter, hooks: { classify: m7Classify, onRegion: m7OnRegion, onUnload: m7OnUnload, onSquare: () => { wmDirty = 1; } } });
     MAP07.setBrightness(OPT.brightness);
   }
+  if (typeof c7Warm === 'function') c7Warm();
   return MAP07.load();
 }
 function m7Mode(on) {
@@ -12283,6 +12306,7 @@ function osMapTiles() {   // the picture under the minimap: 80 tiles square roun
     }
   }
   g.putImageData(im, 0, 0);
+  if (typeof c7MapScenes === 'function') c7MapScenes(g, x0, yTop, N);   // the trees, rocks and fences the client draws on its minimap
   S.tx = P.tx; S.tz = P.tz; S.pl = P.plane; S.x0 = x0; S.yTop = yTop;
 }
 function osMapFrame() {
@@ -12309,6 +12333,7 @@ function osMapFrame() {
     const dx = (marker.position.x - P.rx) * 4, dz = (marker.position.z - P.rz) * 4;
     if (dx * dx + dz * dz < 11000) g.drawImage(S.img.flag, 0, 0, 15, 30, Math.round(72 + dx * cs - dz * sn) - 1, Math.round(75 + dx * sn + dz * cs) - 15, 15, 30);
   }
+  if (typeof c7MapIcons === 'function') c7MapIcons(g, cs, sn);   // bank, shop, altar...: the map-function icons, upright
   g.globalCompositeOperation = 'destination-in';
   g.drawImage(S.maskM, 0, 0);
   g.globalCompositeOperation = 'source-over';
@@ -13211,7 +13236,7 @@ function osEmotes() {
       const g = osSpr(list, open ? spr[k] : locked[k], x, y, 48, 48);
       g.title = names[k];
       g.classList.add('osHit');
-      on(g, 'click', () => say(open ? 'You can\'t perform emotes in this world yet.' : 'You haven\'t unlocked this emote yet.'));
+      on(g, 'click', () => open && typeof c7Emote === 'function' ? c7Emote(k, names[k]) : say(open ? 'You can\'t perform emotes in this world yet.' : 'You haven\'t unlocked this emote yet.'));
     });
     list.style.height = (6 + 49 * Math.ceil(Object.keys(names).length / 4)) + 'px';
   });
@@ -13266,7 +13291,7 @@ function osMusic() {
     const ids = ix && ix[-1] && ix[-1].values[0][0];
     return Promise.all((ids || []).map(id => OSUI.cfg('dbrow', id).then(r => r && [id, r.values])));
   }).then(rows => {
-    const tracks = rows.filter(r => r && r[1] && !(r[1][9] && r[1][9][0])).map(([id, v]) => ({ id, sort: String(v[0] && v[0][0] || ''), n: String(v[1] && v[1][0] || ''), open: !!(v[6] && v[6][0]) || !v[5] }))
+    const tracks = rows.filter(r => r && r[1] && !(r[1][9] && r[1][9][0])).map(([id, v]) => ({ id, sort: String(v[0] && v[0][0] || ''), n: String(v[1] && v[1][0] || ''), open: typeof c7MusicOpen === 'function' && M7 ? c7MusicOpen(String(v[1] && v[1][0] || ''), !!(v[6] && v[6][0]) || !v[5]) : !!(v[6] && v[6][0]) || !v[5] }))
       .sort((a, b) => a.sort.toLowerCase() < b.sort.toLowerCase() ? -1 : a.sort.toLowerCase() > b.sort.toLowerCase() ? 1 : 0);
     const playing = !bgm.paused ? '7th Realm' : '';   // the one track this game plays
     tracks.forEach((t, i) => {

@@ -447,3 +447,13 @@
   body.osui.invmin #modal,body.osui.invmin #tradeWrap{padding-right:0}
   body.osui #xpd{left:auto;right:calc(249px * var(--oss,1) + 8px);top:24px;transform:none;align-items:flex-end}
   body.osui .xp{font-size:12px;color:#fff;text-shadow:1px 1px 0 #000}
+  /* Gielinor dialogue (content07.js): over the chat log with the game's own panels; the 2007 frame draws its own */
+  .c7html{position:absolute;inset:0;z-index:4;display:flex;align-items:center;padding:6px 10px;box-sizing:border-box;color:#f4ead0;pointer-events:auto}
+  .c7row{display:flex;align-items:center;gap:10px;width:100%}.c7row.r{flex-direction:row-reverse}
+  .c7head{width:64px;height:64px;flex:none;image-rendering:pixelated}
+  .c7txt{flex:1;text-align:center;font-size:13px;line-height:1.35}.c7txt b{display:block;color:#ffb347}.c7txt p{margin:3px 0 5px}
+  .c7go{color:#7fb6ff;cursor:pointer;font-weight:700}.c7go:hover{color:#fff}
+  .c7opts{width:100%;text-align:center;font-size:13px}.c7opts b{display:block;color:#ffb347;margin-bottom:4px}.c7opts a{display:block;cursor:pointer;padding:1px}.c7opts a:hover{color:#fff;background:rgba(255,255,255,.08)}
+  .qlist{font-size:12px;line-height:1.45}.qlist .qh{color:#ffb347;font-weight:700;margin:6px 0 2px}.qlist a{display:block;cursor:pointer}.qlist a.q0{color:#ff3b30}.qlist a.q1{color:#ffe14a}.qlist a.q2{color:#3fd05a}.qlist a:hover{text-decoration:underline}
+  .q7os{color:#ff981f;font:12px/1.4 system-ui,sans-serif;padding:4px 8px;box-sizing:border-box;overflow-y:auto;text-shadow:1px 1px 0 #000}.q7os .qlist a.q0{color:#ff0000}.q7os .qlist a.q1{color:#ffff00}.q7os .qlist a.q2{color:#00ff00}
+  .q7world{cursor:pointer;text-align:center;margin:8px 0 2px;text-decoration:underline}

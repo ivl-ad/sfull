@@ -419,9 +419,10 @@ function grow(ud, x, y, z) {
 /* t: {cx, cz, gy (tiles, up), rot, extra45, mirror, sx, sh, sy, ox, oh, oy, recol, retex}
    + for a placed loc {r, plane, base (raw height), px, py (its middle, cache units), contour (the def's contouredGround)} */
 let vX = new Float64Array(4096), vY = new Float64Array(4096), vZ = new Float64Array(4096);
-function appendModel(sink, m, t, flat) {
+/* a model's vertices (src: its own, or an animated pose of them) turned, scaled and contoured into place: world tiles in vB */
+function placeVerts(m, t, v) {
   const sx = t.sx || 1, sh = t.sh || 1, sy = t.sy || 1, rot = t.rot || 0, S = Math.SQRT1_2;
-  const v = m.verts, n = m.vc;
+  const n = m.vc;
   if (vX.length < n) { vX = new Float64Array(n); vY = new Float64Array(n); vZ = new Float64Array(n); }
   let minY = 0, minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
   for (let i = 0; i < n; i++) {
@@ -439,6 +440,11 @@ function appendModel(sink, m, t, flat) {
   if (vB.length < n * 3) vB = new Float32Array(n * 3);
   const out = vB;
   for (let i = 0; i < n; i++) { out[i * 3] = t.cx + vX[i] * U; out[i * 3 + 1] = t.gy - vY[i] * U; out[i * 3 + 2] = t.cz - vZ[i] * U; }
+  return out;
+}
+function appendModel(sink, m, t, flat) {
+  if (sink.rec) { sink.rec.push(m, t); return; }   /* an animated placement: its pieces are kept to be posed (animFlush) */
+  const out = placeVerts(m, t, m.verts);
   /* the client's mirror flips z and swaps each face's first and third vertex, so a mirrored face keeps its facing and its
      texture triangle starts from the swapped corner */
   const idx = m.idx, ud = sink.ud, i0 = t.mirror ? 2 : 0, i2 = 2 - i0;
@@ -495,17 +501,17 @@ function bakeT(pos, col) {   /* rgba vertex colours: three r128 blends by vertex
   return new THREE.Mesh(g, matFlatT);
 }
 /* bake a sink into meshes (one flat + one per texture) under group g; every owner learns its triangle ranges */
+function ownTris(mesh, owners) {   /* each owner learns the triangle runs it holds in a mesh, for picking */
+  mesh.userData.owners = owners;
+  for (let i = 0; i < owners.length;) {
+    const ud = owners[i]; let j = i + 1;
+    while (j < owners.length && owners[j] === ud) j++;
+    if (ud) ud.tris.push(mesh, i, j);
+    i = j;
+  }
+}
 function flushSink(s, g) {
-  const made = [];
-  const own = (mesh, owners) => {
-    mesh.userData.owners = owners;
-    for (let i = 0; i < owners.length;) {
-      const ud = owners[i]; let j = i + 1;
-      while (j < owners.length && owners[j] === ud) j++;
-      if (ud) ud.tris.push(mesh, i, j);
-      i = j;
-    }
-  };
+  const made = [], own = ownTris;
   if (s.pos.length) { const m = bake(s.pos, s.col); own(m, s.owners); made.push(m); }
   const textured = (b, mat) => {
     const geo = new THREE.BufferGeometry();
@@ -521,6 +527,101 @@ function flushSink(s, g) {
   for (const [tid, b] of s.ttex) textured(b, texMaterialT(tid));
   for (const m of made) g.add(m);
   return made;
+}
+/* ---- animated scenery: a placement whose def animates (a fire, a torch's flame, a flag, a water wheel) is laid in its square's
+   animated batch — one opaque and one see-through mesh a plane, rest pose first. Within ANIM_R tiles of the player its seq
+   plays: a piece is re-posed only when its frame changes, written back into the batch in place, and the batch uploads once
+   that frame. Everything farther holds its pose, so a square full of flames costs nothing until you walk up to it. ---- */
+const ANIM_R = 26;
+function animFlush(list, g) {
+  flatMats();
+  const pieces = [];
+  let nO = 0, nT = 0;
+  for (const it of list) for (let k = 0; k < it.rec.length; k += 2) {
+    const m = it.rec[k], t = it.rec[k + 1], fo = [], ft = [];
+    for (let f = 0; f < m.fc; f++) if (!faceHidden(m, f)) (m.alphas && m.alphas[f] ? ft : fo).push(f);
+    pieces.push({ m, t, ud: it.ud, seq: it.seq, ph: it.ph, fo, ft, o: nO, to: nT, idx: -2, total: 0, work: null,
+      groups: m.vgroups ? labelGroups(m.vgroups, m.vc) : null, x: t.cx, y: -t.cz });
+    nO += fo.length; nT += ft.length;
+  }
+  const batch = (n, stride, mat) => {
+    if (!n) return null;
+    const B = { pos: new Float32Array(n * 9), nrm: new Float32Array(n * 9), col: new Float32Array(n * 3 * stride), owners: new Array(n), mesh: null };
+    B.stride = stride; B.mat = mat;
+    return B;
+  };
+  const O = batch(nO, 3, matFlat), T = batch(nT, 4, matFlatT);
+  for (const pc of pieces) {
+    const { m, t } = pc;
+    for (const [B, list, base] of [[O, pc.fo, pc.o], [T, pc.ft, pc.to]]) {
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i], c = faceColor(m, f, t.recol, t.retex), o = (base + i) * 3 * B.stride;
+        for (let k = 0; k < 3; k++) { const q = o + k * B.stride; B.col[q] = c[0]; B.col[q + 1] = c[1]; B.col[q + 2] = c[2]; if (B.stride === 4) B.col[q + 3] = 1 - m.alphas[f] / 255; }
+        B.owners[base + i] = pc.ud;
+      }
+    }
+    writeAnim(pc, O, T, m.verts, true);
+  }
+  for (const B of [O, T]) {
+    if (!B) continue;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(B.pos, 3).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('normal', new THREE.BufferAttribute(B.nrm, 3).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('color', new THREE.BufferAttribute(B.col, B.stride));
+    geo.computeBoundingSphere();
+    geo.boundingSphere.radius += 3;   // a flame or a flag moves a little past its rest pose
+    B.mesh = new THREE.Mesh(geo, B.mat);
+    ownTris(B.mesh, B.owners);
+    g.add(B.mesh);
+  }
+  return { pieces, O, T };
+}
+function writeAnim(pc, O, T, src, rest) {
+  const out = placeVerts(pc.m, pc.t, src), idx = pc.m.idx, i0 = pc.t.mirror ? 2 : 0, i2 = 2 - i0, ud = rest ? pc.ud : null;
+  for (const [B, list, base] of [[O, pc.fo, pc.o], [T, pc.ft, pc.to]]) {
+    if (!list.length) continue;
+    const P = B.pos, N = B.nrm;
+    for (let i = 0; i < list.length; i++) {
+      const f = list[i], a = idx[f * 3 + i0] * 3, b = idx[f * 3 + 1] * 3, c = idx[f * 3 + i2] * 3, o = (base + i) * 9;
+      const ax = out[a], ay = out[a + 1], az = out[a + 2], bx = out[b], by = out[b + 1], bz = out[b + 2], cx = out[c], cy = out[c + 1], cz = out[c + 2];
+      P[o] = ax; P[o + 1] = ay; P[o + 2] = az; P[o + 3] = bx; P[o + 4] = by; P[o + 5] = bz; P[o + 6] = cx; P[o + 7] = cy; P[o + 8] = cz;
+      const ux = bx - ax, uy = by - ay, uz = bz - az, vx = cx - ax, vy = cy - ay, vz = cz - az;
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const L = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+      nx /= L; ny /= L; nz /= L;
+      for (let k = 0; k < 9; k += 3) { N[o + k] = nx; N[o + k + 1] = ny; N[o + k + 2] = nz; }
+      if (ud) { grow(ud, ax, ay, az); grow(ud, bx, by, bz); grow(ud, cx, cy, cz); }
+    }
+  }
+}
+let animClock = 0;
+function animateScenery(gx, gy, dtMs) {   /* the player's OSRS tile; call once a frame */
+  animClock += dtMs;
+  for (const R of regions.values()) {
+    const A = R.anim;
+    if (!A || gx < R.sqX * 64 - ANIM_R || gx > R.sqX * 64 + 63 + ANIM_R || gy < R.sqY * 64 - ANIM_R || gy > R.sqY * 64 + 63 + ANIM_R) continue;
+    for (let p = 0; p < 4; p++) {
+      const B = A[p];
+      if (!B || !planeG[p].visible) continue;
+      let dO = 0, dT = 0;
+      for (const pc of B.pieces) {
+        if (!pc.groups || Math.abs(pc.x - gx) > ANIM_R || Math.abs(pc.y - gy) > ANIM_R) continue;
+        const fr = seqFrames(pc.seq);
+        if (!fr || !fr.length) continue;
+        if (!pc.total) { for (const f of fr) pc.total += f.ms; if (!pc.total) pc.total = 1; }
+        const idx = frameAt(fr, (animClock + pc.ph) % pc.total);
+        if (idx === pc.idx) continue;
+        pc.idx = idx;
+        if (!pc.work) pc.work = new Int32Array(pc.m.vc * 3);
+        pc.work.set(pc.m.verts);
+        transformVerts(pc.work, pc.groups, fr[idx]);
+        writeAnim(pc, B.O, B.T, pc.work, false);
+        if (pc.fo.length) dO = 1;
+        if (pc.ft.length) dT = 1;
+      }
+      for (const [on, X] of [[dO, B.O], [dT, B.T]]) if (on && X) { X.mesh.geometry.attributes.position.needsUpdate = true; X.mesh.geometry.attributes.normal.needsUpdate = true; }
+    }
+  }
 }
 function disposeMesh(m) {
   if (m.parent) m.parent.remove(m);
@@ -750,11 +851,24 @@ function newOwner(R, pl, def, id, w, l) {
 
 /* ---- openable locs: pairs from doors.json; a toggled placement survives a region reload ---- */
 const locOverrides = new Map();
+/* a leaf with no second state in the cache (doors.json "self") swings its own model: its other state is this id plus SELF_DOOR,
+   the same def with the verb turned */
+const SELF_DOOR = 1 << 22;
+function mirrorDoor(dd, id) {
+  const base = dd[id - SELF_DOOR];
+  if (!base || dd[id]) return;
+  const ops = {};
+  for (const [k, o] of Object.entries(base.ops || {})) {
+    const t = o && o.text ? clean(o.text).toLowerCase() : '';
+    ops[k] = t === 'open' ? Object.assign({}, o, { text: 'Close' }) : t === 'close' || t === 'shut' ? Object.assign({}, o, { text: 'Open' }) : o;
+  }
+  dd[id] = Object.assign({}, base, { ops });
+}
 const DOOR_DIR = [[-1, 0], [0, 1], [1, 0], [0, -1]];   /* wall rot 0 west edge, 1 north, 2 east, 3 south */
 function toggledPlacement(pl) {
   const pair = doorPairs.get(pl.id);
   if (pl.type > 3) return Object.assign({}, pl, { id: pair.other });   /* objects and trapdoors swap in place */
-  const dr = pair.conv[1] === '+' ? 1 : -1, adj = pair.conv[0] === 'a';
+  const dr = (pair.conv[1] === '+' ? 1 : -1) * (pl.flip ? -1 : 1), adj = pair.conv[0] === 'a';
   if (pair.closed) { const d = adj ? DOOR_DIR[pl.rot] : [0, 0]; return Object.assign({}, pl, { id: pair.other, gx: pl.gx + d[0], gy: pl.gy + d[1], rot: (pl.rot + dr + 4) & 3 }); }
   const rr = (pl.rot - dr + 4) & 3, d = adj ? DOOR_DIR[rr] : [0, 0];
   return Object.assign({}, pl, { id: pair.other, gx: pl.gx - d[0], gy: pl.gy - d[1], rot: rr });
@@ -800,7 +914,7 @@ function spentLook(def, pl, spec, g) {
    then it collides solid: regionAt answers only a ready square); its models come last, laid a few milliseconds a frame, one square
    at a time. A square that fails for a passing reason is dropped and asked for again after a growing rest. */
 function newRegion(rid) {
-  return { rid, sqX: rid >> 8, sqY: rid & 255, ready: 0, terr: [null, null, null, null], groups: [], owners: [], objs: [], ext: [], solid: new Uint8Array(16384),
+  return { rid, sqX: rid >> 8, sqY: rid & 255, ready: 0, terr: [null, null, null, null], groups: [], owners: [], objs: [], ext: [], icons: [], scenes: [], anim: null, solid: new Uint8Array(16384),
     clip: new Int32Array(16384), walls: new Uint8Array(16384), box: new THREE.Box3(), pins: null };
 }
 const retryAt = new Map(), tries = new Map();
@@ -870,7 +984,7 @@ async function defsStage(R) {
   /* defs: every placed id, both states of every door, varbit children; the spawns' too, so game.js can name and type a monster the
      moment the square is up (their models and frames are fetched per figure, when one stands near enough to be drawn) */
   const ids = new Set(placed.map(p => p.id));
-  for (const p of placed) { const pr = doorPairs.get(p.id); if (pr) ids.add(pr.other); }
+  for (const p of placed) { const pr = doorPairs.get(p.id); if (pr && pr.other < SELF_DOOR) ids.add(pr.other); }
   const spawnList = spawnsByRegion.get(rid) || [], npcIds = new Set();
   for (const s of spawnList) { npcIds.add(s.id); if (s.as !== undefined) npcIds.add(s.as); }
   const [dd, nd] = await Promise.all([defs('loc', ids), npcIds.size ? defs('npc', npcIds) : {}]);
@@ -878,6 +992,10 @@ async function defsStage(R) {
   for (const i of ids) { const d = dd[i]; if (d && !d.models) { const c = defaultChild(d); if (c >= 0) kids.add(c); } }
   for (const s of spawnList) { const d = nd[s.id]; if (d && !d.models) { const c = defaultChild(d); if (c >= 0) nkids.add(c); } }
   await Promise.all([kids.size ? defs('loc', kids).then(k => { Object.assign(dd, k); }) : 0, nkids.size ? defs('npc', nkids) : 0]);
+  const more = [];   /* a multiloc's door child brings its other state; a self-swinging leaf, its mirror */
+  for (const i of kids) { const pr = doorPairs.get(i); if (pr && pr.other < SELF_DOOR && !dd[pr.other]) more.push(pr.other); }
+  if (more.length) Object.assign(dd, await defs('loc', more));
+  for (const i of [...ids, ...kids]) { const pr = doorPairs.get(i); if (pr && pr.other >= SELF_DOOR) mirrorDoor(dd, pr.other); }
   if (regions.get(rid) !== R) return false;
   R.locDefs = dd; R.mids = new Set(); R.work = [];
   for (const i of [...ids, ...kids]) for (const m of ((dd[i] && dd[i].models) || [])) R.mids.add(m.model);
@@ -896,11 +1014,17 @@ async function defsStage(R) {
       if (r2 && r2.solid) r2.solid[rp * 4096 + ((gx + dx) & 63) * 64 + ((gy + dy) & 63)] = 1;
     }
     clipLoc(R, def, p.id, pl, w, l);
+    /* the minimap's pictures: a map-function icon (bank, shop, altar) and the small scene sprite (a tree, a rock) */
+    const base = dd[p.id] || def, icon = base.mapIconId !== undefined ? base.mapIconId : def.mapIconId, scene = base.mapSceneId !== undefined ? base.mapSceneId : def.mapSceneId;
+    if (icon !== undefined) R.icons.push(gx, gy, rp, icon);
+    if (scene !== undefined) R.scenes.push(gx, gy, rp, scene, w, l);
     if ((p.type === 0 || p.type === 2) && clipPlane(p.plane, gx, gy) >= 0) {   /* minimap walls: bit per edge (W N E S), doors marked; none for what stands under a deck */
       const e = p.type === 2 ? (1 << p.rot) | (1 << ((p.rot + 1) & 3)) : 1 << p.rot, i = rp * 4096 + p.x * 64 + p.y;
       R.walls[i] |= e | (openable(def, p.id) ? 16 : 0);
     }
-    if (doorPairs.has(p.id)) { R.work.push({ pl, door: 1 }); continue; }
+    const kid = dd[p.id] && !dd[p.id].models ? defaultChild(dd[p.id]) : -1;
+    if (kid >= 0 && doorPairs.has(kid)) { pl.src = p.id; pl.id = kid; }   // a toll gate or a quest's trapdoor: the child it shows is the door
+    if (doorPairs.has(pl.id)) { R.work.push({ pl, door: 1 }); continue; }
     /* only a piece with a menu is pickable, and every kind game.js can put to work has one (Chop down, Mine, Bank...); a recorded
        link lends a menu to a piece the map shows without one */
     const linked = !def.ops && transByLoc[p.id] && transByLoc[p.id].some(t => t.lx === gx && t.ly === gy && t.lp === p.plane);
@@ -913,7 +1037,8 @@ async function defsStage(R) {
       R.work.push({ pl, def, ud, spec, dyn: 1 }); R.owners.push(ud); R.objs.push(ud);
       continue;
     }
-    R.work.push({ pl, def, ud, rp });
+    const anim = def.animationId >= 0 ? def.animationId : base.animationId >= 0 ? base.animationId : -1;
+    R.work.push(anim >= 0 ? { pl, def, ud, rp, seq: anim, ph: def.randomizeAnimationStart || base.randomizeAnimationStart ? (gx * 7919 + gy * 104729) % 100000 : 0 } : { pl, def, ud, rp });
     if (ud) { R.owners.push(ud); if (spec) R.objs.push(ud); }
   }
   R.placed = null;
@@ -949,11 +1074,17 @@ async function sceneryStage(R) {
   } finally { scenic--; unpin(R.mids); }
 }
 async function buildScenery(R) {
-  const rid = R.rid, gone = () => regions.get(rid) !== R, sinks = [0, 1, 2, 3].map(() => makeSink()), later = [];
+  const rid = R.rid, gone = () => regions.get(rid) !== R, sinks = [0, 1, 2, 3].map(() => makeSink()), later = [], anims = [[], [], [], []];
   await breathe();
   if (gone()) return;
   for (const q of R.work) {
     if (q.door || q.dyn) { later.push(q); continue; }
+    if (q.seq !== undefined) {   /* an animated piece keeps its models and transforms, to be posed later */
+      const rec = { rec: [], ud: null };
+      drawLoc(rec, q.def, q.pl, q.ud, false);
+      if (rec.rec.length) anims[q.rp].push({ rec: rec.rec, ud: q.ud, seq: q.seq, ph: q.ph });
+      continue;
+    }
     drawLoc(sinks[q.rp], q.def, q.pl, q.ud, false);
     if (overBudget()) { await breathe(); if (gone()) return; }
   }
@@ -961,6 +1092,7 @@ async function buildScenery(R) {
     const g = new THREE.Group();
     planeG[p].add(g); R.groups.push(g);
     flushSink(sinks[p], g);
+    if (anims[p].length) { R.anim = R.anim || []; R.anim[p] = animFlush(anims[p], g); }
     if (overBudget()) { await breathe(); if (gone()) return; }
   }
   for (const q of later) {
@@ -982,18 +1114,25 @@ function applyExt(src, only) {
 function spawnDoor(R, key, orig, pl) {
   const def = resolveDef(R.locDefs, pl.id);
   if (!def || !def.models) return;
-  const [w, l] = footprint(def, pl.rot), ud = newOwner(R, pl, def, pl.id, w, l);
+  const lid = orig.src !== undefined ? orig.src : pl.id >= SELF_DOOR ? pl.id - SELF_DOOR : pl.id;   // the id its links are recorded under (a multiloc's, in either state)
+  const [w, l] = footprint(def, pl.rot), ud = newOwner(R, pl, def, lid, w, l);
   ud.door = { key, orig, pl };
   dynamic(R, def, pl, ud, null);
   R.owners.push(ud); R.groups.push(ud.dyn);
 }
-function toggleDoor(ud) {
-  const R = ud.R, { key, orig, pl } = ud.door;
+function toggleDoor(ud, mate) {
+  const R = ud.R, { key, orig } = ud.door;
+  let pl = ud.door.pl;
   if (ud.dead) return;
   ud.dead = 1;
   const oi = R.owners.indexOf(ud); if (oi >= 0) R.owners.splice(oi, 1);
   const gi = R.groups.indexOf(ud.dyn); if (gi >= 0) R.groups.splice(gi, 1);
   disposeMesh(ud.dyn);
+  const pair = doorPairs.get(pl.id);
+  if (mate && pair.closed && pair.other >= SELF_DOOR) {   /* a double door of one model: each leaf swings away from the other, not into the gap */
+    const d = DOOR_DIR[(pl.rot + 1) & 3], m = mate.door.pl;
+    pl = Object.assign({}, pl, { flip: m.gx === pl.gx + d[0] && m.gy === pl.gy + d[1] ? 1 : 0 });
+  }
   const next = toggledPlacement(pl), home = next.id === orig.id && next.gx === orig.gx && next.gy === orig.gy && next.rot === orig.rot;
   if (home) locOverrides.delete(key); else locOverrides.set(key, next);
   spawnDoor(R, key, orig, next);
@@ -1108,6 +1247,57 @@ function climbTarget(ud, op, plane) {   /* a ladder or staircase the transport t
 /* ---- animated figures (npcs): the part models merged, classic frame archives applied, translucent faces apart ---- */
 const SINE = new Int32Array(2048), COSINE = new Int32Array(2048);
 for (let i = 0; i < 2048; i++) { SINE[i] = (65536 * Math.sin(i * Math.PI / 1024)) | 0; COSINE[i] = (65536 * Math.cos(i * Math.PI / 1024)) | 0; }
+const frameAt = (frames, t) => { let acc = 0; for (let i = 0; i < frames.length; i++) { acc += frames[i].ms; if (t < acc) return i; } return frames.length - 1; };
+/* the client's Model.transform group operations on x, y, z triples in cache units: groups maps a vertex label to its vertex
+   indices. Shared by the figures, the animated scenery, the spot animations and the player's own 2007 kit (osrs.js). */
+function transformVerts(w, groups, frame) {
+  const { bases, ds } = frame.tr, fm = frame.fm;
+  let ox = 0, oy = 0, oz = 0;
+  for (let ti = 0; ti < bases.length; ti++) {
+    const base = bases[ti];
+    if (base >= fm.types.length) continue;
+    const type = fm.types[base], labels = fm.labels[base], dx = ds[ti * 3], dy = ds[ti * 3 + 1], dz = ds[ti * 3 + 2];
+    if (type === 0) {
+      let sx = 0, sy = 0, sz = 0, n = 0;
+      for (const lb of labels) { const g = groups.get(lb); if (g) for (const vi of g) { sx += w[vi * 3]; sy += w[vi * 3 + 1]; sz += w[vi * 3 + 2]; n++; } }
+      if (n) { ox = ((sx / n) | 0) + dx; oy = ((sy / n) | 0) + dy; oz = ((sz / n) | 0) + dz; } else { ox = dx; oy = dy; oz = dz; }
+    } else if (type === 1) {
+      for (const lb of labels) { const g = groups.get(lb); if (g) for (const vi of g) { w[vi * 3] += dx; w[vi * 3 + 1] += dy; w[vi * 3 + 2] += dz; } }
+    } else if (type === 2) {
+      const ax = (dx << 3) & 2047, ay = (dy << 3) & 2047, az = (dz << 3) & 2047;
+      for (const lb of labels) {
+        const g = groups.get(lb);
+        if (!g) continue;
+        for (const vi of g) {
+          let x = w[vi * 3] - ox, y = w[vi * 3 + 1] - oy, z = w[vi * 3 + 2] - oz;
+          if (az) { const s = SINE[az], c = COSINE[az], q = (y * s + x * c) >> 16; y = (y * c - x * s) >> 16; x = q; }
+          if (ax) { const s = SINE[ax], c = COSINE[ax], q = (y * c - z * s) >> 16; z = (y * s + z * c) >> 16; y = q; }
+          if (ay) { const s = SINE[ay], c = COSINE[ay], q = (z * s + x * c) >> 16; z = (z * c - x * s) >> 16; x = q; }
+          w[vi * 3] = x + ox; w[vi * 3 + 1] = y + oy; w[vi * 3 + 2] = z + oz;
+        }
+      }
+    } else if (type === 3) {
+      for (const lb of labels) {
+        const g = groups.get(lb);
+        if (g) for (const vi of g) { w[vi * 3] = ox + (((w[vi * 3] - ox) * dx) >> 7); w[vi * 3 + 1] = oy + (((w[vi * 3 + 1] - oy) * dy) >> 7); w[vi * 3 + 2] = oz + (((w[vi * 3 + 2] - oz) * dz) >> 7); }
+      }
+    }   /* type 5 = alpha, ignored */
+  }
+}
+/* a vertex label -> its vertex indices, for transformVerts (255 marks a vertex no label moves) */
+function labelGroups(labels, n) {
+  const groups = new Map();
+  for (let i = 0; i < n; i++) { const l = labels[i]; if (l === 255) continue; let a = groups.get(l); if (!a) groups.set(l, a = []); a.push(i); }
+  return groups;
+}
+/* a seq's playable frames, loading them on first ask: the frames, or null while loading (and for a seq with none) */
+function seqFrames(id) {
+  if (!(id >= 0)) return null;
+  if (seqs.has(id)) return seqs.get(id);
+  if (!seqWant.has(id)) { seqWant.add(id); loadSeqs([id]).catch(() => {}).then(() => seqWant.delete(id)); }
+  return null;
+}
+const seqWant = new Set();
 function mergeAnim(parts) {
   let vc = 0;
   for (const p of parts) vc += p.model.vc;
@@ -1154,57 +1344,26 @@ class Entity {
     this.mesh.geometry.computeBoundingBox();
     this.height = Math.max(0.5, this.mesh.geometry.boundingBox.max.y);
   }
-  play(frames) {
-    if (frames === this.frames) return;
-    this.frames = frames; this.t = 0; this.idx = -1; this.total = 0;
+  play(frames, once) {   /* once: run the seq a single time and hold its last frame (an attack, a death), done when it ends */
+    if (frames === this.frames && !once) return;
+    this.frames = frames; this.t = 0; this.idx = -1; this.total = 0; this.once = !!once; this.done = false;
     if (frames) for (const f of frames) this.total += f.ms; else this.writePose(this.mg.verts);
   }
   update(dtMs, lod) {   /* lod 0: pose and relight; 1: pose on the old normals (the eye cannot tell at range); 2: hold the pose */
     if (!this.frames || !this.total) return;
-    this.t = (this.t + dtMs) % this.total;
+    if (this.once) { this.t += dtMs; if (this.t >= this.total) { this.t = this.total - 1; this.done = true; } }
+    else this.t = (this.t + dtMs) % this.total;
     if (lod === 2) return;
-    let acc = 0, idx = 0;
-    for (let i = 0; i < this.frames.length; i++) { acc += this.frames[i].ms; if (this.t < acc) { idx = i; break; } }
+    const idx = frameAt(this.frames, this.t);
     if (idx === this.idx) return;
     this.idx = idx;
     this.lite = lod === 1;
     this.apply(this.frames[idx]);
   }
   apply(frame) {   /* the client's Model.transform group operations */
-    const w = this.work, mg = this.mg, { bases, ds } = frame.tr, fm = frame.fm;
-    w.set(mg.verts);
-    let ox = 0, oy = 0, oz = 0;
-    for (let ti = 0; ti < bases.length; ti++) {
-      const base = bases[ti];
-      if (base >= fm.types.length) continue;
-      const type = fm.types[base], labels = fm.labels[base], dx = ds[ti * 3], dy = ds[ti * 3 + 1], dz = ds[ti * 3 + 2];
-      if (type === 0) {
-        let sx = 0, sy = 0, sz = 0, n = 0;
-        for (const lb of labels) { const g = mg.groups.get(lb); if (g) for (const vi of g) { sx += w[vi * 3]; sy += w[vi * 3 + 1]; sz += w[vi * 3 + 2]; n++; } }
-        if (n) { ox = ((sx / n) | 0) + dx; oy = ((sy / n) | 0) + dy; oz = ((sz / n) | 0) + dz; } else { ox = dx; oy = dy; oz = dz; }
-      } else if (type === 1) {
-        for (const lb of labels) { const g = mg.groups.get(lb); if (g) for (const vi of g) { w[vi * 3] += dx; w[vi * 3 + 1] += dy; w[vi * 3 + 2] += dz; } }
-      } else if (type === 2) {
-        const ax = (dx << 3) & 2047, ay = (dy << 3) & 2047, az = (dz << 3) & 2047;
-        for (const lb of labels) {
-          const g = mg.groups.get(lb);
-          if (!g) continue;
-          for (const vi of g) {
-            let x = w[vi * 3] - ox, y = w[vi * 3 + 1] - oy, z = w[vi * 3 + 2] - oz;
-            if (az) { const s = SINE[az], c = COSINE[az], q = (y * s + x * c) >> 16; y = (y * c - x * s) >> 16; x = q; }
-            if (ax) { const s = SINE[ax], c = COSINE[ax], q = (y * c - z * s) >> 16; z = (y * s + z * c) >> 16; y = q; }
-            if (ay) { const s = SINE[ay], c = COSINE[ay], q = (z * s + x * c) >> 16; z = (z * c - x * s) >> 16; x = q; }
-            w[vi * 3] = x + ox; w[vi * 3 + 1] = y + oy; w[vi * 3 + 2] = z + oz;
-          }
-        }
-      } else if (type === 3) {
-        for (const lb of labels) {
-          const g = mg.groups.get(lb);
-          if (g) for (const vi of g) { w[vi * 3] = ox + (((w[vi * 3] - ox) * dx) >> 7); w[vi * 3 + 1] = oy + (((w[vi * 3 + 1] - oy) * dy) >> 7); w[vi * 3 + 2] = oz + (((w[vi * 3 + 2] - oz) * dz) >> 7); }
-        }
-      }   /* type 5 = alpha, ignored */
-    }
-    this.writePose(w);
+    this.work.set(this.mg.verts);
+    transformVerts(this.work, this.mg.groups, frame);
+    this.writePose(this.work);
   }
   writePose(src) {   /* cache space -> this world's (x, -y, -z), in tiles */
     const [sx, sh, sy] = this.scale;
@@ -1249,9 +1408,61 @@ async function npcFigure(def) {
   ent.play(standF);
   return { ent, mesh: ent.mesh, standF, walkF, still: still || !walkF, height: ent.height, size: def.size || 1 };   // writePose already scaled the mesh by heightScale
 }
+/* an npc's chat head (its def's chatheadModels, recoloured as the body is), for the dialogue box */
+async function headFigure(def) {
+  const ids = def && def.chatheadModels;
+  if (!ids || !ids.length) return null;
+  await models(ids);
+  const { recol, retex } = colorMaps(def), parts = ids.map(m => ({ model: model(m), recol, retex })).filter(p => p.model);
+  return parts.length ? new Entity(mergeAnim(parts), [1, 1, 1]) : null;
+}
 function animate(fig, moving, dtMs, lod) {
+  if (fig.act) {   /* an attack, a flinch or a death plays through once; a death holds its last frame */
+    if (fig.ent.frames !== fig.act.f) fig.ent.play(fig.act.f, true);
+    fig.ent.update(dtMs, lod === 2 ? 1 : lod || 0);
+    if (fig.ent.done && !fig.act.hold) fig.act = null;
+    return;
+  }
   fig.ent.play(moving ? (fig.walkF || fig.standF) : fig.standF);
   fig.ent.update(dtMs, lod || 0);
+}
+/* start a one-off seq on a figure (its frames load on first use: a seq still fetching is skipped, as a blink the eye misses) */
+function figureAct(fig, seq, hold) {
+  const f = seqFrames(seq);
+  if (!fig || !f) return false;
+  if (fig.act && fig.act.hold) return false;   // nothing interrupts a death
+  fig.act = { f, hold: !!hold };
+  fig.ent.play(f, true);
+  return true;
+}
+
+/* ---- spot animations (cfg/spotanim): a spell's cast, flight and splash, an arrow in the air — the model merged once a def,
+   each showing its own small figure that plays the seq through and says when it is done ---- */
+const spotMG = new Map();
+function spotanim(id) {   /* -> Promise<{ent, mesh, total} | null> */
+  let p = spotMG.get(id);
+  if (!p) {
+    p = (async () => {
+      const d = (await defs('spotanim', [id]))[id];
+      if (!d || !(d.modelId >= 0)) return null;
+      await Promise.all([models([d.modelId]), d.animationId >= 0 ? loadSeqs([d.animationId]) : 0]);
+      const m = model(d.modelId);
+      if (!m) return null;
+      const recol = new Map();
+      (d.recolorToFind || []).forEach((c, i) => recol.set(c & 0xffff, d.recolorToReplace[i] & 0xffff));
+      const retex = new Map();
+      (d.textureToFind || []).forEach((c, i) => retex.set(c, d.textureToReplace[i]));
+      return { mg: mergeAnim([{ model: m, recol, retex }]), frames: d.animationId >= 0 ? seqs.get(d.animationId) : null, s: [(d.resizeX || 128) / 128, (d.resizeY || 128) / 128, (d.resizeX || 128) / 128], rot: d.rotation | 0 };
+    })().catch(() => null);
+    spotMG.set(id, p);
+  }
+  return p.then(b => {
+    if (!b) return null;
+    const ent = new Entity(b.mg, b.s);
+    if (b.frames) ent.play(b.frames, true);
+    if (b.rot) ent.mesh.rotation.y = -b.rot * Math.PI / 1024;
+    return { ent, mesh: ent.mesh, total: ent.total || 600 };
+  });
 }
 
 /* ---- ground items: the inventory model lying on its tile, one geometry an item ---- */
@@ -1400,6 +1611,10 @@ function load() {
       doorPairs.set(+cid, { other: oid, conv, closed: true });
       if (!doorPairs.has(oid)) doorPairs.set(oid, { other: +cid, conv, closed: false });
     }
+    for (const [id, closed] of dr.self || []) if (!doorPairs.has(id)) {
+      doorPairs.set(id, { other: id + SELF_DOOR, conv: 'a+1', closed: !!closed });
+      doorPairs.set(id + SELF_DOOR, { other: id, conv: 'a+1', closed: !closed });
+    }
     resolveItem = ri; resolveLoc = rl;
     const stumpIds = (rl['tree stump'] || []).slice(0, 24), sd = await defs('loc', stumpIds);
     stumps = stumpIds.map(id => sd[id]).filter(d => d && d.models && d.models.some(m => m.shape === 10));
@@ -1437,7 +1652,8 @@ return {
   roofedAt: (p, gx, gy) => { const r = regionAt(gx, gy); if (!r) return false; const i = (gx & 63) * 64 + (gy & 63); return !!(r.FL[p * 4096 + i] & 4 || (p < 3 && r.bridge[i] && r.FL[(p + 1) * 4096 + i] & 4)); },   /* the client's under-a-roof tile flag (settings bit 4), not "anything above": an eave or a balcony lifts nothing */
   canMove: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0), los, openTile, flagAt, snapWalkable, wallBetween, F_FULL,
   pick, transport, climbTarget, toggleDoor, doorPartner, doorPairs,
-  npcDefOf, npcFigure, animate, defSync, itemGeo, itemMesh, itemFor, itemNameIds, itemSpawns: () => itemSpawns,
+  npcDefOf, npcFigure, headFigure, animate, figureAct, seqFrames, frameAt, transformVerts, labelGroups, spotanim, animateScenery, defs,
+  defSync, itemGeo, itemMesh, itemFor, itemNameIds, itemSpawns: () => itemSpawns,
   tileRGB, wallBits, worldImage, worldRGB, WORLD_IMG, isLand, squareCanvas, clean, opsOf,
 };
 })();

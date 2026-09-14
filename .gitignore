@@ -25,6 +25,8 @@
 !/osrs.js
 !/map07.js
 !/osui.js
+!/content07.js
+!/content07b.js
 
 # the few files the game still fetches from this folder
 !/assets/

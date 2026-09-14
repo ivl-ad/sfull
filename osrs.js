@@ -282,7 +282,7 @@ function merge(list) {
     if (p.m.textures || p.tex) anyX = true;
     if (p.m.prios) anyP = true;
   }
-  const vx = new Int32Array(vcMax), vy = new Int32Array(vcMax), vz = new Int32Array(vcMax), vb = new Uint8Array(vcMax);
+  const vx = new Int32Array(vcMax), vy = new Int32Array(vcMax), vz = new Int32Array(vcMax), vb = new Uint8Array(vcMax), vl = new Uint8Array(vcMax).fill(255);   /* vl: the cache's own label, for the 2007 frames (pose07) */
   const idx = new Int32Array(fc * 3), colors = new Uint16Array(fc);
   const types = anyT ? new Int8Array(fc) : null, alphas = anyA ? new Int8Array(fc) : null;
   const textures = anyX ? new Uint16Array(fc) : null, prios = anyP ? new Uint8Array(fc) : null;   /* the merged paint order: priority, then merged index */
@@ -297,7 +297,7 @@ function merge(list) {
       if (hit !== undefined) return hit;
       let b = m.vg ? G2B[m.vg[i]] : B_BODY;
       if (pin && isArm(b)) b = pin;
-      vx[vc] = x; vy[vc] = y; vz[vc] = z; vb[vc] = b;
+      vx[vc] = x; vy[vc] = y; vz[vc] = z; vb[vc] = b; if (m.vg) vl[vc] = m.vg[i];
       seen.set(key, vc);
       return vc++;
     };
@@ -313,7 +313,7 @@ function merge(list) {
       idx[f * 3 + 2] = vertex(m.indices[i * 3 + 2]);
     }
   }
-  return { vc, fc, vx, vy, vz, vb, idx, colors, types, alphas, textures, prios };
+  return { vc, fc, vx, vy, vz, vb, vl, idx, colors, types, alphas, textures, prios };
 }
 
 /* ---- lighting (ModelDefinition.computeNormals + toModel) ----------------------------------------------------
@@ -418,6 +418,11 @@ function toGeometry(g, lit, o) {
   geo.addGroup(0, solid.length * 3, 0);
   if (clear.length) geo.addGroup(solid.length * 3, clear.length * 3, 1);
   geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, (lo + hi) / 2, 0), Math.hypot(Math.sqrt(rad), (hi - lo) / 2) + 0.6);
+  if (!o) {   /* a worn build remembers how it was laid, so pose07 can lay it again from an animated copy of its vertices */
+    const up = lifts ? new Int16Array(n * 3) : null;
+    if (up) for (let i = 0; i < n; i++) { const u = lifts.get(draw[i]); if (u) { up[i * 3] = u[0]; up[i * 3 + 1] = u[1]; up[i * 3 + 2] = u[2]; } }
+    geo.userData.a07 = { g, draw: Int32Array.from(draw), up };
+  }
   return geo;
 }
 
@@ -711,6 +716,43 @@ function redress(parts) {
   });
   const w = it('weapon');
   parts.wep.userData.two = w && w.two ? 1 : 0;   // a two-hander is carried in both hands, idle and mid-swing alike
+}
+/* ---- the cache's own animation on a worn rig (Gielinor): a seq frame applied to the merged kit's vertices through map07.js's
+   transform, the five bones held at rest. The build in the cache is shared by every rig wearing that outfit, so a posed rig
+   wears a private copy of its positions; a new dress (redress swaps the geometry) is noticed and copied afresh, and rest07
+   hands the shared build back when the procedural poses take over again. The colours were baked from the rest pose, as the
+   client bakes a player's light once per appearance. ---- */
+function pose07(parts, frame) {
+  const mesh = parts.mesh;
+  if (mesh.geometry !== parts.a07own) {
+    const src = mesh.geometry, a = src.userData && src.userData.a07;
+    if (!a || typeof MAP07 === 'undefined') return false;
+    const own = src.clone();
+    own.userData = src.userData;
+    parts.a07own = own; parts.a07src = src; mesh.geometry = own;
+    parts.a07work = new Int32Array(a.g.vc * 3); parts.a07groups = MAP07.labelGroups(a.g.vl, a.g.vc);
+  }
+  const a = parts.a07own.userData.a07, g = a.g, w = parts.a07work;
+  for (let i = 0; i < g.vc; i++) { w[i * 3] = g.vx[i]; w[i * 3 + 1] = g.vy[i]; w[i * 3 + 2] = g.vz[i]; }
+  if (frame) MAP07.transformVerts(w, parts.a07groups, frame);
+  const pos = parts.a07own.attributes.position.array, d = a.draw, idx = g.idx, up = a.up;
+  for (let i = 0, n = d.length; i < n; i++) {
+    const f = d[i], ux = up ? up[i * 3] : 0, uy = up ? up[i * 3 + 1] : 0, uz = up ? up[i * 3 + 2] : 0;
+    for (let k = 0; k < 3; k++) {
+      const v = idx[f * 3 + k] * 3, p = i * 9 + k * 3;
+      pos[p] = (w[v] + ux) * S; pos[p + 1] = -(w[v + 1] + uy) * S; pos[p + 2] = -(w[v + 2] + uz) * S;
+    }
+  }
+  parts.a07own.attributes.position.needsUpdate = true;
+  for (const b of [parts.torso, parts.armL, parts.armR, parts.legL, parts.legR]) b.rotation.set(0, 0, 0);
+  parts.legL.visible = parts.legR.visible = true;
+  return true;
+}
+function rest07(parts) {
+  if (!parts.a07own) return;
+  if (parts.mesh.geometry === parts.a07own) parts.mesh.geometry = parts.a07src;
+  parts.a07own.dispose();
+  parts.a07own = parts.a07src = parts.a07work = parts.a07groups = null;
 }
 function onItemResolved() {
   if (!dressPending.size) return;
@@ -1588,7 +1630,7 @@ function drainIcons() {
 const itemDef = cid => cfgEntry('item', cid);   /* the cache's own row (examine text and all), fetched with its shard */
 const aliasName = k => { for (const [re, to] of ALIASES) if (re.test(k)) return k.replace(re, to).toLowerCase(); return null; };   /* a seedworld name's cache spelling, where it has one */
 
-const api = { OUT, SITE, faceLifts, cfgShard, resolveJSON, load, rig, dress, brightness, idFor, npcVariants, npcMesh, npcFree, locVariants, locPools, locMesh, locFree, locBatch, icon, iconNow, iconXY: iconXYNow, iconStore: storeReady, itemDef, aliasName, ready: () => loaded };   /* OUT: map07.js reads the tree from the same base */
+const api = { OUT, SITE, faceLifts, pose07, rest07, cfgShard, resolveJSON, load, rig, dress, brightness, idFor, npcVariants, npcMesh, npcFree, locVariants, locPools, locMesh, locFree, locBatch, icon, iconNow, iconXY: iconXYNow, iconStore: storeReady, itemDef, aliasName, ready: () => loaded };   /* OUT: map07.js reads the tree from the same base */
 /* dead in the game (the flag is never set there); the parity self-test sets globalThis.OSRS_TEST to reach the resolvers */
 if (typeof globalThis !== 'undefined' && globalThis.OSRS_TEST) api._t = { nByName, lByName, itemDefs, itemById, resolveItem, resolveNpc, resolveLoc, fetchAtoms, models, npcIndex, locIndex, itemIndex, iconPixels, readModel };
 return api;

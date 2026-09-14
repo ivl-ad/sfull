@@ -98,6 +98,116 @@ function readModel(buf, at) {
   return { vc, fc, verts, indices, colors, textures, types, alphas, vg, prios, ttri, tcoords, ttypes };
 }
 
+/* ---- the painter's order, kept in a depth buffer ------------------------------------------------------------------
+   The client paints a model's faces back to front by render priority, then by index, so a modeller lays detail flat on the
+   face it decorates: a banner's crest on its cloth, a tapestry's border, a notice on its board, a window on its wall, a trim
+   on a shirt. A depth buffer keeps no such order and every coplanar pair fights, stripes crawling across the piece as the
+   camera moves (a quarter of the models round Lumbridge carry one, and a sixth of the player kit). faceLifts(V, I, fc, P,
+   hidden) finds each face painted over a coplanar face it overlaps and the whole-unit step along its own normal that clears
+   it by a cache unit — well past the depth buffer's error anywhere inside the fog, well under what an eye can see — as a
+   Map face -> [dx, dy, dz], or null when nothing fights. V: vertex x, y, z interleaved; I: faces' vertex triples; P: face
+   priorities (null: index order); hidden(f): a face the client never draws. The world's meshes apply it (toGeometry here,
+   map07.js per model); an icon never does, since the sprite renderer paints in the client's own order already. Back-to-back
+   pairs need nothing: faces are culled as the client culls them. */
+const LAYER_TOL = 1, LAYER_LIFT = 1, LIFT_MAX = 6;   /* cache units: two planes this close paint as one; the clearance a layer gets; the most a face is moved */
+const _tri = new Float64Array(12);
+function overlap2(V, I, p, q, u, v) {   /* two triangles projected onto one plane share area (a shared edge is not overlap) */
+  for (let k = 0; k < 3; k++) { const a = I[p * 3 + k] * 3, b = I[q * 3 + k] * 3; _tri[k * 2] = V[a + u]; _tri[k * 2 + 1] = V[a + v]; _tri[6 + k * 2] = V[b + u]; _tri[7 + k * 2] = V[b + v]; }
+  for (let t = 0; t < 12; t += 6) for (let k = 0; k < 3; k++) {
+    const k2 = (k + 1) % 3, nx = _tri[t + k2 * 2 + 1] - _tri[t + k * 2 + 1], ny = _tri[t + k * 2] - _tri[t + k2 * 2];
+    if (!nx && !ny) continue;
+    let amin = Infinity, amax = -Infinity, bmin = Infinity, bmax = -Infinity;
+    for (let s = 0; s < 3; s++) {
+      const pa = _tri[s * 2] * nx + _tri[s * 2 + 1] * ny, pb = _tri[6 + s * 2] * nx + _tri[7 + s * 2] * ny;
+      if (pa < amin) amin = pa; if (pa > amax) amax = pa; if (pb < bmin) bmin = pb; if (pb > bmax) bmax = pb;
+    }
+    const eps = 1e-6 * (Math.abs(nx) + Math.abs(ny));
+    if (amax <= bmin + eps || bmax <= amin + eps) return false;
+  }
+  return true;
+}
+function nearPlane(V, I, pl, p, q) {   /* q's corners reach within LAYER_TOL of p's plane, or straddle it */
+  const o = p * 4, nx = pl[o], ny = pl[o + 1], nz = pl[o + 2], d = pl[o + 3];
+  let lo = Infinity, hi = -Infinity;
+  for (let k = 0; k < 3; k++) { const s = I[q * 3 + k] * 3, h = nx * V[s] + ny * V[s + 1] + nz * V[s + 2] - d; if (h < lo) lo = h; if (h > hi) hi = h; }
+  return lo <= LAYER_TOL && hi >= -LAYER_TOL;
+}
+function faceLifts(V, I, fc, P, hidden) {
+  if (fc < 2) return null;
+  const pl = new Float64Array(fc * 4), groups = new Map();   /* per face: unit normal and plane offset; faces grouped by rough normal */
+  for (let f = 0; f < fc; f++) {
+    if (hidden && hidden(f)) continue;
+    const a = I[f * 3] * 3, b = I[f * 3 + 1] * 3, c = I[f * 3 + 2] * 3;
+    const ux = V[b] - V[a], uy = V[b + 1] - V[a + 1], uz = V[b + 2] - V[a + 2], wx = V[c] - V[a], wy = V[c + 1] - V[a + 1], wz = V[c + 2] - V[a + 2];
+    let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
+    const L = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (!L) continue;
+    nx /= L; ny /= L; nz /= L;
+    const o = f * 4;
+    pl[o] = nx; pl[o + 1] = ny; pl[o + 2] = nz; pl[o + 3] = nx * V[a] + ny * V[a + 1] + nz * V[a + 2];
+    /* half-unit normal buckets; a face within 0.1 of a bucket's edge joins the neighbour too, so every pair that can pass the
+       0.995 test below (components never more than 0.1 apart) meets in at least one group */
+    const kx = nx * 2 + 2.5, ky = ny * 2 + 2.5, kz = nz * 2 + 2.5, bx = Math.floor(kx), by = Math.floor(ky), bz = Math.floor(kz);
+    const x2 = kx - bx < 0.2 ? bx - 1 : kx - bx > 0.8 ? bx + 1 : bx, y2 = ky - by < 0.2 ? by - 1 : ky - by > 0.8 ? by + 1 : by, z2 = kz - bz < 0.2 ? bz - 1 : kz - bz > 0.8 ? bz + 1 : bz;
+    for (const X of x2 === bx ? [bx] : [bx, x2]) for (const Y of y2 === by ? [by] : [by, y2]) for (const Z of z2 === bz ? [bz] : [bz, z2]) {
+      const key = X * 64 + Y * 8 + Z, g = groups.get(key);
+      if (g) g.push(f); else groups.set(key, [f]);
+    }
+  }
+  const ord = f => P ? P[f] * 65536 + f : f;
+  let under = null, lo = null, hi = null;
+  for (const g of groups.values()) {
+    if (g.length < 2) continue;
+    const g0 = g[0] * 4, ax = Math.abs(pl[g0]), ay = Math.abs(pl[g0 + 1]), az = Math.abs(pl[g0 + 2]);
+    const drop = ax >= ay && ax >= az ? 0 : ay >= az ? 1 : 2, u = drop === 0 ? 1 : 0, v = drop === 2 ? 1 : 2;   /* projected along the normal's largest axis */
+    /* sweep and prune on the projection: sorted by left edge, each face meets only those still open when it starts */
+    if (!lo) { lo = new Float64Array(fc); hi = new Float64Array(fc); }
+    for (const f of g) { let a = Infinity, b = -Infinity; for (let k = 0; k < 3; k++) { const x = V[I[f * 3 + k] * 3 + u]; if (x < a) a = x; if (x > b) b = x; } lo[f] = a; hi[f] = b; }
+    g.sort((p, q) => lo[p] - lo[q]);
+    const open = [];
+    for (const q of g) {
+      let w = 0;
+      for (let i = 0; i < open.length; i++) {
+        const p = open[i];
+        if (hi[p] <= lo[q]) continue;   /* closed before q begins: dropped from the sweep */
+        open[w++] = p;
+        const po = p * 4, qo = q * 4;
+        if (pl[po] * pl[qo] + pl[po + 1] * pl[qo + 1] + pl[po + 2] * pl[qo + 2] < 0.995 || !nearPlane(V, I, pl, p, q)) continue;
+        if (!overlap2(V, I, p, q, u, v)) continue;
+        const top = ord(p) > ord(q) ? p : q;
+        if (!under) under = new Map();
+        const list = under.get(top);
+        if (list) list.push(top === p ? q : p); else under.set(top, [top === p ? q : p]);
+      }
+      open.length = w;
+      open.push(q);
+    }
+  }
+  if (!under) return null;
+  /* in paint order, each face rises until all three of its corners clear, by LAYER_LIFT, every face it covers where that face
+     now stands: an exact twin rises one unit, a detail on a detail two, a sliver crossing its base at a slant as far as its far
+     end needs (up to LIFT_MAX, past which a lift would show). The step is whole units, rounded away from the plane. */
+  const lifted = [...under.keys()].sort((a, b) => ord(a) - ord(b)), rise = new Map(), offs = new Map();
+  for (const f of lifted) {
+    const fo = f * 4;
+    let need = 0;
+    for (const b of under.get(f)) {
+      const bo = b * 4, dot = pl[bo] * pl[fo] + pl[bo + 1] * pl[fo + 1] + pl[bo + 2] * pl[fo + 2], top = pl[bo + 3] + (rise.get(b) || 0) + LAYER_LIFT;
+      for (let k = 0; k < 3; k++) {
+        const s = I[f * 3 + k] * 3, h = (top - (pl[bo] * V[s] + pl[bo + 1] * V[s + 1] + pl[bo + 2] * V[s + 2])) / dot;
+        if (h > need) need = h;
+      }
+    }
+    need = Math.min(need, LIFT_MAX);
+    if (need <= 0) continue;
+    const up = c => { const q = c * need; return q > 0 ? Math.ceil(q - 1e-6) : -Math.ceil(-q - 1e-6); };
+    const dx = up(pl[fo]), dy = up(pl[fo + 1]), dz = up(pl[fo + 2]);
+    offs.set(f, [dx, dy, dz]);
+    rise.set(f, pl[fo] * dx + pl[fo + 1] * dy + pl[fo + 2] * dz);
+  }
+  return offs.size ? offs : null;
+}
+
 /* ---- the skeleton ------------------------------------------------------------------------------------------
    The labels are the client's own, read off all 1304 models in the set: 1-3 head and jaw, 4-16 torso, waist and
    cape, 17-21 the -x arm, 22-26 the +x arm, 27/28 the hands, 29-30 + 39-42 the waist ring, 31-34 the -x leg,
@@ -164,17 +274,18 @@ function makePart(m, off, rc, pin) {
    across the seam between, say, the torso kit and the arms kit. The first vertex to claim a coordinate settles
    its bone too, exactly as the client keeps the first skin. ---- */
 function merge(list) {
-  let vcMax = 0, fc = 0, anyT = false, anyA = false, anyX = false;
+  let vcMax = 0, fc = 0, anyT = false, anyA = false, anyX = false, anyP = false;
   for (const p of list) {
     vcMax += p.m.vc; fc += p.m.fc;
     if (p.m.types) anyT = true;
     if (p.m.alphas) anyA = true;
     if (p.m.textures || p.tex) anyX = true;
+    if (p.m.prios) anyP = true;
   }
   const vx = new Int32Array(vcMax), vy = new Int32Array(vcMax), vz = new Int32Array(vcMax), vb = new Uint8Array(vcMax);
   const idx = new Int32Array(fc * 3), colors = new Uint16Array(fc);
   const types = anyT ? new Int8Array(fc) : null, alphas = anyA ? new Int8Array(fc) : null;
-  const textures = anyX ? new Uint16Array(fc) : null;
+  const textures = anyX ? new Uint16Array(fc) : null, prios = anyP ? new Uint8Array(fc) : null;   /* the merged paint order: priority, then merged index */
   const seen = new Map();
   let vc = 0, f = 0;
   for (const p of list) {
@@ -195,13 +306,14 @@ function merge(list) {
       if (types) types[f] = m.types ? m.types[i] : 0;
       if (alphas) alphas[f] = m.alphas ? m.alphas[i] : 0;
       if (textures) textures[f] = mt ? mt[i] : 0;
+      if (prios) prios[f] = m.prios ? m.prios[i] : 0;
       colors[f] = p.colors[i];
       idx[f * 3] = vertex(m.indices[i * 3]);
       idx[f * 3 + 1] = vertex(m.indices[i * 3 + 1]);
       idx[f * 3 + 2] = vertex(m.indices[i * 3 + 2]);
     }
   }
-  return { vc, fc, vx, vy, vz, vb, idx, colors, types, alphas, textures };
+  return { vc, fc, vx, vy, vz, vb, idx, colors, types, alphas, textures, prios };
 }
 
 /* ---- lighting (ModelDefinition.computeNormals + toModel) ----------------------------------------------------
@@ -267,6 +379,11 @@ function toGeometry(g, lit, o) {
     ((g.alphas && (g.alphas[f] & 255)) ? clear : solid).push(f);
   }
   const draw = solid.concat(clear), n = draw.length;
+  /* the painter's order (faceLifts): a face the client paints over a coplanar one is drawn lifted clear of it. Positions only,
+     after the light is baked, so the shading stays the client's to the pixel */
+  const V = new Int32Array(g.vc * 3);
+  for (let i = 0; i < g.vc; i++) { V[i * 3] = g.vx[i]; V[i * 3 + 1] = g.vy[i]; V[i * 3 + 2] = g.vz[i]; }
+  const lifts = faceLifts(V, g.idx, g.fc, g.prios, f => lit.c3[f] === -2);
   const skin = !(o && o.noSkin);   /* scenery is a plain mesh: no bones, so no skin buffers to fill or upload */
   const position = new Float32Array(n * 9), color = new Float32Array(n * 12);
   const si = skin ? new Uint16Array(n * 12) : null, sw = skin ? new Float32Array(n * 12) : null;
@@ -275,9 +392,10 @@ function toGeometry(g, lit, o) {
     const f = draw[i], flat = lit.c3[f] === -1;
     const textured = g.textures ? g.textures[f] > 0 : false, t = textured ? texAvg(g.textures[f] - 1) : 0;
     const opacity = g.alphas ? 1 - (g.alphas[f] & 255) / 256 : 1;
+    const up = lifts && lifts.get(f), ux = up ? up[0] : 0, uy = up ? up[1] : 0, uz = up ? up[2] : 0;
     for (let k = 0; k < 3; k++) {
       const v = g.idx[f * 3 + k], p = i * 9 + k * 3;
-      const px = g.vx[v] * sX, py = -g.vy[v] * sY, pz = -g.vz[v] * sZ;
+      const px = (g.vx[v] + ux) * sX, py = -(g.vy[v] + uy) * sY, pz = -(g.vz[v] + uz) * sZ;
       position[p] = px; position[p + 1] = py; position[p + 2] = pz;
       if (py < lo) lo = py;
       if (py > hi) hi = py;
@@ -1470,7 +1588,7 @@ function drainIcons() {
 const itemDef = cid => cfgEntry('item', cid);   /* the cache's own row (examine text and all), fetched with its shard */
 const aliasName = k => { for (const [re, to] of ALIASES) if (re.test(k)) return k.replace(re, to).toLowerCase(); return null; };   /* a seedworld name's cache spelling, where it has one */
 
-const api = { OUT, SITE, cfgShard, resolveJSON, load, rig, dress, brightness, idFor, npcVariants, npcMesh, npcFree, locVariants, locPools, locMesh, locFree, locBatch, icon, iconNow, iconXY: iconXYNow, iconStore: storeReady, itemDef, aliasName, ready: () => loaded };   /* OUT: map07.js reads the tree from the same base */
+const api = { OUT, SITE, faceLifts, cfgShard, resolveJSON, load, rig, dress, brightness, idFor, npcVariants, npcMesh, npcFree, locVariants, locPools, locMesh, locFree, locBatch, icon, iconNow, iconXY: iconXYNow, iconStore: storeReady, itemDef, aliasName, ready: () => loaded };   /* OUT: map07.js reads the tree from the same base */
 /* dead in the game (the flag is never set there); the parity self-test sets globalThis.OSRS_TEST to reach the resolvers */
 if (typeof globalThis !== 'undefined' && globalThis.OSRS_TEST) api._t = { nByName, lByName, itemDefs, itemById, resolveItem, resolveNpc, resolveLoc, fetchAtoms, models, npcIndex, locIndex, itemIndex, iconPixels, readModel };
 return api;

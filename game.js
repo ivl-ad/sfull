@@ -1298,7 +1298,7 @@ const TASKS = Object.create(null), USE_ON = Object.create(null), onKill = [], ti
 const OPT = { camSpeed: 2.0, viewRadius: 7, fog: 1, timers: 1, xpDrops: 1, roofs: 1, hideRoofs: 0, brightness: 1, runMul: 1, retaliate: 1, stuck: 0, pvpWarn: 1, budget: 0, osrs: 1, osrsDist: 99 };
 /* the 2007 client's own interface (section 48): on while Gielinor plays with "2007 models" on; declared this early because
    applyOpts, which switches it, runs while the options load */
-const OS = { on: 0, ready: 0 };
+const OS = { on: 0, ready: 0, sync: null };   // sync: the 2007 settings panel's refreshers while it is built (48.)
 
 /* ---- 6c. ICONS: glyphs drawn on one 32x32 canvas; the 07 art (item models, cache sprites) made on the device from /out ---- */
 const _iconCache = new Map();
@@ -3763,6 +3763,7 @@ const P = {
   run: 1, energy: 100, hp: 10, maxhp: 10, style: 0, rstyle: 1, cstyle: 0, ammoN: 0, pose: 0, spell: null, prayers: 0, pray: 10, maxpray: 10, foodT: 0, potT: 0, spec: 100, specArm: 0, psn: 0, psnN: 0, psnT: 0, psnImm: 0,
   afloat: 0, moved: 0, dead: 0, stuckT: 0, stun: 0, afire: 0, clue: null, slay: null, farm: Object.create(null), look: { skin: 0, shirt: 0, legs: 0, face: 0 }, home: { x: 0, z: 0 }, regionK: '', regionT: 0,
   plane: 0,   // Gielinor's floor (0-3); every proc world stands on 0
+  via: [], walkFace: 0,   // x, z of each tile stepped through between px/pz and tx/tz this tick (a run is two steps); the facing the walk last set
   turn: player, rig: avatar, boat, oarL, oarR
 };
 let tickN = 0;
@@ -3773,7 +3774,7 @@ const netNow = () => Date.now() + clockOffset;
 const globalTick = () => Math.floor((netNow() - EPOCH) / TICK);
 function placePlayer(x, z) {
   P.tx = P.px = x; P.tz = P.pz = z; P.rx = x; P.rz = z;
-  P.span = 1; P.stuckT = 0;
+  P.via.length = 0; P.span = 1; P.stuckT = 0;
   P.afloat = isWater(walkY(x, z)) ? 1 : 0;
   P.ry = P.afloat ? 0 : walkY(x, z);
   P.path.length = 0; P.goal = null; P.task = null;
@@ -3933,10 +3934,10 @@ TASKS.ditch = (t, o) => {
 };
 const stopWalk = () => { P.path.length = 0; P.goal = null; };
 function walkTick() {
-  if (pvpHold) { P.px = P.tx; P.pz = P.tz; P.span = 1; P.moved = 0; return; }   // anchor stays synced while asked
+  if (pvpHold) { P.px = P.tx; P.pz = P.tz; P.via.length = 0; P.span = 1; P.moved = 0; return; }   // anchor stays synced while asked
   // a stuck step is one tile over five ticks: the anchor stays on the departed tile while stuckT counts up
   if (P.span > 1 && (P.px !== P.tx || P.pz !== P.tz) && P.stuckT < P.span - 1) { P.stuckT++; P.moved = 0; return; }
-  P.px = P.tx; P.pz = P.tz; P.span = 1;
+  P.px = P.tx; P.pz = P.tz; P.via.length = 0; P.span = 1;
   if (P.stun > 0) { P.stun--; P.moved = 0; return; }   // a failed pickpocket leaves you reeling
   if (!P.path.length) { P.moved = 0; chainGoal(); return; }
   const crawl = OPT.stuck && !P.afloat, want = crawl ? 1 : stepsThisTick();
@@ -3946,12 +3947,13 @@ function walkTick() {
     if (!canStep(P.tx, P.tz, n.x, n.z)) { stopWalk(); break; }
     if (OPT.pvpWarn && !pvpAck && wildLvAt(n.x, n.z) && !wildLvAt(P.tx, P.tz)) { askPvp(); break; }   // the border asks once — afloat too: lava has no ditch to dig
     P.path.shift();
+    if (took) P.via.push(P.tx, P.tz);   // the tiles between this tick's two ends: a run round a corner is drawn round it (36.)
     P.tx = n.x; P.tz = n.z; took++;
     if (pvpAck && !wildLvAt(P.tx, P.tz)) pvpAck = 0;
   }
   P.moved = took;
   if (took) {
-    P.faceT = Math.atan2(P.tx - P.px, P.tz - P.pz);
+    P.faceT = P.walkFace = Math.atan2(P.tx - P.px, P.tz - P.pz);
     const wet = isWater(walkY(P.tx, P.tz));
     if (wet && !P.afloat) { say('You climb into your rowboat.'); P.afloat = 1; }
     else if (!wet && P.afloat) { say('You step ashore.'); P.afloat = 0; }
@@ -5534,7 +5536,7 @@ on(window, 'pointerdown', e => { if (skTip.style.display === 'block' && e.target
 const orb = (id, txt, w, onCls) => { const o = el(id); o.querySelector('b').textContent = txt; o.querySelector('.fill').style.width = w + '%'; if (onCls !== undefined) o.classList.toggle('on', onCls); };
 function drawOrbs() {
   dirty.orb = 0;
-  if (OS.on) { if (osPr) osPrayers(); osOrbs(); }   // the 2007 frame's orbs and its prayer book's points strip follow the drain
+  if (OS.on) { if (osPr) osPrayers(); osOrbs(); osSetSync(); }   // the 2007 frame's orbs, its prayer book's points strip and its settings' run box follow the drain
   orb('orbHp', P.hp, P.hp / P.maxhp * 100);
   orb('orbPray', Math.ceil(P.pray), P.pray / Math.max(1, P.maxpray) * 100, !!P.prayers);
   orb('orbRun', Math.round(P.energy), P.energy, !!P.run);
@@ -5780,6 +5782,7 @@ function applyOpts(r) {
   const db = el('devBudget'); if (db) db.classList.toggle('on', !!OPT.budget);
   store.set('seedworld.opt', JSON.stringify(OPT));
   osuiApply();   // Gielinor with the 2007 layer wears the 2007 frame (section 48)
+  osSetSync();
 }
 /* floating combat text, health bars, respawn clocks, xp drops */
 const fxEl = el('fx'), fxPool = [];
@@ -6957,7 +6960,12 @@ function frame(now) {
   if (gt - tickN > 8) tickN = gt - 1;   // slept or backgrounded: snap, never grind
   while (tickN < gt) gameTick();
   const alpha = ((netNow() - EPOCH) % TICK) / TICK, sub = P.span > 1 ? Math.min(1, (P.stuckT + alpha) / P.span) : alpha;
-  P.rx = P.px + (P.tx - P.px) * sub; P.rz = P.pz + (P.tz - P.pz) * sub;
+  if (P.via.length) {   // several steps this tick: each takes an equal share of it along its own leg, so a run round a corner never cuts through the wall
+    const legs = P.via.length / 2 + 1, s = sub * legs, k = Math.min(legs - 1, s | 0), t = s - k;
+    const ax = k ? P.via[k * 2 - 2] : P.px, az = k ? P.via[k * 2 - 1] : P.pz, bx = k < legs - 1 ? P.via[k * 2] : P.tx, bz = k < legs - 1 ? P.via[k * 2 + 1] : P.tz;
+    P.rx = ax + (bx - ax) * t; P.rz = az + (bz - az) * t;
+    if ((bx !== ax || bz !== az) && P.faceT === P.walkFace) P.faceT = P.walkFace = Math.atan2(bx - ax, bz - az);   // and faces the leg it is on, unless something (a target) has turned it since
+  } else { P.rx = P.px + (P.tx - P.px) * sub; P.rz = P.pz + (P.tz - P.pz) * sub; }
   P.ry = P.afloat ? 0 : groundY(P.rx, P.rz);
   player.position.set(P.rx, P.ry, P.rz);
   focus.set(P.rx, P.ry, P.rz);
@@ -7094,7 +7102,7 @@ bgm.loop = true; bgm.preload = 'none';
 const volSaved = store.get('seedworld.vol');
 let vol = volSaved === '' ? 0.5 : clamp(parseFloat(volSaved) || 0, 0, 1), lastVol = vol > 0 ? vol : 0.5;
 function bgmPlay() { if (vol <= 0 || !started || !bgm.paused) return; const p = bgm.play(); if (p && p.catch) p.catch(() => {}); }
-function drawVol() { el('bgmBtn').textContent = vol <= 0 ? '🔇' : vol < 0.5 ? '🔉' : '🔊'; const s = el('volSlider'); if (s) s.value = Math.round(vol * 100); }
+function drawVol() { el('bgmBtn').textContent = vol <= 0 ? '🔇' : vol < 0.5 ? '🔉' : '🔊'; const s = el('volSlider'); if (s) s.value = Math.round(vol * 100); osSetSync(); }
 function setVol(v) {
   vol = clamp(v, 0, 1);
   if (vol > 0) lastVol = vol;
@@ -7147,7 +7155,7 @@ function sfx(id, vol) {
 }
 /* a sound with a place fades over r tiles from where you stand */
 function sfxAt(id, x, z, r, vol) { const R = r || 16, d = Math.hypot(x - P.tx, z - P.tz); if (d < R) sfx(id, (vol === undefined ? 1 : vol) * (1 - d / R)); }
-function setSfxVol(v) { sfxVol = clamp(v, 0, 1); if (sfxBus) sfxBus.gain.value = sfxVol; store.set('seedworld.sfxvol', sfxVol.toFixed(2)); }
+function setSfxVol(v) { sfxVol = clamp(v, 0, 1); if (sfxBus) sfxBus.gain.value = sfxVol; store.set('seedworld.sfxvol', sfxVol.toFixed(2)); const s = el('sfxSlider'); if (s) s.value = Math.round(sfxVol * 100); osSetSync(); }
 const meleeSnd = () => { const w = weaponIt(); return !w ? 2508 : w.stab ? (Math.random() < 0.5 ? 2548 : 2549) : WSND[w.g] || 2510; };
 const bowSnd = () => { const w = bowItem(); return !w ? 2692 : w.g === 'cbow' ? 2695 : w.g === 'dart' || w.g === 'pipe' ? 2696 : w.thrown ? 2708 : 2692; };
 const spellSnd = (sp, hit) => sp.drain === 'hold' ? (hit ? 203 : 202) : (sp.k.startsWith('fire') ? 160 : 220) + (hit ? 1 : 0);
@@ -7862,6 +7870,19 @@ function hideRemote(R) {
   R.lod = -1;
   freeP(R, 'plate'); freeP(R, 'bub');
 }
+/* Another player's run arrives as the two ends of its tick. Drawn along the straight line between, a run round a corner or
+   through a doorway cuts across the wall; when that line is not a legal step, the tile between is the one a walker could
+   have stepped through. [x, z] or null (the straight line is fine, or nothing legal joins the ends). */
+function midStep(x0, z0, x1, z1, pl) {
+  const dx = x1 - x0, dz = z1 - z0, ax = Math.abs(dx), az = Math.abs(dz), sx = Math.sign(dx), sz = Math.sign(dz);
+  let a, b;
+  if (ax === 1 && az === 1) { if (canStep(x0, z0, x1, z1, undefined, pl)) return null; a = [x1, z0]; b = [x0, z1]; }   // two straight steps, or one diagonal
+  else if (ax + az === 3 && ax && az) { a = ax === 2 ? [x0 + sx, z0] : [x0, z0 + sz]; b = [x0 + sx, z0 + sz]; }   // one straight step and one diagonal, in either order
+  else return null;
+  const legal = m => canStep(x0, z0, m[0], m[1], undefined, pl) && canStep(m[0], m[1], x1, z1, undefined, pl);
+  const la = legal(a), lb = legal(b);
+  return la && lb && ax + az === 3 ? null : la ? a : lb ? b : null;   // both open: the line between them is as good as either
+}
 function updateRemotes(dt, alpha) {
   if (!remotes.size) { if (POOL_FAR.used) { poolReset(POOL_FAR); poolFlush(POOL_FAR); } return; }
   if ((tickN & 7) === 0 || remoteSort) {   // sort every 8 ticks: per-frame LOD churn would thrash the pool
@@ -7886,9 +7907,15 @@ function updateRemotes(dt, alpha) {
         R.tx = pkt.x; R.tz = pkt.z;
         if (jump > 3) { R.px = R.tx; R.pz = R.tz; }
         R.moved = jump; R.faceT = pkt.f / 16 * TAU; R.afloat = pkt.s & 1; R.run = (pkt.s >> 1) & 1; R.pl = (pkt.s >> 2) & 3; R.lastSeen = tickN;
+        R.mid = jump === 2 || jump === 3 ? midStep(R.px, R.pz, R.tx, R.tz, R.pl | 0) : null;
       } else R.moved = 0;
+      if (!pkt) R.mid = null;
     }
-    R.rx = R.px + (R.tx - R.px) * alpha; R.rz = R.pz + (R.tz - R.pz) * alpha; R.ry = R.afloat ? 0 : M7 ? m7Y(R.rx, R.rz, R.pl | 0) : groundY(R.rx, R.rz);
+    if (R.mid) {   // a run round a corner: the tile between, then the far one, half the tick each
+      const s = alpha * 2, k = s < 1 ? 0 : 1, t = s - k, ax = k ? R.mid[0] : R.px, az = k ? R.mid[1] : R.pz, bx = k ? R.tx : R.mid[0], bz = k ? R.tz : R.mid[1];
+      R.rx = ax + (bx - ax) * t; R.rz = az + (bz - az) * t;
+    } else { R.rx = R.px + (R.tx - R.px) * alpha; R.rz = R.pz + (R.tz - R.pz) * alpha; }
+    R.ry = R.afloat ? 0 : M7 ? m7Y(R.rx, R.rz, R.pl | 0) : groundY(R.rx, R.rz);
     if (R.bubbleT > 0) R.bubbleT -= dt;   // ahead of the stack test: a bubble held frozen under a stack would pop out stale
     R.hid = stackTop.get(stackKey(R.tx, R.tz, R.pl)) !== R || (M7 && !m7Shown(R.pl | 0)) ? 1 : 0;   // buried in a stack (or on a floor the roof hides): kept up to date, drawn by nobody, and neither are its bar, skull or bolts
     if (R.hid) { hideRemote(R); continue; }
@@ -13027,9 +13054,12 @@ const osRect = (host, x, y, w, h, col, fill, trans) => {
   return d;
 };
 const osClip = (host, x, y, w, h) => { const d = div(host, 'osc'); d.style.cssText = 'left:' + x + 'px;top:' + y + 'px;width:' + w + 'px;height:' + h + 'px;overflow:hidden'; return d; };
-/* the steel border (script 392 -> 249): four 25x30 corners, the 36-pixel edge tiles laid 15 outside the box, all clipped to it */
+/* the steel border (script 392 -> 249): four 25x30 corners, the 36-pixel edge tiles laid 15 outside the box, all clipped to it.
+   It is laid last, over what it frames, so it must never take a click: #osPanes hands pointer events to everything inside it,
+   and an empty box the size of the frame swallowed every checkbox and slider under it (only All Settings, outside, answered). */
 function osSteel(host, x, y, w, h) {
   const c = osClip(host, x, y, w, h);
+  c.style.pointerEvents = 'none';
   osSpr(c, 310, 0, 0, 25, 30, { tile: 1 }); osSpr(c, 311, w - 25, 0, 25, 30, { tile: 1 });
   osSpr(c, 312, 0, h - 30, 25, 30, { tile: 1 }); osSpr(c, 313, w - 25, h - 30, 25, 30, { tile: 1 });
   osSpr(c, 172, -15, 30, 36, h - 60, { tile: 1 }); osSpr(c, 315, w - 21, 30, 36, h - 60, { tile: 1 });
@@ -13096,8 +13126,9 @@ function osCheck(host, y, label, get, set) {
   osTxt(host, label, 14, y, 143, 28, 495, 0xff981f, 0, 1, 10);
   const box = osSpr(host, get() ? 8384 : 8383, 159, y + 5, 17, 17);
   const hit = div(host, 'osc osHit'); hit.style.cssText = 'left:10px;top:' + y + 'px;width:170px;height:28px';
-  on(hit, 'click', () => { set(get() ? 0 : 1); OSUI.setSprite(box, get() ? 8384 : 8383); });
-  return () => OSUI.setSprite(box, get() ? 8384 : 8383);
+  const put = () => { const id = get() ? 8384 : 8383; if (box.osSprite !== id) OSUI.setSprite(box, id); };
+  on(hit, 'click', () => { set(get() ? 0 : 1); put(); });
+  return put;
 }
 const osPane = k => { const p = el('pane-' + k); p.classList.add('osLive'); const h = div(p, 'osPane'); return h; };
 const osOpt = k => () => OPT[k], osSetOpt = (k, then) => v => { OPT[k] = v; if (then) then(); applyOpts(OPT_ROWS.find(r => r.k === k)); };
@@ -13109,41 +13140,47 @@ function osSettings() {
   const pane = el('pane-op');
   if (osSet && osSet.all) { osSet.all = 0; pane.classList.add('osLive'); }
   if (!osSet) { osSet = { host: osPane('op'), tab: 0, all: 0 }; }
-  const h = osSet.host;
+  const h = osSet.host, sync = OS.sync = [];
   h.textContent = '';
   osTallTabs(h, [[2410, 22, 22, 21, 5], [911, 17, 18, 86, 6], [2932, 22, 22, 147, 4]], osSet.tab, i => { osSet.tab = i; osSettings(); });
   osTxt(h, ['Controls Settings', 'Audio Settings', 'Display Settings'][osSet.tab], 0, 30, 190, 19, 496, 0xff981f, 1, 1);
   const mid = osClip(h, 3, 49, 184, 176);
   if (osSet.tab === 0) {
     const L = osClip(mid, 6, 6, 180, 170);
-    osCheck(L, 0, 'Auto Retaliate', osOpt('retaliate'), osSetOpt('retaliate', () => { if (osCb) osCombat(); }));
-    osCheck(L, 28, 'PvP border warning', osOpt('pvpWarn'), osSetOpt('pvpWarn'));
-    osCheck(L, 56, 'Respawn clocks', osOpt('timers'), osSetOpt('timers'));
-    osCheck(L, 84, 'XP drops', osOpt('xpDrops'), osSetOpt('xpDrops', osOrbs));
+    sync.push(osCheck(L, 0, 'Auto Retaliate', osOpt('retaliate'), osSetOpt('retaliate', () => { if (osCb) osCombat(); })));
+    sync.push(osCheck(L, 28, 'PvP border warning', osOpt('pvpWarn'), osSetOpt('pvpWarn')));
+    sync.push(osCheck(L, 56, 'Respawn clocks', osOpt('timers'), osSetOpt('timers')));
+    sync.push(osCheck(L, 84, 'XP drops', osOpt('xpDrops'), osSetOpt('xpDrops', osOrbs)));
     const runBox = osSpr(L, P.run ? 762 : 761, 6, 120, 40, 40);
     osSpr(L, 677, 17, 124, 17, 18);
     const runT = osTxt(L, Math.round(P.energy) + '%', 3, 140, 45, 17, 495, 0xff981f, 1, 1, 14);
+    const runPut = () => { const id = P.run ? 762 : 761; if (runBox.osSprite !== id) OSUI.setSprite(runBox, id); runT.osSet(Math.round(P.energy) + '%'); };
     const rh = div(L, 'osc osHit'); rh.style.cssText = 'left:6px;top:120px;width:40px;height:40px'; rh.title = 'Toggle Run';
-    on(rh, 'click', () => { P.run = P.run ? 0 : 1; dirty.orb = 1; OSUI.setSprite(runBox, P.run ? 762 : 761); runT.osSet(Math.round(P.energy) + '%'); });
+    on(rh, 'click', () => { P.run = P.run ? 0 : 1; dirty.orb = 1; runPut(); });
+    sync.push(runPut);
     osSpr(L, 761, 48, 120, 40, 40); osSpr(L, 2410, 57, 129, 22, 22);
     const dv = div(L, 'osc osHit'); dv.style.cssText = 'left:48px;top:120px;width:40px;height:40px'; dv.title = 'Developer console';
     on(dv, 'click', devGate);
   } else if (osSet.tab === 1) {
-    osSlider(mid, 18, 660, 2860, () => vol, v => setVol(v));
-    osSlider(mid, 60, 661, 2860, () => sfxVol, v => setSfxVol(v));
+    sync.push(osSlider(mid, 18, 660, 2860, () => vol, v => setVol(v)));
+    sync.push(osSlider(mid, 60, 661, 2860, () => sfxVol, v => setSfxVol(v)));
   } else {
     const B = OPT_ROWS.find(r => r.k === 'brightness'), V = OPT_ROWS.find(r => r.k === 'viewRadius');
-    osSlider(mid, 19, 659, 2858, () => (OPT.brightness - B.min) / (B.max - B.min), v => { const b = Math.round((B.min + v * (B.max - B.min)) * 10) / 10; if (b !== OPT.brightness) { OPT.brightness = b; applyOpts(B); } });   // a drag writes the options only when the step changes
-    osSlider(mid, 56, 1162, 1201, () => (OPT.viewRadius - V.min) / (V.max - V.min), v => { const n = Math.round(V.min + v * (V.max - V.min)); if (n !== OPT.viewRadius) { OPT.viewRadius = n; applyOpts(V); } });
+    sync.push(osSlider(mid, 19, 659, 2858, () => (OPT.brightness - B.min) / (B.max - B.min), v => { const b = Math.round((B.min + v * (B.max - B.min)) * 10) / 10; if (b !== OPT.brightness) { OPT.brightness = b; applyOpts(B); } }));   // a drag writes the options only when the step changes
+    sync.push(osSlider(mid, 56, 1162, 1201, () => (OPT.viewRadius - V.min) / (V.max - V.min), v => { const n = Math.round(V.min + v * (V.max - V.min)); if (n !== OPT.viewRadius) { OPT.viewRadius = n; applyOpts(V); } }));
     const L = osClip(mid, 6, 80, 180, 96);
-    osCheck(L, 0, '2007 models', osOpt('osrs'), v => { OPT.osrs = v; icons07Apply(1); osrsApply(); applyOpts(OPT_ROWS.find(r => r.k === 'osrs')); });
-    osCheck(L, 28, 'Hide all roofs', osOpt('hideRoofs'), osSetOpt('hideRoofs'));
-    osCheck(L, 56, 'Distance fog', osOpt('fog'), osSetOpt('fog'));
+    sync.push(osCheck(L, 0, '2007 models', osOpt('osrs'), v => { OPT.osrs = v; icons07Apply(1); osrsApply(); applyOpts(OPT_ROWS.find(r => r.k === 'osrs')); }));
+    sync.push(osCheck(L, 28, 'Hide all roofs', osOpt('hideRoofs'), osSetOpt('hideRoofs')));
+    sync.push(osCheck(L, 56, 'Distance fog', osOpt('fog'), osSetOpt('fog')));
   }
   osSteel(h, 3, 49, 184, 176);
   const all = osStoneBtn(h, 25, 228, 140, 30, 'All Settings');
-  on(all, 'click', () => { osSet.all = 1; pane.classList.remove('osLive'); drawOpts(); });
+  on(all, 'click', () => { osSet.all = 1; OS.sync = null; pane.classList.remove('osLive'); drawOpts(); });
 }
+/* a setting changed anywhere else (All Settings, the space bar's run, the music button) shows in the 2007 panel too; each
+   refresher only moves a bobble or swaps a box, so one running mid-drag leaves the drag alone. OS.sync, not osSet: the
+   options are applied while the page boots, long before this section's own variables exist. */
+function osSetSync() { if (OS.on && OS.sync) for (const f of OS.sync) f(); }
 
 /* Logout: the two long buttons of script 2243; both leave through the game's own sign-out, which saves first */
 let osLo = null;

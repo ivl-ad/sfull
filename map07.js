@@ -15,8 +15,11 @@
 
    Where the viewer drew the map wrong, this file draws it the client's way instead: roof kits this cache ships as blank
    black quads borrow their sibling kit's models (roofs.json); translucent faces blend instead of standing solid; tiles
-   are cut by their overlay shape and underlays blend over their neighbours; textured overlays wear their texture; and
-   locs whose def asks for it follow the ground under every vertex (contouredGround) from the height at their middle.
+   are cut by their overlay shape and underlays blend over their neighbours; textured overlays wear their texture; locs
+   whose def asks for it follow the ground under every vertex (contouredGround) from the height at their middle; faces are
+   one-sided, and a face the client paints over a coplanar one is lifted clear of it (layerFaces), so detail laid flat on
+   a banner, a board or a wall never flickers; wall decorations stand off the wall they hang on (decorDisplacement), a
+   corner wall's first leg is mirrored so its mitres meet, and nothing under a bridge deck collides with the deck above.
 
    Behind one global, MAP07; nothing runs until load(). game.js section 46 is the whole of the wiring: it classifies
    the scenery into its own object kinds (a tree is a tree to woodcutting), turns spawns into monsters and draws the
@@ -147,10 +150,12 @@ function texMat(cache, id, make) {
   }
   return m;
 }
-const texMaterial = id => texMat(texMats, id, map => new THREE.MeshLambertMaterial({ map, side: THREE.DoubleSide, alphaTest: 0.4 }));
+/* every model face is one-sided, as the client draws it: it culls a face turned away, and modellers double a face that must
+   show from both sides — drawn two-sided, that back-to-back pair fights itself, and the hidden half costs a fill for nothing */
+const texMaterial = id => texMat(texMats, id, map => new THREE.MeshLambertMaterial({ map, side: THREE.FrontSide, alphaTest: 0.4 }));
 /* a translucent textured face: the texture times its vertex alpha, drawn after the solid world without writing depth,
    pulled a hair toward the eye so a wash laid flat on the floor never fights the floor */
-const texMaterialT = id => texMat(texMatsT, id, map => new THREE.MeshLambertMaterial({ map, side: THREE.DoubleSide, vertexColors: true, transparent: true, depthWrite: false, alphaTest: 0.01, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 }));
+const texMaterialT = id => texMat(texMatsT, id, map => new THREE.MeshLambertMaterial({ map, side: THREE.FrontSide, vertexColors: true, transparent: true, depthWrite: false, alphaTest: 0.01, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 }));
 
 /* ---- atoms (little-endian; ../osrs-r2/GUIDE.md) ---- */
 const magic = dv => String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
@@ -177,20 +182,44 @@ function parseModel(buf) {     /* m/<id>.bin record */
   const dv = new DataView(buf);
   const vc = dv.getUint16(0, true), fc = dv.getUint16(2, true), ttc = dv.getUint16(4, true), flags = dv.getUint8(6);
   let o = 8;
-  const cut = n => buf.slice(o, (o += n));
-  const verts = new Int16Array(cut(vc * 6)), idx = new Uint16Array(cut(fc * 6)), colors = new Uint16Array(cut(fc * 2));
-  const texs = flags & M_TEX ? new Uint16Array(cut(fc * 2)) : null;
+  const at = n => (o += n) - n;   /* views into the fetched buffer, not copies: every field lands on an even offset */
+  const verts = new Int16Array(buf, at(vc * 6), vc * 3), idx = new Uint16Array(buf, at(fc * 6), fc * 3), colors = new Uint16Array(buf, at(fc * 2), fc);
+  const texs = flags & M_TEX ? new Uint16Array(buf, at(fc * 2), fc) : null;
   o += ttc * 6;
-  const types = flags & M_TYPES ? new Int8Array(cut(fc)) : null;
-  const alphas = flags & M_ALPHA ? new Uint8Array(cut(fc)) : null;
-  if (flags & M_PRIOS) o += fc;
+  const types = flags & M_TYPES ? new Int8Array(buf, at(fc), fc) : null;
+  const alphas = flags & M_ALPHA ? new Uint8Array(buf, at(fc), fc) : null;
+  const prios = flags & M_PRIOS ? new Uint8Array(buf, at(fc), fc) : null;
   if (flags & M_TCOORD) o += fc;
   o += ttc;
-  const vgroups = flags & M_VGROUP ? new Uint8Array(cut(vc)) : null;
-  return { vc, fc, verts, idx, colors, texs, types, alphas, vgroups };
+  const vgroups = flags & M_VGROUP ? new Uint8Array(buf, at(vc), vc) : null;
+  return layerFaces({ vc, fc, verts, idx, colors, texs, types, alphas, prios, vgroups });
 }
 /* the client never draws render-type-2 faces nor alpha-255 ones: modellers use them for hidden helper geometry */
 const faceHidden = (m, f) => (m.types !== null && m.types[f] === 2) || (m.alphas !== null && m.alphas[f] > 250);
+
+/* ---- the painter's order, kept in a depth buffer ----
+   OSRSK.faceLifts (osrs.js says why) names each face the client paints over a coplanar face it overlaps, and how far along
+   its normal it must rise to stay on top; here that face gets vertices of its own, once, as the model is parsed, so every
+   placement, figure and ground item built from it keeps the order. The map's faces are flat-lit, so nothing else notices. */
+function layerFaces(m) {
+  const offs = m.fc > 1 ? OSRSK.faceLifts(m.verts, m.idx, m.fc, m.prios, f => faceHidden(m, f)) : null;
+  if (!offs) return m;
+  const V = m.verts, I = m.idx;
+  const vc = m.vc + offs.size * 3, verts = new Int16Array(vc * 3), idx = vc > 65536 ? new Uint32Array(I) : new Uint16Array(I);
+  const vgroups = m.vgroups ? new Uint8Array(vc) : null;
+  verts.set(V);
+  if (vgroups) vgroups.set(m.vgroups);
+  let nv = m.vc;
+  for (const [f, [dx, dy, dz]] of offs) {
+    for (let k = 0; k < 3; k++) {
+      const s = I[f * 3 + k];
+      verts[nv * 3] = V[s * 3] + dx; verts[nv * 3 + 1] = V[s * 3 + 1] + dy; verts[nv * 3 + 2] = V[s * 3 + 2] + dz;
+      if (vgroups) vgroups[nv] = m.vgroups[s];
+      idx[f * 3 + k] = nv++;
+    }
+  }
+  return Object.assign(m, { vc, verts, idx, vgroups });
+}
 function parseFramemap(buf) {  /* OSFM v1 */
   const dv = new DataView(buf);
   if (magic(dv) !== 'OSFM') throw new Error('bad OSFM');
@@ -252,10 +281,12 @@ function hsl(v) {
   return c;
 }
 const rgbI = v => [(v >> 16 & 255) / 255, (v >> 8 & 255) / 255, (v & 255) / 255];
+const texC = new Map();   /* a texture's average colour, made once: a region asks for it on thousands of faces */
+const texRGB = tid => { let c = texC.get(tid); if (!c) texC.set(tid, c = rgbI(textures[tid].avgRgbAdjusted)); return c; };
 function faceColor(m, f, recol, retex) {
   let tid = m.texs ? m.texs[f] - 1 : -1;
   if (tid >= 0 && retex && retex.has(tid)) tid = retex.get(tid);
-  if (tid >= 0 && textures[tid]) return rgbI(textures[tid].avgRgbAdjusted);
+  if (tid >= 0 && textures[tid]) return texRGB(tid);
   let c = m.colors[f];
   if (recol && recol.has(c)) c = recol.get(c);
   return hsl(c);
@@ -295,6 +326,10 @@ function cornerH(p, gx, gy, fb) {   /* raw cache height at a tile's SW corner; a
 }
 const bridgeAt = (gx, gy) => { const r = regionRaw(gx, gy); return r && r.bridge ? r.bridge[(gx & 63) * 64 + (gy & 63)] : 0; };
 const renderPlane = (plane, gx, gy) => (plane >= 1 && bridgeAt(gx, gy) ? plane - 1 : plane);
+/* the plane a placement collides on: a bridge tile moves everything down one, and what stands on the ground beneath a deck
+   (the piers, the river's own scenery) drops to -1 and collides nowhere — the client's loadLocs. Colliding on 0 instead, it
+   walled off the deck walked above it: Lumbridge's bridge to Al Kharid could not be crossed. */
+const clipPlane = (plane, gx, gy) => (bridgeAt(gx, gy) ? plane - 1 : plane);
 /* the ground's height in tiles (up) at continuous OSRS tile coords; ground level on a bridge walks the deck above */
 function heightAt(plane, fx, fy) {
   const gx = Math.floor(fx), gy = Math.floor(fy), r = regionRaw(gx, gy);
@@ -333,7 +368,8 @@ function addWall(R, rp, x, y, type, rot, bp) {
 const OPENABLE = /^(open|close|shut)$/i;
 const openable = (def, id) => doorPairs.has(id) || opsOf(def).some(o => OPENABLE.test(o));
 function clipLoc(R, def, id, pl, w, l) {
-  const rp = renderPlane(pl.plane, pl.gx, pl.gy), ct = def.clipType === undefined ? 2 : def.clipType, bp = def.blocksProjectile !== false, t = pl.type;
+  const rp = clipPlane(pl.plane, pl.gx, pl.gy), ct = def.clipType === undefined ? 2 : def.clipType, bp = def.blocksProjectile !== false, t = pl.type;
+  if (rp < 0) return;
   if (t === 22) { if (ct === 1) orFlag(R, rp, pl.gx, pl.gy, F_DECO); return; }
   if (t <= 3) { if (ct !== 0 && !openable(def, id)) addWall(R, rp, pl.gx, pl.gy, t, pl.rot, bp); return; }
   if ((t >= 9 && t <= 21) && ct !== 0) for (let dx = 0; dx < w; dx++) for (let dy = 0; dy < l; dy++) orFlag(R, rp, pl.gx + dx, pl.gy + dy, F_OBJ | (bp ? P_OBJ : 0));
@@ -385,7 +421,7 @@ function grow(ud, x, y, z) {
 let vX = new Float64Array(4096), vY = new Float64Array(4096), vZ = new Float64Array(4096);
 function appendModel(sink, m, t, flat) {
   const sx = t.sx || 1, sh = t.sh || 1, sy = t.sy || 1, rot = t.rot || 0, S = Math.SQRT1_2;
-  const v = m.verts, n = m.vc, out = new Float32Array(n * 3);
+  const v = m.verts, n = m.vc;
   if (vX.length < n) { vX = new Float64Array(n); vY = new Float64Array(n); vZ = new Float64Array(n); }
   let minY = 0, minX = 1e9, maxX = -1e9, minZ = 1e9, maxZ = -1e9;
   for (let i = 0; i < n; i++) {
@@ -400,47 +436,55 @@ function appendModel(sink, m, t, flat) {
     if (x < minX) minX = x; if (x > maxX) maxX = x; if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
   }
   if (t.contour >= 0 && t.px !== undefined && n) contourGround(t, n, minY, minX, maxX, minZ, maxZ);
+  if (vB.length < n * 3) vB = new Float32Array(n * 3);
+  const out = vB;
   for (let i = 0; i < n; i++) { out[i * 3] = t.cx + vX[i] * U; out[i * 3 + 1] = t.gy - vY[i] * U; out[i * 3 + 2] = t.cz - vZ[i] * U; }
-  const idx = m.idx, ud = sink.ud;
+  /* the client's mirror flips z and swaps each face's first and third vertex, so a mirrored face keeps its facing and its
+     texture triangle starts from the swapped corner */
+  const idx = m.idx, ud = sink.ud, i0 = t.mirror ? 2 : 0, i2 = 2 - i0;
   for (let f = 0; f < m.fc; f++) {
     if (faceHidden(m, f)) continue;
     let tid = m.texs ? m.texs[f] - 1 : -1;
     if (tid >= 0 && t.retex && t.retex.has(tid)) tid = t.retex.get(tid);
-    const a = idx[f * 3], b = idx[f * 3 + 1], c = idx[f * 3 + 2], al = flat || !m.alphas ? 0 : m.alphas[f], op = 1 - al / 255;
+    const a = idx[f * 3 + i0] * 3, b = idx[f * 3 + 1] * 3, c = idx[f * 3 + i2] * 3, al = flat || !m.alphas ? 0 : m.alphas[f], op = 1 - al / 255;
+    const ax = out[a], ay = out[a + 1], az = out[a + 2], bx = out[b], by = out[b + 1], bz = out[b + 2], cx = out[c], cy = out[c + 1], cz = out[c + 2];
+    if (ud) { grow(ud, ax, ay, az); grow(ud, bx, by, bz); grow(ud, cx, cy, cz); }
     if (!flat && tid >= 0 && textures[tid] !== undefined) {
       const T = al ? sink.ttex : sink.tex;
       let bk = T.get(tid);
       if (!bk) T.set(tid, bk = { pos: [], uv: [], owners: [], col: al ? [] : null });
-      for (const vi of [a, b, c]) { bk.pos.push(out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); grow(ud, out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); }
+      bk.pos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
       bk.uv.push(0, 0, 1, 0, 0, 1); bk.owners.push(ud);
       if (al) bk.col.push(1, 1, 1, op, 1, 1, 1, op, 1, 1, 1, op);
       continue;
     }
-    const [r, g, bl] = faceColor(m, f, t.recol, t.retex);
+    const rgb = faceColor(m, f, t.recol, t.retex), r = rgb[0], g = rgb[1], bl = rgb[2];
     if (al) {
-      for (const vi of [a, b, c]) { sink.tpos.push(out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); sink.tcol.push(r, g, bl, op); grow(ud, out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); }
+      sink.tpos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+      sink.tcol.push(r, g, bl, op, r, g, bl, op, r, g, bl, op);
       sink.towners.push(ud);
       continue;
     }
-    for (const vi of [a, b, c]) { sink.pos.push(out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); sink.col.push(r, g, bl); grow(ud, out[vi * 3], out[vi * 3 + 1], out[vi * 3 + 2]); }
+    sink.pos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
+    sink.col.push(r, g, bl, r, g, bl, r, g, bl);
     sink.owners.push(ud);
   }
 }
-let matFlat = null, matFlatF = null, matFlatT = null;
+let vB = new Float32Array(12288);
+let matFlat = null, matFlatT = null;
 function flatMats() {
   if (!matFlat) {
-    matFlat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
-    matFlatF = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
-    matFlatT = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
+    matFlat = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
+    matFlatT = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
   }
 }
-function bake(pos, col, doubleSide) {
+function bake(pos, col) {
   flatMats();
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   g.computeVertexNormals();
-  return new THREE.Mesh(g, doubleSide ? matFlat : matFlatF);
+  return new THREE.Mesh(g, matFlat);
 }
 function bakeT(pos, col) {   /* rgba vertex colours: three r128 blends by vertex alpha when the colour attribute has four components */
   flatMats();
@@ -462,7 +506,7 @@ function flushSink(s, g) {
       i = j;
     }
   };
-  if (s.pos.length) { const m = bake(s.pos, s.col, true); own(m, s.owners); made.push(m); }
+  if (s.pos.length) { const m = bake(s.pos, s.col); own(m, s.owners); made.push(m); }
   const textured = (b, mat) => {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(b.pos, 3));
@@ -621,7 +665,7 @@ function buildTerrain(R) {
     if (!L.pos.length && !L.tex.size) continue;
     const g = new THREE.Group();
     g.userData.terrain = 1;
-    if (L.pos.length) g.add(bake(L.pos, L.col, false));
+    if (L.pos.length) g.add(bake(L.pos, L.col));
     for (const [tid, bk] of L.tex) {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(bk.pos, 3));
@@ -650,29 +694,49 @@ function groundCenter(plane, gx, gy, w, l) {   /* the modern client's rule: the 
 }
 /* the client's (45, 0, -45) for a diagonal wall decoration, in cache x/z, turned by the placement's quarter turns (rotateY90 each) */
 const DECOR45 = [[45, -45], [-45, -45], [-45, 45], [45, 45]];
-/* draws one placement {id, plane, gx, gy, type, rot} into a sink under owner ud (null: not pickable) */
+/* wall decorations, the client's addLoc: 4 hangs on its own tile's edge; 5 is the same piece hung on a wall standing on its
+   tile, pushed out by that wall's decorDisplacement (its thickness: 16 unless the def says) — left where 4 hangs it, the piece
+   is buried in the masonry or pokes through it. 6-8 turn the piece onto a diagonal wall: 6 faces the placement's way, pushed
+   half a displacement; 7 faces the other way, unpushed; 8 is both. */
+const DISP_X = [1, 0, -1, 0], DISP_Y = [0, -1, 0, 1], DIAG_X = [1, -1, -1, 1], DIAG_Y = [-1, -1, 1, 1];
+/* the client paints a decoration after the wall behind it and a floor decoration after its tile, and modellers lean on that:
+   a tapestry's cloth, a torch's plate and a rug lie exactly in the wall's or the ground's own plane. Stood a hair off it
+   instead (cache units, along the way the piece faces), neither can fight the surface it hangs on. */
+const DECOR_GAP = 2, FLOOR_LIFT = U;
+/* draws one placement {id, plane, gx, gy, type, rot, disp} into a sink under owner ud (null: not pickable) */
 function drawLoc(sink, def, pl, ud, bare) {
-  const [w, l] = footprint(def, pl.rot);
-  /* diagonal shapes (1, 3, 9) are authored in diagonal position and only turn in quarters; the extra 45 degrees is
-     for a straight model reused diagonally: wall decor 6-8 (shape 4's) and type 11 (shape 10's) */
-  let extra45 = pl.type >= 6 && pl.type <= 8, entries = def.models.filter(m => m.shape === pl.type);
-  if (!entries.length && pl.type === 11) { entries = def.models.filter(m => m.shape === 10); extra45 = true; }
-  if (!entries.length && pl.type >= 5 && pl.type <= 8) entries = def.models.filter(m => m.shape === 4);
+  const [w, l] = footprint(def, pl.rot), type = pl.type, rot0 = pl.rot;
+  /* diagonal shapes (1, 3, 9) are authored in diagonal position and only turn in quarters; the extra 45 degrees is for a
+     straight model reused diagonally: wall decor 5-8 always build from shape 4, type 11 from shape 10 */
+  const shape = type >= 5 && type <= 8 ? 4 : type === 11 ? 10 : type, entries = def.models.filter(m => m.shape === shape);
   if (!entries.length) return false;
   sink.ud = ud;
-  const cm = colorMaps(def, bare);
-  const draw = (rot, e45) => {
+  const cm = colorMaps(def, bare), disp = pl.disp || 0;
+  /* m4: the client builds this half at orientation + 4, which also flips the def's mirror (ObjectComposition: isRotated ^ orientation > 3) */
+  const draw = (rot, e45, m4, dx, dy) => {
     const t = groundCenter(pl.plane, pl.gx, pl.gy, w, l);   /* heights from the CACHE plane: a deck stays raised */
     if (!t) return;
-    Object.assign(t, cm, { rot, extra45: e45, decor: e45 && pl.type >= 6 && pl.type <= 8 ? DECOR45[rot & 3] : null, mirror: !!def.isRotated,
+    if (type === 22) t.gy += FLOOR_LIFT;
+    const decor = m4 && type >= 6 ? [DECOR45[rot][0] + dx, DECOR45[rot][1] + dy] : dx || dy ? [dx, dy] : null;
+    Object.assign(t, cm, { rot, extra45: e45, decor, mirror: !!def.isRotated !== m4,
       sx: (def.modelSizeX || 128) / 128, sh: (def.modelSizeHeight || 128) / 128, sy: (def.modelSizeY || 128) / 128,
       ox: def.offsetX || 0, oh: def.offsetHeight || 0, oy: def.offsetY || 0, contour: def.contouredGround === undefined ? -1 : def.contouredGround });
     for (const e of entries) { const mod = model(e.model); if (mod) appendModel(sink, mod, t); }
   };
-  draw(pl.rot, extra45);
-  if (pl.type === 2) draw((pl.rot + 1) & 3, false);
+  const out = disp + DECOR_GAP, diag = DECOR_GAP * Math.SQRT1_2, back = (rot0 + 2) & 3;
+  if (type === 2) { draw(rot0, false, true, 0, 0); draw((rot0 + 1) & 3, false, false, 0, 0); }   /* the corner's first leg is the mirrored one: the two mitres meet */
+  else if (type === 4 || type === 5) draw(rot0, false, false, (type === 5 ? out : DECOR_GAP) * DISP_X[rot0], (type === 5 ? out : DECOR_GAP) * DISP_Y[rot0]);
+  else if (type >= 6 && type <= 8) {
+    if (type !== 7) draw(rot0, true, true, disp * DIAG_X[rot0] + diag * DIAG_X[rot0], disp * DIAG_Y[rot0] + diag * DIAG_Y[rot0]);
+    if (type !== 6) draw(back, true, true, diag * DIAG_X[back], diag * DIAG_Y[back]);
+  } else draw(rot0, type === 11, false, 0, 0);
   sink.ud = null;
   return true;
+}
+/* a wall decoration's push off the wall on its tile (types 5, 6 and 8): the wall's decorDisplacement, halved on the diagonal */
+function decorDisp(type, wallDef) {
+  const d = wallDef && wallDef.decorDisplacement !== undefined ? wallDef.decorDisplacement : 16;
+  return type === 5 ? d : type === 6 || type === 8 ? d >> 1 : 0;
 }
 /* a placement's menu: the def's own verbs, plus a recorded link's verb when the menu offers no way to move (a spirit tree's Travel,
    carried on a child state the map never shows) */
@@ -817,18 +881,22 @@ async function defsStage(R) {
   if (regions.get(rid) !== R) return false;
   R.locDefs = dd; R.mids = new Set(); R.work = [];
   for (const i of [...ids, ...kids]) for (const m of ((dd[i] && dd[i].models) || [])) R.mids.add(m.model);
+  /* the wall standing on each tile (the scene's boundary object), for the decorations hung on it */
+  let wallOn = null;
+  for (const p of placed) if (p.type <= 3) (wallOn || (wallOn = new Map())).set(p.plane * 4096 + p.x * 64 + p.y, p.id);
   /* collision, roofs, the minimap's walls and the menus; the drawing waits for the models */
   for (const p of placed) {
     const def = resolveDef(dd, p.id);
     if (!def || !def.models) continue;
     const gx = bx + p.x, gy = by + p.y, [w, l] = footprint(def, p.rot), rp = renderPlane(p.plane, gx, gy);
     const pl = { id: p.id, plane: p.plane, gx, gy, type: p.type, rot: p.rot };
+    if (p.type === 5 || p.type === 6 || p.type === 8) pl.disp = decorDisp(p.type, wallOn && dd[wallOn.get(p.plane * 4096 + p.x * 64 + p.y)]);
     if (p.type >= 12 && p.type <= 21) for (let dx = 0; dx < w; dx++) for (let dy = 0; dy < l; dy++) {
       const r2 = regionRaw(gx + dx, gy + dy);
       if (r2 && r2.solid) r2.solid[rp * 4096 + ((gx + dx) & 63) * 64 + ((gy + dy) & 63)] = 1;
     }
     clipLoc(R, def, p.id, pl, w, l);
-    if (p.type === 0 || p.type === 2) {   /* minimap walls: bit per edge (W N E S), doors marked */
+    if ((p.type === 0 || p.type === 2) && clipPlane(p.plane, gx, gy) >= 0) {   /* minimap walls: bit per edge (W N E S), doors marked; none for what stands under a deck */
       const e = p.type === 2 ? (1 << p.rot) | (1 << ((p.rot + 1) & 3)) : 1 << p.rot, i = rp * 4096 + p.x * 64 + p.y;
       R.walls[i] |= e | (openable(def, p.id) ? 16 : 0);
     }
@@ -1065,8 +1133,8 @@ let matNpc = null, matNpcT = null;
 class Entity {
   constructor(mg, scale) {
     if (!matNpc) {
-      matNpc = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide });
-      matNpcT = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 });
+      matNpc = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide });
+      matNpcT = new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.FrontSide, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2 });
     }
     this.mg = mg; this.scale = scale; this.work = new Int32Array(mg.vc * 3);
     const geom = (tris, colors, stride) => {

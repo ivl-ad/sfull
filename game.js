@@ -12004,33 +12004,50 @@ function m7WmDraw() {
   wmCtx.imageSmoothingEnabled = false;
   wmCtx.fillStyle = '#0c1016'; wmCtx.fillRect(0, 0, W, H);
   const im = MAP07.worldImage(), WI = MAP07.WORLD_IMG;
-  if (im) wmCtx.drawImage(im, px(WI.gx0 - 0.5), pz(-WI.gy1 + 0.5), im.naturalWidth * WI.tpp * s, im.naturalHeight * WI.tpp * s);
-  else wmDirty = 1;
-  if (typeof c7WmExtras === 'function') c7WmExtras(px, pz, s, W, H, 0);   // the dungeons' own pictures
-  if (s >= 1.5) {
-    const list = [];
-    for (let sx = Math.floor((wmCx - W / 2 / s) / 64); sx <= Math.floor((wmCx + W / 2 / s) / 64); sx++)
-      for (let sy = Math.floor(-(wmCz + H / 2 / s) / 64); sy <= Math.floor(-(wmCz - H / 2 / s) / 64); sy++) if (sx >= 0 && sy >= 0) list.push([sx, sy, Math.hypot(sx * 64 + 32 - wmCx, sy * 64 + 32 + wmCz)]);
-    list.sort((a, b) => a[2] - b[2]);
-    for (const [sx, sy] of list) {
-      const c = MAP07.squareCanvas((sx << 8) | sy);
-      if (c) wmCtx.drawImage(c, Math.floor(px(sx * 64 - 0.5)), Math.floor(pz(-(sy * 64 + 63) - 0.5)), Math.ceil(64 * s) + 1, Math.ceil(64 * s) + 1);
+  /* the main map's rectangle, and past it only the place you stand in (a dungeon, an island off the edge): every other square
+     still plays, it just stays off the map */
+  const zones = [[WI.x0, WI.y0, WI.x1, WI.y1]], here = m7WmHere();
+  if (here) zones.push(here);
+  zones.forEach((zone, zi) => {
+    const [x0, y0, x1, y1] = zone, L = Math.floor(px(x0 - 0.5)), T = Math.floor(pz(-y1 + 0.5)), Rt = Math.ceil(px(x1 - 0.5)), B = Math.ceil(pz(-y0 + 0.5));
+    if (Rt < 0 || B < 0 || L > W || T > H) return;
+    wmCtx.save(); wmCtx.beginPath(); wmCtx.rect(L, T, Rt - L, B - T); wmCtx.clip();
+    if (zi === 0) { if (im) wmCtx.drawImage(im, px(WI.gx0 - 0.5), pz(-WI.gy1 + 0.5), im.naturalWidth * WI.tpp * s, im.naturalHeight * WI.tpp * s); else wmDirty = 1; }
+    if (zi && typeof c7WmExtras === 'function') c7WmExtras(px, pz, s, W, H, 0, zone);   // a dungeon's own picture, only where you stand (Waterbirth's overlaps the main map's top row)
+    if (s >= 1.5 || (zi && !zone[4])) {   // the squares themselves: close in, or at every zoom round you where no picture covers the place
+      const list = [];
+      for (let sx = Math.max(x0 >> 6, Math.floor((wmCx - W / 2 / s) / 64)); sx <= Math.min((x1 - 1) >> 6, Math.floor((wmCx + W / 2 / s) / 64)); sx++)
+        for (let sy = Math.max(y0 >> 6, Math.floor(-(wmCz + H / 2 / s) / 64)); sy <= Math.min((y1 - 1) >> 6, Math.floor(-(wmCz - H / 2 / s) / 64)); sy++) if (sx >= 0 && sy >= 0) list.push([sx, sy, Math.hypot(sx * 64 + 32 - wmCx, sy * 64 + 32 + wmCz)]);
+      list.sort((a, b) => a[2] - b[2]);
+      for (const [sx, sy] of list) {
+        const c = MAP07.squareCanvas((sx << 8) | sy);
+        if (c) wmCtx.drawImage(c, Math.floor(px(sx * 64 - 0.5)), Math.floor(pz(-(sy * 64 + 63) - 0.5)), Math.ceil(64 * s) + 1, Math.ceil(64 * s) + 1);
+      }
     }
-  }
-  if (typeof c7WmExtras === 'function') c7WmExtras(px, pz, s, W, H, 1);   // the map-function icons
-  if (wmZoom >= 2) {
-    wmCtx.font = 'bold ' + Math.round(clamp(9 + wmZoom * 0.4, 10, 16)) + 'px system-ui, sans-serif';
-    wmCtx.textAlign = 'center'; wmCtx.textBaseline = 'middle';
-    for (const [n, x, y, , city] of M7_TOWNS) {
-      const tx = px(x), ty = pz(-y);
-      if (tx < -90 || ty < -20 || tx > W + 90 || ty > H + 20) continue;
-      wmCtx.lineWidth = 3; wmCtx.strokeStyle = 'rgba(0,0,0,.85)'; wmCtx.strokeText(n, tx, ty);
-      wmCtx.fillStyle = city ? '#ffd34a' : '#f4ead0'; wmCtx.fillText(n, tx, ty);
+    if (typeof c7WmExtras === 'function') c7WmExtras(px, pz, s, W, H, 1, zone);   // the map-function icons
+    if (wmZoom >= 2) {
+      wmCtx.font = 'bold ' + Math.round(clamp(9 + wmZoom * 0.4, 10, 16)) + 'px system-ui, sans-serif';
+      wmCtx.textAlign = 'center'; wmCtx.textBaseline = 'middle';
+      for (const [n, x, y, , city] of M7_TOWNS) {
+        if (x < x0 || x >= x1 || y < y0 || y >= y1) continue;
+        const tx = px(x), ty = pz(-y);
+        if (tx < -90 || ty < -20 || tx > W + 90 || ty > H + 20) continue;
+        wmCtx.lineWidth = 3; wmCtx.strokeStyle = 'rgba(0,0,0,.85)'; wmCtx.strokeText(n, tx, ty);
+        wmCtx.fillStyle = city ? '#ffd34a' : '#f4ead0'; wmCtx.fillText(n, tx, ty);
+      }
     }
-  }
+    wmCtx.restore();
+  });
   if (deathSpot) wmIcon('skull', px(deathSpot.x), pz(deathSpot.z), 10);
   const yx = px(P.rx), yy = pz(P.rz);
   if (yx > -18 && yy > -18 && yx < W + 18 && yy < H + 18) drawYou(wmCtx, yx, yy, P.face, 8);
+}
+function m7WmHere() {   // [x0, y0, x1, y1] tiles of the place past the main map you stand in: its world map area, or the squares round you
+  const WI = MAP07.WORLD_IMG, gx = P.tx, gy = -P.tz;
+  if (gx >= WI.x0 && gx < WI.x1 && gy >= WI.y0 && gy < WI.y1) return null;
+  const A = typeof c7Get === 'function' ? c7Get('wmareas.json') : null, sx = gx >> 6, sy = gy >> 6;
+  if (A) for (const a of A.a) if (!a[6] && sx >= a[2] && sx <= a[4] && sy >= a[3] && sy <= a[5]) return [a[2] * 64, a[3] * 64, (a[4] + 1) * 64, (a[5] + 1) * 64, 1];
+  return [(sx - 2) * 64, (sy - 2) * 64, (sx + 3) * 64, (sy + 3) * 64, 0];
 }
 function m7Preview() {   // the world select shows Gielinor's own map instead of a seed's preview
   welCtx.fillStyle = '#26364a'; welCtx.fillRect(0, 0, WPX, WPX);

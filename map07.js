@@ -345,15 +345,20 @@ const yAt = (plane, x, z) => heightAt(plane, x + 0.5, -z + 0.5);
 /* ---- collision (the client's CollisionMap, per render plane) ---- */
 /* an upper floor's empty air stays walkable, as in the client: its walls fence it, and rooftop courses, platforms and
    spawns stand on tiles that carry no floor of their own */
-function flagAt(rp, gx, gy) { const r = regionAt(gx, gy); return r ? r.clip[rp * 4096 + (gx & 63) * 64 + (gy & 63)] : F_FULL; }
+function flagAt(rp, gx, gy) {
+  const r = regionAt(gx, gy);
+  if (!r) return F_FULL;
+  const f = r.clip[rp * 4096 + (gx & 63) * 64 + (gy & 63)];
+  return doorClip.size ? f | doorClip.get((rp * 8192 + gx) * 16384 + gy) : f;   // undefined ors as 0
+}
 function orFlag(R, rp, gx, gy, f) {   /* a write past R's edge is kept on R and replayed into the neighbour whenever both are up */
   if (rp < 0 || rp > 3 || !f) return;
   const t = regionRaw(gx, gy);
   if (t === R || (t && t.clip)) { t.clip[rp * 4096 + (gx & 63) * 64 + (gy & 63)] |= f; if (t === R) return; }
   if (t !== R) R.ext.push(ridOf(gx, gy), rp * 4096 + (gx & 63) * 64 + (gy & 63), f);
 }
-function addWall(R, rp, x, y, type, rot, bp) {
-  const f = (gx, gy, b) => orFlag(R, rp, gx, gy, bp ? b | (b << 9) : b);
+function addWall(R, rp, x, y, type, rot, bp) { wallEdges((gx, gy, b) => orFlag(R, rp, gx, gy, bp ? b | (b << 9) : b), x, y, type, rot); }
+function wallEdges(f, x, y, type, rot) {   /* f(gx, gy, edge bits) for each tile a wall piece fences */
   if (type === 0) {
     if (rot === 0) { f(x, y, F_W); f(x - 1, y, F_E); } else if (rot === 1) { f(x, y, F_N); f(x, y + 1, F_S); }
     else if (rot === 2) { f(x, y, F_E); f(x + 1, y, F_W); } else { f(x, y, F_S); f(x, y - 1, F_N); }
@@ -365,6 +370,38 @@ function addWall(R, rp, x, y, type, rot, bp) {
     else if (rot === 2) { f(x, y, F_E | F_S); f(x + 1, y, F_W); f(x, y - 1, F_N); } else { f(x, y, F_S | F_W); f(x, y - 1, F_N); f(x - 1, y, F_E); }
   }
 }
+/* a closed leaf with a second state fences its edge in an overlay of its own (global tile key -> bits), so opening it takes back
+   exactly what it laid: the region's clip is never unpicked, and a square reloading lays its doors again in their current state.
+   An "Open" loc with no second state stays passable, so nothing can shut a player in. */
+const doorClip = new Map(), doorEdges = new Map(), tileDoors = new Map();
+function doorWall(key, pl, def) {
+  const old = doorEdges.get(key);
+  if (old) {
+    doorEdges.delete(key);
+    for (let i = 0; i < old.length; i += 2) {
+      const t = old[i], s = tileDoors.get(t);
+      s.delete(key);
+      let b = 0;
+      for (const k of s) { const e = doorEdges.get(k); for (let j = 0; j < e.length; j += 2) if (e[j] === t) b |= e[j + 1]; }
+      if (b) doorClip.set(t, b); else { doorClip.delete(t); tileDoors.delete(t); }
+    }
+  }
+  const pair = pl && doorPairs.get(pl.id);
+  if (!pair || !pair.closed || (pl.type > 3 && pl.type !== 9) || !def || def.clipType === 0) return;
+  const rp = clipPlane(pl.plane, pl.gx, pl.gy);
+  if (rp < 0) return;
+  const bp = def.blocksProjectile !== false, e = [];
+  if (pl.type === 9) e.push((rp * 8192 + pl.gx) * 16384 + pl.gy, F_OBJ | (bp ? P_OBJ : 0));   // a diagonal leaf holds its tile, as the client's does
+  else wallEdges((gx, gy, b) => e.push((rp * 8192 + gx) * 16384 + gy, bp ? b | (b << 9) : b), pl.gx, pl.gy, pl.type, pl.rot);
+  doorEdges.set(key, e);
+  for (let i = 0; i < e.length; i += 2) {
+    const t = e[i];
+    doorClip.set(t, (doorClip.get(t) | 0) | e[i + 1]);
+    let s = tileDoors.get(t);
+    if (!s) tileDoors.set(t, s = new Set());
+    s.add(key);
+  }
+}
 const OPENABLE = /^(open|close|shut)$/i;
 const openable = (def, id) => doorPairs.has(id) || opsOf(def).some(o => OPENABLE.test(o));
 function clipLoc(R, def, id, pl, w, l) {
@@ -372,7 +409,7 @@ function clipLoc(R, def, id, pl, w, l) {
   if (rp < 0) return;
   if (t === 22) { if (ct === 1) orFlag(R, rp, pl.gx, pl.gy, F_DECO); return; }
   if (t <= 3) { if (ct !== 0 && !openable(def, id)) addWall(R, rp, pl.gx, pl.gy, t, pl.rot, bp); return; }
-  if ((t >= 9 && t <= 21) && ct !== 0) for (let dx = 0; dx < w; dx++) for (let dy = 0; dy < l; dy++) orFlag(R, rp, pl.gx + dx, pl.gy + dy, F_OBJ | (bp ? P_OBJ : 0));
+  if ((t >= 9 && t <= 21) && ct !== 0 && !(t === 9 && doorPairs.has(id))) for (let dx = 0; dx < w; dx++) for (let dy = 0; dy < l; dy++) orFlag(R, rp, pl.gx + dx, pl.gy + dy, F_OBJ | (bp ? P_OBJ : 0));
 }
 /* one step, |dx|,|dy| <= 1, OSRS north = +dy; the client's own masks, diagonals needing both orthogonals */
 function canMove(rp, x, y, dx, dy, proj, last) {
@@ -1024,7 +1061,11 @@ async function defsStage(R) {
     }
     const kid = dd[p.id] && !dd[p.id].models ? defaultChild(dd[p.id]) : -1;
     if (kid >= 0 && doorPairs.has(kid)) { pl.src = p.id; pl.id = kid; }   // a toll gate or a quest's trapdoor: the child it shows is the door
-    if (doorPairs.has(pl.id)) { R.work.push({ pl, door: 1 }); continue; }
+    if (doorPairs.has(pl.id)) {
+      const key = pl.plane + ',' + pl.gx + ',' + pl.gy + ',' + pl.type, cur = locOverrides.get(key) || pl;
+      doorWall(key, cur, resolveDef(dd, cur.id));   // walled from the first moment the square stands, before its models come
+      R.work.push({ pl, door: 1 }); continue;
+    }
     /* only a piece with a menu is pickable, and every kind game.js can put to work has one (Chop down, Mine, Bank...); a recorded
        link lends a menu to a piece the map shows without one */
     const linked = !def.ops && transByLoc[p.id] && transByLoc[p.id].some(t => t.lx === gx && t.ly === gy && t.lp === p.plane);
@@ -1135,6 +1176,7 @@ function toggleDoor(ud, mate) {
   }
   const next = toggledPlacement(pl), home = next.id === orig.id && next.gx === orig.gx && next.gy === orig.gy && next.rot === orig.rot;
   if (home) locOverrides.delete(key); else locOverrides.set(key, next);
+  doorWall(key, next, resolveDef(R.locDefs, next.id));
   spawnDoor(R, key, orig, next);
 }
 function doorPartner(ud) {   /* the other leaf of a double door: along the same wall line, in the same state */
@@ -1183,7 +1225,7 @@ function pump() {
 }
 function clear() {
   for (const rid of [...regions.keys()]) unloadRegion(rid);
-  queue = []; locOverrides.clear(); retryAt.clear(); tries.clear();
+  queue = []; locOverrides.clear(); retryAt.clear(); tries.clear(); doorClip.clear(); doorEdges.clear(); tileDoors.clear();
 }
 const pending = () => busy + queue.length;
 
@@ -1519,8 +1561,10 @@ function tileRGB(plane, gx, gy) {   /* the colour the minimap paints for a tile 
   return -1;
 }
 function wallBits(plane, gx, gy) { const r = regionAt(gx, gy); return r ? r.walls[plane * 4096 + (gx & 63) * 64 + (gy & 63)] : 0; }
-/* the 2007 world map composite (wm/img/5.0.png): mapsquares x 18..60, y 39..64, sixteen pixels a square */
-const WORLD_IMG = { src: OUT + '/wm/img/5.0.png', gx0: 18 * 64, gy1: 65 * 64, tpp: 4 };
+/* the 2007 world map composite (wm/img/5.0.png, its missing squares painted in: tools/bake07/worldmap.console.js): mapsquares
+   x 18..60, y 39..64, sixteen pixels a square. x0..x1, y0..y1 (tiles, the far edges exclusive) is the main map's rectangle:
+   the world map shows only this, and past it just the place the player stands in */
+const WORLD_IMG = { src: DATA + '/world.png', gx0: 18 * 64, gy1: 65 * 64, tpp: 4, x0: 18 * 64, x1: 61 * 64, y0: 39 * 64, y1: 65 * 64 };
 let worldImgT = 0;
 function worldImage() {   /* fetched as a blob, so the pixel read below never meets a copy cached without CORS; a failure rests ten seconds */
   if (!worldImg && performance.now() >= worldImgT) {

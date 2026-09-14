@@ -396,10 +396,10 @@ function c7MiniIcons(ctx, k, C, turn) {
   });
 }
 const C7_WMIMG = new Map();
-function c7WmExtras(px, pz, s, W, H, phase) {   /* the world map: dungeon pictures under the squares (phase 0), icons over them (1); px/pz map world x/z to the canvas */
-  const A = phase ? null : c7Get('wmareas.json');
+function c7WmExtras(px, pz, s, W, H, phase, zone) {   /* the world map: dungeon pictures under the squares (phase 0), icons over them (1); px/pz map world x/z to the canvas; zone [x0, y0, x1, y1] tiles bounds both */
+  const A = phase ? null : c7Get('wmareas.json'), [zx0, zy0, zx1, zy1] = zone || [-1e9, -1e9, 1e9, 1e9];
   if (A) for (const [id, , x0, y0, x1, y1, surf] of A.a) {
-    if (surf) continue;
+    if (surf || (x1 + 1) * 64 <= zx0 || x0 * 64 >= zx1 || (y1 + 1) * 64 <= zy0 || y0 * 64 >= zy1) continue;   // only a picture the zone shows is fetched
     const L = px(x0 * 64 - 0.5), T = pz(-(y1 + 1) * 64 + 0.5), Wd = (x1 - x0 + 1) * 64 * s, Hd = (y1 - y0 + 1) * 64 * s;
     if (L > W || T > H || L + Wd < 0 || T + Hd < 0) continue;
     let im = C7_WMIMG.get(id);
@@ -410,7 +410,7 @@ function c7WmExtras(px, pz, s, W, H, phase) {   /* the world map: dungeon pictur
   const M = c7Get('mapicons.json');
   if (!M) { wmDirty = 1; return; }
   for (const e of M.i) {
-    if (e[2] !== 0 && e[2] !== P.plane) continue;
+    if ((e[2] !== 0 && e[2] !== P.plane) || e[0] < zx0 || e[0] >= zx1 || e[1] < zy0 || e[1] >= zy1) continue;
     const x = px(e[0]), y = pz(-e[1]);
     if (x < -10 || y < -10 || x > W + 10 || y > H + 10) continue;
     const im = c7IconImg(e[3]);

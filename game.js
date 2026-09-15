@@ -6049,7 +6049,7 @@ function prayToggle(k) {   // both frames' prayer books click through here
 }
 const OPT_ROWS = [
   { k: 'camSpeed', n: 'Camera speed', min: 0.6, max: 5, step: 0.4, fmt: v => v.toFixed(1) + 'x' },
-  { k: 'viewRadius', n: 'View distance', min: 3, max: 9, step: 1, fmt: v => v + ' chunks', apply: 1 },
+  { k: 'viewRadius', n: 'View distance', min: 3, max: 24, step: 1, fmt: v => v + ' chunks', apply: 1 },   // past 9 for a fast machine on a fast line: Gielinor's squares stream out to 417 tiles, the camera backs off to match (m7Reach, camMax)
   { k: 'fog', n: 'Distance fog', tog: 1 }, { k: 'retaliate', n: 'Auto retaliate', tog: 1 }, { k: 'timers', n: 'Respawn clocks', tog: 1 }, { k: 'xpDrops', n: 'Xp drops', tog: 1 },
   { k: 'hideRoofs', n: 'Hide all roofs', tog: 1 }, { k: 'pvpWarn', n: 'PvP border warning', tog: 1 },
   { k: 'osrs', n: '2007 models', tog: 1 }, { k: 'uiFixed', n: 'Fixed interface', tog: 1 },
@@ -6091,7 +6091,7 @@ function applyOpts(r) {
   scene.fog = OPT.fog ? (M7 ? new THREE.Fog(SKY, m7Reach() * 0.55, m7Reach()) : new THREE.Fog(SKY, 120, OPT.viewRadius * CHUNK * 0.95)) : null;   // Gielinor fogs out where its squares stop
   renderer.setClearColor(new THREE.Color(SKY).multiplyScalar(OPT.brightness));
   mat.color.setScalar(OPT.brightness); tintMat.color.setScalar(OPT.brightness); OSRSK.brightness(OPT.brightness); MAP07.setBrightness(OPT.brightness);
-  if (r && r.apply) { RADIUS = OPT.viewRadius; refresh(); }
+  if (r && r.apply) { RADIUS = OPT.viewRadius; dist = Math.min(dist, camMax()); refresh(); }   // a nearer view pulls a far-backed camera in with it
   for (const rec of chunks.values()) for (const b of rec.roofs) if (b.roof) b.roof.visible = roofShown(b);
   document.body.classList.toggle('budget', !!OPT.budget);
   const db = el('devBudget'); if (db) db.classList.toggle('on', !!OPT.budget);
@@ -6603,7 +6603,9 @@ on(dom, 'contextmenu', e => {
   }
   openCtx(e.clientX, e.clientY, opts);
 });
-on(dom, 'wheel', e => { e.preventDefault(); dist = clamp(dist * (1 + Math.sign(e.deltaY) * 0.12), 8, 190); }, { passive: false });
+/* how far the camera may back off: 190 as it always was, further once the view distance streams the ground to be seen from there */
+const camMax = () => clamp((M7 ? m7Reach() : OPT.viewRadius * CHUNK) * 0.8, 190, 700);
+on(dom, 'wheel', e => { e.preventDefault(); dist = clamp(dist * (1 + Math.sign(e.deltaY) * 0.12), 8, camMax()); }, { passive: false });
 /* touch: one finger orbits (the pointer path above), two fingers pinch to zoom */
 const touches = new Map();
 let pinchD = 0;
@@ -6619,7 +6621,7 @@ on(dom, 'pointermove', e => {
   if (touches.size !== 2) return;
   e.preventDefault();
   const d2 = spanOf(touches);
-  if (pinchD > 0 && d2 > 0) dist = clamp(dist * (pinchD / d2), 8, 190);
+  if (pinchD > 0 && d2 > 0) dist = clamp(dist * (pinchD / d2), 8, camMax());
   pinchD = d2;
 }, { passive: false });
 on(dom, 'pointerup pointercancel', e => {
@@ -11967,10 +11969,13 @@ function examine07(it) {   // the cache's own words, fetched with the item's con
 function isMapSeed(s) { return String(s || '').trim().toLowerCase() === 'gielinor'; }
 const M7_FIG = 103 / 128;   // osrs.js sizes a figure at 1/103 to match the box rig; the map stands at the cache's own 1/128
 const M7_HOME = [3222, 3218];   // Lumbridge castle courtyard: where every 2007 account began, and where the dead wake
-const M7_SPAWN_R = 36, M7_DESPAWN_R = 52, M7_CAP = 160;   // monsters come up this near and go this far; 2007 towns are crowded
+/* monsters come up this near and go this far; 2007 towns are crowded. A view distance past 9 widens both and the cap with them, so
+   the far ground the camera now backs off to is peopled too */
+const m7Wide = () => Math.max(0, OPT.viewRadius - 9);
+const m7SpawnR = () => 36 + m7Wide() * 2, m7DespawnR = () => 52 + m7Wide() * 2, m7Cap = () => 160 + m7Wide() * 8;
 function m7Y(x, z, pl) { return MAP07.yAt(pl === undefined ? P.plane : pl, x, z); }
 const m7Key = (gx, gy, pl) => tk(gx, -gy) + pl * 68719476736;   // the floor rides above the tile key: a ladder's top is not its foot
-const m7Reach = () => clamp(OPT.viewRadius * 13, 64, 144);   // squares within this many tiles stream in (91 at the default view distance); the fog closes there
+const m7Reach = () => OPT.viewRadius <= 9 ? clamp(OPT.viewRadius * 13, 64, 144) : 117 + (OPT.viewRadius - 9) * 20;   // squares within this many tiles stream in (91 at the default view distance, 417 at the most); the fog closes there
 let m7ViewPlane = 3, m7PlaneWas = -1, m7MapDirty = 0, m7Inited = 0;
 const m7Live = new Set(), m7Props = [], m7DropMeshes = new Map(), m7ItemState = new Map();
 const m7Shown = pl => (pl | 0) <= m7ViewPlane;
@@ -12161,16 +12166,17 @@ function m7Type(def) {
   return t;
 }
 function m7Npcs() {
-  for (let i = npcs.length - 1; i >= 0; i--) { const n = npcs[i]; if (SEAM && n.c7 === undefined) continue; if (Math.abs(n.tx - P.tx) > M7_DESPAWN_R || Math.abs(n.tz - P.tz) > M7_DESPAWN_R) removeNpc(n); }
-  for (let i = m7Props.length - 1; i >= 0; i--) { const p = m7Props[i]; if (Math.abs(p.x - P.tx) > M7_DESPAWN_R || Math.abs(p.z - P.tz) > M7_DESPAWN_R) m7PropGone(i); }
+  const SR = m7SpawnR(), DR = m7DespawnR(), CAP = m7Cap();
+  for (let i = npcs.length - 1; i >= 0; i--) { const n = npcs[i]; if (SEAM && n.c7 === undefined) continue; if (Math.abs(n.tx - P.tx) > DR || Math.abs(n.tz - P.tz) > DR) removeNpc(n); }
+  for (let i = m7Props.length - 1; i >= 0; i--) { const p = m7Props[i]; if (Math.abs(p.x - P.tx) > DR || Math.abs(p.z - P.tz) > DR) m7PropGone(i); }
   const gx = P.tx, gy = -P.tz, want = [];
   /* nearest first, your own floor before the others: the cap is spent on what stands round you, not on whichever square loaded first */
   for (const R of MAP07.regions.values()) {
     if (!R.ready || !R.spawns || !R.spawns.length) continue;
     const x0 = R.sqX * 64, y0 = R.sqY * 64;
-    if (gx < x0 - M7_SPAWN_R || gx > x0 + 63 + M7_SPAWN_R || gy < y0 - M7_SPAWN_R || gy > y0 + 63 + M7_SPAWN_R) continue;
+    if (gx < x0 - SR || gx > x0 + 63 + SR || gy < y0 - SR || gy > y0 + 63 + SR) continue;
     for (const s of R.spawns) {
-      if (Math.abs(s.x - gx) > M7_SPAWN_R || Math.abs(s.y - gy) > M7_SPAWN_R) continue;
+      if (Math.abs(s.x - gx) > SR || Math.abs(s.y - gy) > SR) continue;
       const key = 'g' + s.i;
       if (m7Live.has(key) || npcDead.has(key)) continue;
       want.push([Math.max(Math.abs(s.x - gx), Math.abs(s.y - gy)) + ((s.plane | 0) === P.plane ? 0 : 1000), s, key]);
@@ -12180,7 +12186,7 @@ function m7Npcs() {
     want.sort((a, b) => a[0] - b[0]);
     /* a full cap gives a nearer spawn the farthest figure standing past spawning reach (other floors first), never one in a fight */
     const far = () => {
-      let best = null, bd = M7_SPAWN_R;
+      let best = null, bd = SR;
       for (const n of npcs) {
         if (n.c7 === undefined || n.target || (P.task && P.task.o === n)) continue;
         const d = Math.max(Math.abs(n.tx - P.tx), Math.abs(n.tz - P.tz)) + ((n.pl | 0) === P.plane ? 0 : 1000);
@@ -12189,7 +12195,7 @@ function m7Npcs() {
       return best;
     };
     for (const [d, s, key] of want) {
-      if (npcs.length >= M7_CAP) { if (d > M7_SPAWN_R) break; const n = far(); if (!n) break; removeNpc(n); }
+      if (npcs.length >= CAP) { if (d > SR) break; const n = far(); if (!n) break; removeNpc(n); }
       m7Spawn(s, key);
     }
   }
@@ -12269,7 +12275,7 @@ function m7ItemId(cid) {
 }
 function m7Items() {
   for (const s of MAP07.itemSpawns()) {
-    if (Math.abs(s.x - P.tx) > M7_SPAWN_R || Math.abs(-s.y - P.tz) > M7_SPAWN_R || !MAP07.regionAt(s.x, s.y) || MAP07.regionAt(s.x, s.y).syn) continue;   // the map's own items lie in its own squares, not in a made one at the same tiles
+    if (Math.abs(s.x - P.tx) > m7SpawnR() || Math.abs(-s.y - P.tz) > m7SpawnR() || !MAP07.regionAt(s.x, s.y) || MAP07.regionAt(s.x, s.y).syn) continue;   // the map's own items lie in its own squares, not in a made one at the same tiles
     let st = m7ItemState.get(s.i);
     if (!st) m7ItemState.set(s.i, st = { d: null, due: 0 });
     if (st.d && drops.includes(st.d)) continue;

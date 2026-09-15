@@ -1203,11 +1203,37 @@ async function sceneryStage(R) {
     await run;
   } finally { scenic--; unpin(R.mids); }
 }
+/* ---- the far view: a view distance past the old reach streams squares hundreds of tiles out, and there a square's clutter — its
+   flowers, grass tufts, pebbles and ground dressing, anything a tile across with no menu — is too small to see and costs more than
+   everything else it draws. A square built farther than LOD_FAR leaves it for later and lays it once you come within LOD_NEAR; the
+   default reach never streams a square that far, so nothing changes there ---- */
+const LOD_FAR = 176, LOD_NEAR = 128;
+const lodFocus = { gx: 0, gy: 0, reach: 0 };
+const squareDist = (R, gx, gy) => { const x0 = R.sqX * 64, y0 = R.sqY * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
+const clutter = q => !q.ud && q.seq === undefined && (q.pl.type === 22 || ((q.pl.type === 10 || q.pl.type === 11) && (q.def.width || 1) <= 1 && (q.def.length || 1) <= 1));
+async function buildClutter(R) {   // a far-built square's clutter, laid now that it is near
+  const list = R.clutter, rid = R.rid, gone = () => regions.get(rid) !== R;
+  R.clutter = null;
+  if (!list || !list.length) return;
+  const mids = [];
+  for (const q of list) for (const m of q.def.models || []) mids.push(m.model);
+  pin(mids);
+  try {
+    await models(mids);
+    await breathe();
+    if (gone()) return;
+    const sinks = [0, 1, 2, 3].map(() => makeSink());
+    for (const q of list) { drawLoc(sinks[q.rp], q.def, q.pl, null, false); if (overBudget()) { await breathe(); if (gone()) return; } }
+    for (let p = 0; p < 4; p++) { const g = new THREE.Group(); planeG[p].add(g); R.groups.push(g); flushSink(sinks[p], g); }
+  } finally { unpin(mids); }
+}
 async function buildScenery(R) {
   const rid = R.rid, gone = () => regions.get(rid) !== R, sinks = [0, 1, 2, 3].map(() => makeSink()), later = [], anims = [[], [], [], []];
   await breathe();
   if (gone()) return;
+  const far = lodFocus.reach > LOD_FAR && squareDist(R, lodFocus.gx, lodFocus.gy) > LOD_FAR;
   for (const q of R.work) {
+    if (far && clutter(q)) { (R.clutter || (R.clutter = [])).push(q); continue; }
     if (q.door || q.dyn) { later.push(q); continue; }
     if (q.seq !== undefined) {   /* an animated piece keeps its models and transforms, to be posed later */
       const rec = { rec: [], ud: null };
@@ -1315,7 +1341,9 @@ const streams = rid => inMain(rid) ? manifest.has(rid) : scopeAll ? manifest.has
 function update(gx, gy, reach) {
   if (!loaded) return;
   const dist = rid => { const x0 = sqXOf(rid) * 64, y0 = sqYOf(rid) * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
+  lodFocus.gx = gx; lodFocus.gy = gy; lodFocus.reach = reach;
   for (const rid of [...regions.keys()]) if (dist(rid) > reach + 48 || (!inMain(rid) && (regions.get(rid).syn ? scopeAll || !synth : !scopeAll))) unloadRegion(rid);
+  for (const R of regions.values()) if (R.clutter && R.built && !R.clutterQ && dist(R.rid) < LOD_NEAR) { R.clutterQ = 1; const run = buildLane.then(() => buildClutter(R)); buildLane = run.catch(() => {}); }   // come near a far-built square: its clutter, in the build lane
   const rx = gx >> 6, ry = gy >> 6, n = Math.ceil(reach / 64) + 1, list = [], now = performance.now();
   for (let dx = -n; dx <= n; dx++) for (let dy = -n; dy <= n; dy++) {
     if (!synth && (ry + dy < 0 || ry + dy > 255 || rx + dx < 0)) continue;   // the tree's squares keep to the byte; the made world runs every way

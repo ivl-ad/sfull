@@ -202,7 +202,25 @@ function syPiece(desc) {
         if (!comp[k]) for (let a = -1; a <= 1 && !edge; a++) for (let b = -1; b <= 1; b++) { const u = x + a, v = y + b; if (u >= 0 && v >= 0 && u < W && v < L && out[at(u, v)]) { edge = 1; break; } }
         M[k] = edge ? 1 : 2;
       }
-      if (house) for (let k = 0; k < W * L; k++) if (house[k] && M[k]) { M[k] = 0; drop[k] = 1; }   // not even what an open-air piece closes in
+      if (house) {
+        for (let k = 0; k < W * L; k++) if (house[k] && M[k]) { M[k] = 0; drop[k] = 1; }   // not even what an open-air piece closes in
+        /* and only its main group of open-air pieces — a fountain and whatever stands within four tiles of it, a row of stalls — so the
+           square is fitted to it and it stands in the square's middle; a lone bench or crate out by the window's edge stays behind */
+        const cl = new Int32Array(W * L);
+        let id = 0, best = 0, bestN = 0;
+        for (let c0 = 0; c0 < W * L; c0++) {
+          if (!M[c0] || cl[c0]) continue;
+          let n = 0;
+          cl[c0] = ++id; st.length = 0; st.push(c0);
+          while (st.length) {
+            const c = st.pop(), x = (c / L) | 0, y = c % L;
+            n++;
+            for (let a = -4; a <= 4; a++) for (let b = -4; b <= 4; b++) { const u = x + a, v = y + b, k = at(u, v); if (u >= 0 && v >= 0 && u < W && v < L && M[k] && !cl[k]) { cl[k] = id; st.push(k); } }
+          }
+          if (n > bestN) { bestN = n; best = id; }
+        }
+        for (let k = 0; k < W * L; k++) if (M[k] && cl[k] !== best) { M[k] = 0; drop[k] = 1; }
+      }
       if (!whole) {   // a district's own lanes, ponds and pools lying wholly inside it come too; a road, a river or a lava flow its edge would cut stays behind
         const seen = new Uint8Array(W * L);
         for (let c0 = 0; c0 < W * L; c0++) {
@@ -436,10 +454,10 @@ function syCity(v) {
   for (const k of fall) if (pool.length < 10) pool = pool.concat(DS[k] || []);
   const nd = v.metro && AV >= 40 ? Math.min(pool.length, 8 + Math.round(10 * q)) : 0, dists = [];   // asked of generously: a district that keeps too little of its town whole is not taken (syCityReady)
   for (let k = 0; k < pool.length * 3 && dists.length < nd; k++) { const d = pool[(hash2(gx + k * 17, gy - k * 29, S + 1741) >>> 0) % pool.length]; if (!dists.includes(d)) dists.push(d); }
-  const AW = v.sprawl >= 320 ? 4 : 3, plaza = Math.max(2, Math.min(Math.floor(v.sprawl * 0.22), 3 + v.rank + Math.round(q * 9) + (v.metro ? 4 : 0)));   // a great city's square is a great square
+  const AW = v.sprawl >= 320 ? 4 : 3, plaza = Math.max(2, Math.min(Math.floor(v.sprawl * 0.22), 3 + v.rank + Math.round(q * 3)));   // a town's square a few tiles round its crossing; a city's is fitted to its market when the market comes (syCityFit)
   /* a great city's square holds a market: a real town's own (Draynor's, Ardougne's, Sophanem's...), its country's when it has one */
   const MK = SY.data.markets || {}, all = [].concat(...Object.values(MK)), markets = (MK[bn] || []).length ? MK[bn] : all;
-  const market = v.metro && plaza * 2 + AW >= 24 && markets.length ? markets[(h >>> 13) % markets.length] : null;
+  const market = v.metro && markets.length ? markets[(h >>> 13) % markets.length] : null;
   /* and its seat, beside the square: a real town's great building taken alone (synth.json's keeps: Varrock's palace, Falador's
      castle, Lumbridge's, Camelot, Kourend's...), its own country's most often; every metropolis has one, half the great towns */
   const FS = SY.data.features || {}, KS = [].concat(...Object.values(FS)).filter(d => d[4] === 'keep'), ownK = (FS[bn] || []).filter(d => d[4] === 'keep');
@@ -450,10 +468,23 @@ function syCity(v) {
 function syCityReady(C) {   // its country's buildings, its neighbours', its far countries', its districts, its market and its seat (a piece that will not come is left out)
   if (C.T && C.P && (!C.market || C.M !== null) && (!C.seat || C.K !== null)) return Promise.resolve(C);
   return C.ready || (C.ready = Promise.all([Promise.all(C.sets.map(syTpl)), Promise.all(C.dists.map(d => syPiece(d).catch(() => null))), C.market ? syPiece(C.market).catch(() => 0) : 0, C.seat ? syPiece(C.seat).catch(() => 0) : 0])
-    .then(([T, P, M, K]) => { C.T = T; C.P = P.filter(t => t && t.fill >= 0.18); C.M = M ? syRot(M, (C.h >>> 23) & 3) : 0; C.K = K || 0; return C; }));
+    .then(([T, P, M, K]) => { C.T = T; C.P = P.filter(t => t && t.fill >= 0.18); syCityFit(C, M ? syRot(M, (C.h >>> 23) & 3) : 0); C.K = K || 0; return C; }));
+}
+/* the square fitted to its market once the market has come (before any block is laid): the market's own pieces — its fountain, its
+   stalls — with a few tiles of open paving round them, never the whole great square the window was cut from. A market that keeps
+   nothing leaves the square a town's */
+function syCityFit(C, M) {
+  if (C.M !== null && C.M !== undefined && C.fit) return;
+  C.M = M; C.fit = 1;
+  if (!M || !M.M) return;
+  let x0 = 1e9, y0 = 1e9, x1 = -1, y1 = -1;
+  for (let x = 0; x < M.w; x++) for (let y = 0; y < M.l; y++) if (M.M[x * M.l + y]) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (x1 < 0) { C.M = 0; return; }
+  M.core = [x0, y0, x1, y1];
+  C.plaza = clamp(Math.ceil(Math.max(x1 - x0 + 1, y1 - y0 + 1) / 2) + 3 - (C.AW >> 1), C.plaza, 16);
 }
 const syCityOK = C => !!((C.T || (C.sets.every(k => SY.tpl[k]) && (C.T = C.sets.map(k => SY.tpl[k])))) && (C.P || (C.dists.every(d => SYP_T.has(syPieceKey(d))) && (C.P = C.dists.map(d => SYP_T.get(syPieceKey(d))).filter(t => t.fill >= 0.18))))
-  && (!C.market || C.M !== null || (SYP_T.has(syPieceKey(C.market)) && (C.M = syRot(SYP_T.get(syPieceKey(C.market)), (C.h >>> 23) & 3))))
+  && (!C.market || C.M !== null || (SYP_T.has(syPieceKey(C.market)) && (syCityFit(C, syRot(SYP_T.get(syPieceKey(C.market)), (C.h >>> 23) & 3)), true)))
   && (!C.seat || C.K !== null || (SYP_T.has(syPieceKey(C.seat)) && (C.K = SYP_T.get(syPieceKey(C.seat))))));
 /* ---- a city's wards: its blocks four by four, the heart's ward round the square, and the avenues between wards always kept. A
    ward may give some of its blocks (one to all sixteen) to one whole real piece, laid on those blocks' own ground with the avenues
@@ -527,7 +558,7 @@ async function syCityWards(C, bx, by) {   // the ward pieces a square lays, fetc
 function syMarket(C) {   // the square's market as a laid piece, or null
   if (!C.M) return null;
   if (C.MP) return C.MP;
-  const cx = C.gx + (C.AW >> 1), cy = C.gy + (C.AW >> 1), x0 = cx - (C.M.w >> 1), y0 = cy - (C.M.l >> 1);
+  const k = C.M.core || [0, 0, C.M.w - 1, C.M.l - 1], cx = C.gx + (C.AW >> 1), cy = C.gy + (C.AW >> 1), x0 = cx - ((k[0] + k[2] + 1) >> 1), y0 = cy - ((k[1] + k[3] + 1) >> 1);   // its own pieces' middle on the crossing's, not its window's
   return C.MP = { t: C.M, x0, y0, x1: x0 + C.M.w - 1, y1: y0 + C.M.l - 1, base: syH(syField(cx, cy)) };
 }
 function syCityList(C, k, i, j, u) {   // the buildings a plot of kind k draws from
@@ -660,6 +691,7 @@ function syCityBlock(C, i, j) {   // needs C.T (syCityOK)
   };
   if (B.park) { yardSpots(2 + hs % 3, 6, 1); yardSpots(Math.round(C.dens), 9, 2); }   // squirrels, rabbits and birds, and a stroller or two
   else if (C.stock && dq > 0.7) yardSpots(2 + (hs >>> 5) % 4, 5, 3);   // the suburbs keep cattle and sheep
+  if (!B.park) yardSpots(Math.round(C.dens * (0.5 + ((hs >>> 17) & 1))), 9, 6);   // and a soul or two about every block's yards and gardens: the town's folk all through it, not heaped on its square
   if ((hs >>> 11) % 100 < 20) yardSpots(1, 6, 4);   // the odd rat about the buildings
   const wx = C.gx + i * AV, sy = C.gy + j * AV;
   for (let k = 0, n = Math.round(C.dens * (1 + (hs >>> 14) % 2)); k < n; k++) {   // passers-by: along the side streets and the two avenues this block owns (west and south)
@@ -676,7 +708,7 @@ function syCityBlock(C, i, j) {   // needs C.T (syCityOK)
 function syCrowd(C) {   // the heart square's crowd, and the watch at its corners
   if (C.crowd) return C.crowd;
   const pl = C.plaza, side = pl * 2 + C.AW, out = [];
-  for (let k = 0, n = Math.max(2, Math.round(side * side * C.dens / 60)); k < n; k++) { const hh = hash2(C.gx + k * 31, C.gy - k * 17, S + 1722) >>> 0; out.push([C.gx - pl + hh % side, C.gy - pl + (hh >>> 12) % side, 7]); }
+  for (let k = 0, n = clamp(Math.round(side * side * C.dens / 400), 2, 7); k < n; k++) { const hh = hash2(C.gx + k * 31, C.gy - k * 17, S + 1722) >>> 0; out.push([C.gx - pl + hh % side, C.gy - pl + (hh >>> 12) % side, 7]); }   // a handful about the square: the town's folk are about its every street (syCityBlock)
   for (const [dx, dy] of [[-pl, -pl], [pl + C.AW - 1, -pl], [-pl, pl + C.AW - 1], [pl + C.AW - 1, pl + C.AW - 1]]) out.push([C.gx + dx, C.gy + dy, 1]);
   return C.crowd = out;
 }

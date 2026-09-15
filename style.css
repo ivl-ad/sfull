@@ -474,6 +474,10 @@
   body.osui.osRz #osChat{width:var(--oscw,519px);overflow:hidden;transform:scale(var(--oss,1))}
   body.osui.osRz #invmin,body.osui.osRz.invmin #invmin{top:auto;bottom:calc(336px * var(--oss,1) - 22px);right:calc(249px * var(--oss,1) + 3px)}
   body.osui.osRz #chatmin,body.osui.osRz.chatmin #chatmin{left:calc(var(--oscw,519px) * var(--oss,1) + 3px)}
+  /* the round minimap (game.js osMapFrame) slid well into the corner with its compass and orbs, and the world map globe set where
+     the special attack orb's mirror stands across the map's middle (the orb's ring at 72,145 in the box, the map's middle at 126,80) */
+  body.osui.osRz .osMm{margin-left:40px}
+  body.osui.osRz .osWorldOrb{left:166px!important;top:130px!important}
   body.osui .xp{font-size:12px;color:#fff;text-shadow:1px 1px 0 #000}
   /* Gielinor dialogue (content07.js): over the chat log with the game's own panels; the 2007 frame draws its own */
   .c7html{position:absolute;inset:0;z-index:4;display:flex;align-items:center;padding:6px 10px;box-sizing:border-box;color:#f4ead0;pointer-events:auto}

@@ -12811,6 +12811,7 @@ function osFit() {
    a door a red one; npcs, players and ground items are the mapdots sprites, the walk target the map marker's flag. ---- */
 const osMapS = { cv: null, g: null, cmp: null, cg: null, maskM: null, maskC: null, T: null, tx: 1e9, tz: 1e9, pl: -1, x0: 0, yTop: 0, R: 40, img: {} };
 let osMapDirty = 1, osMapZoom = 4;
+const OS_MM_R = 71.5;   // the resizable layout's round minimap: its radius on the 145x151 canvas
 const osMapZoomBy = f => { const z = clamp(osMapZoom * f, 1.5, 10); if (z !== osMapZoom) { osMapZoom = z; osMapDirty = 1; } };
 function osMask(id, w, h) {   // the drawable rows of a mask sprite as an opaque stencil
   return OSUI.image(id).then(im => {
@@ -12833,8 +12834,9 @@ function osMapInit(c) {
   const S = osMapS;
   S.cmp = document.createElement('canvas'); S.cmp.width = 32; S.cmp.height = 33;
   S.cv = document.createElement('canvas'); S.cv.width = 145; S.cv.height = 151;
-  S.cmp.className = S.cv.className = 'osg';
+  S.cmp.className = S.cv.className = 'osg osMm';   // osMm: the resizable layout slides the map, its compass and its orbs to the right together
   OSUI.at(box, S.cmp, 29, 0); OSUI.at(box, S.cv, 54, 5);
+  for (const i of [24, 25]) if (c[i]) c[i].el.classList.add('osMm');
   box.insertBefore(S.cmp, before); box.insertBefore(S.cv, before);   // at() appends; the cover (1182) must stay on top
   before.style.pointerEvents = 'none';   // ...and let the wheel, pinches and clicks through its hole to the map (the click reads the mask itself)
   S.g = S.cv.getContext('2d'); S.cg = S.cmp.getContext('2d');
@@ -12854,7 +12856,7 @@ function osMapInit(c) {
   on(S.cv, 'click', e => {   // a click inside the mask walks there
     if (mmPinched) return;
     const r = S.cv.getBoundingClientRect(), k = 145 / r.width, px = (e.clientX - r.left) * k - 72, pz = (e.clientY - r.top) * k - 75;
-    if (!S.maskM || !S.maskM.getContext('2d').getImageData(Math.round(px + 72), Math.round(pz + 75), 1, 1).data[3]) return;
+    if (OPT.uiFixed ? !S.maskM || !S.maskM.getContext('2d').getImageData(Math.round(px + 72), Math.round(pz + 75), 1, 1).data[3] : px * px + pz * pz > OS_MM_R * OS_MM_R) return;
     const a = -(yaw + PI), cs = Math.cos(a), sn = Math.sin(a);
     walkTo(P.rx + (px * cs - pz * sn) / osMapZoom, P.rz + (px * sn + pz * cs) / osMapZoom);
   });
@@ -12906,8 +12908,13 @@ function osMapFrame() {
   }
   if (typeof c7MapIcons === 'function') c7MapIcons(g, cs, sn, Z);   // bank, shop, altar...: the map-function icons, upright
   g.globalCompositeOperation = 'destination-in';
-  g.drawImage(S.maskM, 0, 0);
+  if (OPT.uiFixed) g.drawImage(S.maskM, 0, 0);   // the fixed frame's own shape, under its stone
+  else { g.beginPath(); g.arc(72.5, 75.5, OS_MM_R, 0, PI * 2); g.fill(); }   // resizable: a round map with no stone round it
   g.globalCompositeOperation = 'source-over';
+  if (!OPT.uiFixed) {   // ...ringed thinly: a dark hairline outside, a warm gilt one inside
+    g.lineWidth = 1.6; g.strokeStyle = 'rgba(12,10,6,0.9)'; g.beginPath(); g.arc(72.5, 75.5, OS_MM_R - 0.8, 0, PI * 2); g.stroke();
+    g.lineWidth = 1; g.strokeStyle = 'rgba(214,186,120,0.85)'; g.beginPath(); g.arc(72.5, 75.5, OS_MM_R - 2.1, 0, PI * 2); g.stroke();
+  }
   g.fillStyle = '#fff'; g.fillRect(71, 74, 3, 3);   // you
   if (S.maskC && S.img.compass) {
     const k = S.cg;
@@ -12930,7 +12937,7 @@ function osOrbsInit(c) {
   if (!host) return;
   OSUI.mount(160, host, 236, 163).then(o => {
     for (const i of [43, 48, 50]) if (o[i]) o[i].el.hidden = true;   // store, activity adviser, wiki: nothing in this world answers them
-    if (o[49]) { o[49].el.style.left = '196px'; o[49].el.style.top = '115px'; }   // script 1700 sets the world map orb 10 in from the right, 115 down
+    if (o[49]) { o[49].el.style.left = '196px'; o[49].el.style.top = '115px'; o[49].el.classList.add('osWorldOrb'); }   // script 1700 sets the world map orb 10 in from the right, 115 down (the resizable layout mirrors the special attack orb instead: style.css)
     osOrb = { o, key: {} };
     const hover = (btn, frame, when) => { const B = o[btn]; if (!B) return; B.el.classList.add('osHit');
       on(B.el, 'pointerenter', () => { if (!when || when()) OSUI.setSprite(o[frame].el, 1072); }); on(B.el, 'pointerleave', () => OSUI.setSprite(o[frame].el, 1071)); };

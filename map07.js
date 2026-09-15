@@ -185,15 +185,35 @@ function parseModel(buf) {     /* m/<id>.bin record */
   const at = n => (o += n) - n;   /* views into the fetched buffer, not copies: every field lands on an even offset */
   const verts = new Int16Array(buf, at(vc * 6), vc * 3), idx = new Uint16Array(buf, at(fc * 6), fc * 3), colors = new Uint16Array(buf, at(fc * 2), fc);
   const texs = flags & M_TEX ? new Uint16Array(buf, at(fc * 2), fc) : null;
-  o += ttc * 6;
+  const ttri = ttc ? new Uint16Array(buf, at(ttc * 6), ttc * 3) : null;   /* texture triangles (P, M, N): the plane a textured face's texture lies in */
   const types = flags & M_TYPES ? new Int8Array(buf, at(fc), fc) : null;
   const alphas = flags & M_ALPHA ? new Uint8Array(buf, at(fc), fc) : null;
   const prios = flags & M_PRIOS ? new Uint8Array(buf, at(fc), fc) : null;
-  if (flags & M_TCOORD) o += fc;
-  o += ttc;
+  const tcoords = flags & M_TCOORD ? new Int8Array(buf, at(fc), fc) : null;   /* each face's texture triangle, -1 for its own corners */
+  const ttypes = ttc ? new Uint8Array(buf, at(ttc), ttc) : null;   /* 0 planar; the cylinder and cube kinds map as the face's own */
   const vgroups = flags & M_VGROUP ? new Uint8Array(buf, at(vc), vc) : null;
-  return layerFaces({ vc, fc, verts, idx, colors, texs, types, alphas, prios, vgroups });
+  return layerFaces({ vc, fc, verts, idx, colors, texs, types, alphas, prios, vgroups, ttri, tcoords, ttypes });
 }
+/* a textured face's texture coordinates as the client maps them, into uv[o..o+5] for its corners in drawn order (i0, 1, i2): each
+   corner projected onto the plane of its texture triangle, u along M - P and v along N - P, the texture's top row at v 0 — the
+   triangle the model names (a fountain's spray, a banner's cloth, a window's pane laid across many faces), else the face's own
+   corners. Model space: a turn or a mirror moves the corners and their triangle together */
+function faceUV(m, f, i0, i2, uv, o) {
+  const V = m.verts, I = m.idx, tc = m.tcoords ? m.tcoords[f] : -1;
+  let p = I[f * 3] * 3, q = I[f * 3 + 1] * 3, r = I[f * 3 + 2] * 3;
+  if (tc >= 0 && m.ttri && tc * 3 + 2 < m.ttri.length && (!m.ttypes || m.ttypes[tc] === 0)) { p = m.ttri[tc * 3] * 3; q = m.ttri[tc * 3 + 1] * 3; r = m.ttri[tc * 3 + 2] * 3; }
+  else if (i0) { const s = p; p = r; r = s; }   /* the client's mirror starts a face's own triangle from its swapped corner */
+  const Px = V[p], Py = V[p + 1], Pz = V[p + 2], Ux = V[q] - Px, Uy = V[q + 1] - Py, Uz = V[q + 2] - Pz, Wx = V[r] - Px, Wy = V[r + 1] - Py, Wz = V[r + 2] - Pz;
+  const nx = Uy * Wz - Uz * Wy, ny = Uz * Wx - Ux * Wz, nz = Ux * Wy - Uy * Wx;
+  const ax = Wy * nz - Wz * ny, ay = Wz * nx - Wx * nz, az = Wx * ny - Wy * nx, bx = ny * Uz - nz * Uy, by = nz * Ux - nx * Uz, bz = nx * Uy - ny * Ux;
+  const du = Ux * ax + Uy * ay + Uz * az, dv = Wx * bx + Wy * by + Wz * bz;
+  for (const k of [i0, 1, 2 - i0]) {
+    const s = I[f * 3 + k] * 3, dx = V[s] - Px, dy = V[s + 1] - Py, dz = V[s + 2] - Pz;
+    uv[o++] = du ? (dx * ax + dy * ay + dz * az) / du : k === 1 ? 1 : 0;
+    uv[o++] = 1 - (dv ? (dx * bx + dy * by + dz * bz) / dv : k === i0 ? 0 : k === 1 ? 0 : 1);
+  }
+}
+const uvTmp = new Float32Array(6);
 /* the client never draws render-type-2 faces nor alpha-255 ones: modellers use them for hidden helper geometry */
 const faceHidden = (m, f) => (m.types !== null && m.types[f] === 2) || (m.alphas !== null && m.alphas[f] > 250);
 
@@ -518,7 +538,8 @@ function appendModel(sink, m, t, flat) {
       let bk = T.get(tid);
       if (!bk) T.set(tid, bk = { pos: [], uv: [], owners: [], col: al ? [] : null });
       bk.pos.push(ax, ay, az, bx, by, bz, cx, cy, cz);
-      bk.uv.push(0, 0, 1, 0, 0, 1); bk.owners.push(ud);
+      faceUV(m, f, i0, i2, uvTmp, 0);
+      bk.uv.push(uvTmp[0], uvTmp[1], uvTmp[2], uvTmp[3], uvTmp[4], uvTmp[5]); bk.owners.push(ud);
       if (al) bk.col.push(1, 1, 1, op, 1, 1, 1, op, 1, 1, 1, op);
       continue;
     }
@@ -593,51 +614,63 @@ function flushSink(s, g) {
 const ANIM_R = 26;
 function animFlush(list, g) {
   flatMats();
-  const pieces = [];
-  let nO = 0, nT = 0;
+  /* its faces by how they are drawn, as a still placement's are (appendModel): flat or textured (a texture each), solid or see-through.
+     A fountain's spray, a torch's flame and a flag's cloth are textured faces; flat, they were slabs of the face's plain colour */
+  const pieces = [], counts = new Map();
   for (const it of list) for (let k = 0; k < it.rec.length; k += 2) {
-    const m = it.rec[k], t = it.rec[k + 1], fo = [], ft = [];
-    for (let f = 0; f < m.fc; f++) if (!faceHidden(m, f)) (m.alphas && m.alphas[f] ? ft : fo).push(f);
-    pieces.push({ m, t, ud: it.ud, seq: it.seq, ph: it.ph, fo, ft, o: nO, to: nT, idx: -2, total: 0, work: null,
-      groups: m.vgroups ? labelGroups(m.vgroups, m.vc) : null, x: t.cx, y: -t.cz });
-    nO += fo.length; nT += ft.length;
+    const m = it.rec[k], t = it.rec[k + 1], lists = new Map();
+    for (let f = 0; f < m.fc; f++) {
+      if (faceHidden(m, f)) continue;
+      let tid = m.texs ? m.texs[f] - 1 : -1;
+      if (tid >= 0 && t.retex && t.retex.has(tid)) tid = t.retex.get(tid);
+      const q = (tid >= 0 && textures[tid] !== undefined ? tid : -1) + (m.alphas && m.alphas[f] ? ':a' : ':o');
+      (lists.get(q) || lists.set(q, []).get(q)).push(f);
+    }
+    const pc = { m, t, ud: it.ud, seq: it.seq, ph: it.ph, parts: [], idx: -2, total: 0, work: null, groups: m.vgroups ? labelGroups(m.vgroups, m.vc) : null, x: t.cx, y: -t.cz };
+    for (const [q, fl] of lists) { const n = counts.get(q) || 0; pc.parts.push([q, fl, n]); counts.set(q, n + fl.length); }
+    pieces.push(pc);
   }
-  const batch = (n, stride, mat) => {
-    if (!n) return null;
-    const B = { pos: new Float32Array(n * 9), nrm: new Float32Array(n * 9), col: new Float32Array(n * 3 * stride), owners: new Array(n), mesh: null };
-    B.stride = stride; B.mat = mat;
-    return B;
-  };
-  const O = batch(nO, 3, matFlat), T = batch(nT, 4, matFlatT);
+  const batches = new Map();
+  for (const [q, n] of counts) {
+    const tid = parseInt(q, 10), al = q.endsWith(':a'), tex = tid >= 0, stride = al ? 4 : 3;
+    batches.set(q, { pos: new Float32Array(n * 9), nrm: new Float32Array(n * 9), col: tex && !al ? null : new Float32Array(n * 3 * stride), uv: tex ? new Float32Array(n * 6) : null,
+      owners: new Array(n), mesh: null, stride, dirty: 0, mat: tex ? (al ? texMaterialT(tid) : texMaterial(tid)) : al ? matFlatT : matFlat });
+  }
   for (const pc of pieces) {
-    const { m, t } = pc;
-    for (const [B, list, base] of [[O, pc.fo, pc.o], [T, pc.ft, pc.to]]) {
-      for (let i = 0; i < list.length; i++) {
-        const f = list[i], c = faceColor(m, f, t.recol, t.retex), o = (base + i) * 3 * B.stride;
-        for (let k = 0; k < 3; k++) { const q = o + k * B.stride; B.col[q] = c[0]; B.col[q + 1] = c[1]; B.col[q + 2] = c[2]; if (B.stride === 4) B.col[q + 3] = 1 - m.alphas[f] / 255; }
+    const { m, t } = pc, i0 = t.mirror ? 2 : 0;
+    pc.parts = pc.parts.map(([q, fl, base]) => [batches.get(q), fl, base]);
+    for (const [B, fl, base] of pc.parts) {
+      for (let i = 0; i < fl.length; i++) {
+        const f = fl[i];
+        if (B.uv) faceUV(m, f, i0, 2 - i0, B.uv, (base + i) * 6);
+        if (B.col) {
+          const c = B.uv ? WHITE : faceColor(m, f, t.recol, t.retex), o = (base + i) * 3 * B.stride;
+          for (let k = 0; k < 3; k++) { const q = o + k * B.stride; B.col[q] = c[0]; B.col[q + 1] = c[1]; B.col[q + 2] = c[2]; if (B.stride === 4) B.col[q + 3] = 1 - m.alphas[f] / 255; }
+        }
         B.owners[base + i] = pc.ud;
       }
     }
-    writeAnim(pc, O, T, m.verts, true);
+    writeAnim(pc, m.verts, true);
   }
-  for (const B of [O, T]) {
-    if (!B) continue;
+  for (const B of batches.values()) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(B.pos, 3).setUsage(THREE.DynamicDrawUsage));
     geo.setAttribute('normal', new THREE.BufferAttribute(B.nrm, 3).setUsage(THREE.DynamicDrawUsage));
-    geo.setAttribute('color', new THREE.BufferAttribute(B.col, B.stride));
+    if (B.col) geo.setAttribute('color', new THREE.BufferAttribute(B.col, B.stride));
+    if (B.uv) geo.setAttribute('uv', new THREE.BufferAttribute(B.uv, 2));
     geo.computeBoundingSphere();
     geo.boundingSphere.radius += 3;   // a flame or a flag moves a little past its rest pose
     B.mesh = new THREE.Mesh(geo, B.mat);
     ownTris(B.mesh, B.owners);
     g.add(B.mesh);
   }
-  return { pieces, O, T };
+  return { pieces, batches: [...batches.values()] };
 }
-function writeAnim(pc, O, T, src, rest) {
+function writeAnim(pc, src, rest) {
   const out = placeVerts(pc.m, pc.t, src), idx = pc.m.idx, i0 = pc.t.mirror ? 2 : 0, i2 = 2 - i0, ud = rest ? pc.ud : null;
-  for (const [B, list, base] of [[O, pc.fo, pc.o], [T, pc.ft, pc.to]]) {
+  for (const [B, list, base] of pc.parts) {
     if (!list.length) continue;
+    B.dirty = 1;
     const P = B.pos, N = B.nrm;
     for (let i = 0; i < list.length; i++) {
       const f = list[i], a = idx[f * 3 + i0] * 3, b = idx[f * 3 + 1] * 3, c = idx[f * 3 + i2] * 3, o = (base + i) * 9;
@@ -652,6 +685,30 @@ function writeAnim(pc, O, T, src, rest) {
     }
   }
 }
+/* a frame's fade: its alpha transforms (type 5) add dx * 8 to the faces their labels name. The tree's model records carry no face
+   labels, so the fade lands on every see-through face of the piece at the frame's mean — a fountain's spray, a portal's shimmer, a
+   ghost's sheen flicker and thin as they do, where held at their rest alpha they stood as solid slabs */
+function frameFade(fr) {
+  if (fr.a5 !== undefined) return fr.a5;
+  const { bases, ds } = fr.tr, types = fr.fm.types;
+  let s = 0, n = 0;
+  for (let i = 0; i < bases.length; i++) if (types[bases[i]] === 5) { s += ds[i * 3]; n++; }
+  return (fr.a5 = n ? (s / n) * 8 : 0);
+}
+function animAlpha(pc, fr) {
+  const a5 = frameFade(fr);
+  if (a5 === (pc.a5 || 0)) return;
+  pc.a5 = a5;
+  const m = pc.m;
+  for (const [B, list, base] of pc.parts) {
+    if (B.stride !== 4) continue;
+    for (let i = 0; i < list.length; i++) {
+      const op = 1 - Math.max(0, Math.min(255, m.alphas[list[i]] + a5)) / 255, o = (base + i) * 12;
+      B.col[o + 3] = B.col[o + 7] = B.col[o + 11] = op;
+    }
+    B.cdirty = 1;
+  }
+}
 let animClock = 0;
 function animateScenery(gx, gy, dtMs) {   /* the player's OSRS tile; call once a frame */
   animClock += dtMs;
@@ -661,7 +718,6 @@ function animateScenery(gx, gy, dtMs) {   /* the player's OSRS tile; call once a
     for (let p = 0; p < 4; p++) {
       const B = A[p];
       if (!B || !planeG[p].visible) continue;
-      let dO = 0, dT = 0;
       for (const pc of B.pieces) {
         if (!pc.groups || Math.abs(pc.x - gx) > ANIM_R || Math.abs(pc.y - gy) > ANIM_R) continue;
         const fr = seqFrames(pc.seq);
@@ -673,11 +729,13 @@ function animateScenery(gx, gy, dtMs) {   /* the player's OSRS tile; call once a
         if (!pc.work) pc.work = new Int32Array(pc.m.vc * 3);
         pc.work.set(pc.m.verts);
         transformVerts(pc.work, pc.groups, fr[idx]);
-        writeAnim(pc, B.O, B.T, pc.work, false);
-        if (pc.fo.length) dO = 1;
-        if (pc.ft.length) dT = 1;
+        writeAnim(pc, pc.work, false);
+        animAlpha(pc, fr[idx]);
       }
-      for (const [on, X] of [[dO, B.O], [dT, B.T]]) if (on && X) { X.mesh.geometry.attributes.position.needsUpdate = true; X.mesh.geometry.attributes.normal.needsUpdate = true; }
+      for (const X of B.batches) {
+        if (X.dirty) { X.dirty = 0; X.mesh.geometry.attributes.position.needsUpdate = true; X.mesh.geometry.attributes.normal.needsUpdate = true; }
+        if (X.cdirty) { X.cdirty = 0; X.mesh.geometry.attributes.color.needsUpdate = true; }
+      }
     }
   }
 }
@@ -789,7 +847,7 @@ function buildTerrain(R) {
         if (shape >= SHAPE_F.length) shape = 1;
         if (d.texture !== undefined && textures[d.texture]) { ot = d.texture; oc = WHITE; }
         else if (d.rgbColor !== 0xff00ff) oc = rgbI(d.rgbColor || 0);
-        else if (d.secondaryRgbColor !== undefined) oc = rgbI(d.secondaryRgbColor);   /* drawn by the client's own water and scenery passes: its map colour stands in */
+        else if (d.secondaryRgbColor !== undefined && p === 0) oc = rgbI(d.secondaryRgbColor);   /* drawn by the client's own water and scenery passes: its map colour stands in. An upper floor's magenta tile is nothing the scene draws — the floor a fountain's jets or a balcony's railing is placed on, not a floor: its map colour there hung sheets of blue-grey in the air */
       }
       const V = SHAPE_V[shape], F = SHAPE_F[shape];
       for (let k = 0; k < V.length; k++) {

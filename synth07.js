@@ -134,7 +134,7 @@ function syPiece(desc) {
     const roof = new Uint8Array(W * L), drop = new Uint8Array(W * L), lot = new Uint8Array(W * L), ul = new Map();
     for (let x = 0; x < W; x++) for (let y = 0; y < L; y++) { const t = sq(x, y).t, i = ix(x, y, 0); if (t.FL[i] & 4) roof[at(x, y)] = 1; else if (t.UL[i]) ul.set(t.UL[i], (ul.get(t.UL[i]) || 0) + 1); }
     const ground = [...ul.entries()].sort((a, b) => b[1] - a[1])[0];
-    let M = null;
+    let M = null, house = null;   // house: a market's buildings and the tile round each (none of it laid)
     {
       const mask = roof.slice(), comp = new Uint8Array(W * L);
       for (const [q, x, y] of raw) {
@@ -145,15 +145,13 @@ function syPiece(desc) {
       }
       const s0 = whole ? at(desc[5] - X0, desc[6] - Y0) : 0, st = [s0];
       if (whole) comp[s0] = 1;
-      if (kind === 'market') {   // a market: its stalls, crates, barrels and benches alone (their footings and a tile round them), set out on the square's own paving
-        for (const [q, x, y] of raw) {
-          const d = dd[q.id];
-          if (!d || q.plane || (q.type !== 10 && q.type !== 11) || SY_NATURAL.test(MAP07.clean(d.name))) continue;
-          const odd = q.rot & 1, w = (odd ? d.length : d.width) || 1, l = (odd ? d.width : d.length) || 1;
-          if (x + w > W - 1 || y + l > L - 1 || !x || !y) continue;
-          for (let a = 0; a < w; a++) for (let b = 0; b < l; b++) comp[at(x + a, y + b)] = 1;
-        }
-      } else if (!whole) {   // a district: every structure wholly inside its square by the same rules, and none its edge would halve
+      if (kind === 'market') {   // a market is open ground: every building in its square and the tile round it are no part of it (their floors, their rooms' furniture, their upper storeys)
+        const inside = new Uint8Array(W * L);
+        for (let x = 0; x < W; x++) for (let y = 0; y < L; y++) if (roof[at(x, y)]) for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { const u = x + a, v = y + b; if (u >= 0 && v >= 0 && u < W && v < L) inside[at(u, v)] = 1; }
+        for (let k = 0; k < W * L; k++) if (inside[k]) mask[k] = 0;
+        house = inside;
+      }
+      if (!whole) {   // a district or a market: every structure wholly inside its square by the same rules, and none its edge would halve
         const cid = new Int32Array(W * L), rim = new Set();
         let id = 0;
         for (let c0 = 0; c0 < W * L; c0++) {
@@ -204,11 +202,11 @@ function syPiece(desc) {
         if (!comp[k]) for (let a = -1; a <= 1 && !edge; a++) for (let b = -1; b <= 1; b++) { const u = x + a, v = y + b; if (u >= 0 && v >= 0 && u < W && v < L && out[at(u, v)]) { edge = 1; break; } }
         M[k] = edge ? 1 : 2;
       }
-      if (kind === 'market') for (let k = 0; k < W * L; k++) { if (M[k]) M[k] = 1; }   // the stalls stand on the square's paving, not their town's
-      else if (!whole) {   // a district's own lanes, ponds and pools lying wholly inside it come too; a road, a river or a lava flow its edge would cut stays behind
+      if (house) for (let k = 0; k < W * L; k++) if (house[k] && M[k]) { M[k] = 0; drop[k] = 1; }   // not even what an open-air piece closes in
+      if (!whole) {   // a district's own lanes, ponds and pools lying wholly inside it come too; a road, a river or a lava flow its edge would cut stays behind
         const seen = new Uint8Array(W * L);
         for (let c0 = 0; c0 < W * L; c0++) {
-          if (seen[c0] || M[c0] || !sq((c0 / L) | 0, c0 % L).t.OL[ix((c0 / L) | 0, c0 % L, 0)]) continue;
+          if (seen[c0] || M[c0] || (house && house[c0]) || !sq((c0 / L) | 0, c0 % L).t.OL[ix((c0 / L) | 0, c0 % L, 0)]) continue;
           const isl = [c0];
           let cut = false, kin = false;
           seen[c0] = 1; st.length = 0; st.push(c0);
@@ -216,7 +214,7 @@ function syPiece(desc) {
             const c = st.pop(), x = (c / L) | 0, y = c % L;
             if (!x || !y || x === W - 1 || y === L - 1) cut = true;
             if (!kin) for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { const u = x + a, v = y + b; if (u >= 0 && v >= 0 && u < W && v < L && M[at(u, v)]) kin = true; }   // against something it keeps: a garden path, a yard's pond
-            for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const u = x + dx, v = y + dy, k = at(u, v); if (u >= 0 && v >= 0 && u < W && v < L && !seen[k] && !M[k] && sq(u, v).t.OL[ix(u, v, 0)]) { seen[k] = 1; isl.push(k); st.push(k); } }
+            for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const u = x + dx, v = y + dy, k = at(u, v); if (u >= 0 && v >= 0 && u < W && v < L && !seen[k] && !M[k] && !(house && house[k]) && sq(u, v).t.OL[ix(u, v, 0)]) { seen[k] = 1; isl.push(k); st.push(k); } }
           }
           if (!cut && kin) for (const k of isl) { M[k] = 2; drop[k] = lot[k] = 0; }   // a pool out on its own in a field of the made city's would be a stranger there
         }
@@ -227,9 +225,9 @@ function syPiece(desc) {
     for (let x = 0; x < W; x++) for (let y = 0; y < L; y++) {
       const t = sq(x, y).t;
       H0[at(x, y)] = t.H[ix(x, y, 0)];
-      if (!drop[at(x, y)]) { hs.push(H0[at(x, y)]); for (let pl = 1; pl < 4; pl++) if (t.UL[ix(x, y, pl)] || t.OL[ix(x, y, pl)]) P = Math.max(P, pl + 1); }
+      if (!drop[at(x, y)]) { hs.push(H0[at(x, y)]); if (!house) for (let pl = 1; pl < 4; pl++) if (t.UL[ix(x, y, pl)] || t.OL[ix(x, y, pl)]) P = Math.max(P, pl + 1); }   // a market has no storeys: an upper floor there is a building's
     }
-    const sorted = (hs.length ? hs : Array.from(H0)).sort((a, b) => a - b), bh = sorted[sorted.length >> 1], flat = Math.min(1, (whole ? 96 : 128) / Math.max(1, sorted[sorted.length - 1] - sorted[0]));   // pressed nearer level: the ground meets it at its footing
+    const sorted = (hs.length ? hs : Array.from(H0)).sort((a, b) => a - b), bh = sorted[sorted.length >> 1], flat = house ? 0 : Math.min(1, (whole ? 96 : 128) / Math.max(1, sorted[sorted.length - 1] - sorted[0]));   // pressed nearer level: the ground meets it at its footing (a market lies wholly level on its square)
     const g = new Uint8Array(P * W * L * 8), dv = new DataView(g.buffer);
     for (let pl = 0; pl < P; pl++) for (let x = 0; x < W; x++) for (let y = 0; y < L; y++) {
       const t = sq(x, y).t, i = ix(x, y, pl), o = ((pl * W + x) * L + y) * 8, g0 = H0[at(x, y)] - bh, lift = Math.round(g0 * flat) - g0;
@@ -241,7 +239,7 @@ function syPiece(desc) {
     for (const [q, x, y] of raw) {
       const d = dd[q.id];
       if (!d || drop[at(x, y)] || /trapdoor|portal|manhole|cave|tunnel|dungeon|entrance|\bhole\b/i.test(MAP07.clean(d.name))) continue;   // no way down to a place the made world has not got
-      if (kind === 'market' && q.type !== 10 && q.type !== 11 && q.type !== 22) continue;   // a market's stalls and wares, never its town's walls
+      if (house && house[at(x, y)]) continue;   // a market's own open-air pieces (a fountain's statues on their pillars too), never a building's rooms or upper floors
       Ls.push(q.id, q.type, q.rot, x, y, q.plane);
       if ((d.width || 1) !== 1 || (d.length || 1) !== 1) Z.push(Ls.length / 6 - 1, (d.width || 1) * 16 + (d.length || 1));
     }
@@ -702,7 +700,7 @@ function syCityInto(C, bx, by, D, sq) {
   if (mk && !(mk.x1 + 4 < bx || mk.x0 - 4 >= bx + 64 || mk.y1 + 4 < by || mk.y0 - 4 >= by + 64)) pars.push(mk);   // the square's market, laid last in every square alike
   for (const p of pars) {
     const Mk = p.t.M;
-    for (let x = Math.max(p.x0, bx); x <= Math.min(p.x1, bx + 63); x++) for (let y = Math.max(p.y0, by); y <= Math.min(p.y1, by + 63); y++) if (!Mk || Mk[(x - p.x0) * p.t.l + y - p.y0]) plot[(x - bx) * 64 + y - by] = 1;   // a whole piece's grounds past its own tiles are the block's
+    for (let x = Math.max(p.x0, bx); x <= Math.min(p.x1, bx + 63); x++) for (let y = Math.max(p.y0, by); y <= Math.min(p.y1, by + 63); y++) if (!Mk || Mk[(x - p.x0) * p.t.l + y - p.y0] === 2) plot[(x - bx) * 64 + y - by] = 1;   // a whole piece's grounds past its own tiles are the block's (its edge tiles too: a square's paving runs up to a fountain's rim)
   }
   for (let x = 0; x < 64; x++) for (let y = 0; y < 64; y++) {
     const gx = bx + x, gy = by + y, k = x * 64 + y;

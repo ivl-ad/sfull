@@ -52,8 +52,8 @@ const g7Out = (x, z) => {
   const dx = Math.max(1151.5 - x, x - 3903.5), dz = Math.max(-4159.5 - z, z + 2495.5);
   return dx > 0 || dz > 0 ? Math.hypot(Math.max(dx, 0), Math.max(dz, 0)) : Math.max(dx, dz);
 };
-let SEAM = 0;
-const seedAt = (x, z) => !M7 || (SEAM && !g7In(x, z));
+let SEAM = 0, SYN = 0;   // SYN: with the 2007 models on, the world round the rectangle is made of the map's own pieces (synth07.js) and map07 answers there too
+const seedAt = (x, z) => !M7 || (SEAM && !SYN && !g7In(x, z));
 const SEAM_FLOOR = -9;   // the margin's sea bed, and everything under the rectangle as the seed sees it
 const seamSink = (x, z) => { const d = g7Out(x, z); return d > 420 ? 1 : smoothstep(36, 300, d + noise2(x * 0.0045, z * 0.0045, S + 71) * 64); };   // 0 at the coast of the rectangle, 1 where the seed's own land may rise; a ragged line, not a rounded box
 const SETTLE_CELL = 250, INV_CELL = 1 / SETTLE_CELL;
@@ -682,7 +682,7 @@ function wildD(x, z) {   // signed tiles into (+) or short of (−) the nearest 
   if (M7) best -= Math.max(0, 1100 - g7Out(ix, iz)) * 0.7;   // round Gielinor the bands thin out and part: its neighbours are the seed's calm country, not a lava belt pressed to its coast
   return _wld = best;
 }
-const wildLvAt = (x, z) => { if (M7 && !seedAt(x, z)) return m7Wild(x, z); const dp = wildD(x, z); return dp > 0 ? clamp(Math.ceil(dp / 26), 1, 99) : 0; };   // one level per 26 tiles: a level is a RUN, not a step
+const wildLvAt = (x, z) => { if (M7 && (g7In(x, z) || !SEAM)) return m7Wild(x, z); /* past the rectangle the seed's rings, whichever pieces the ground is made of */ const dp = wildD(x, z); return dp > 0 ? clamp(Math.ceil(dp / 26), 1, 99) : 0; };   // one level per 26 tiles: a level is a RUN, not a step
 const wildBlend = (x, z) => M7 && g7In(x, z) ? 0 : clamp((wildD(x, z) + 40) / 80, 0, 1);   // the ash creeps in over ~40 tiles each side; the LAW changes at the middle
 let _dtx = 1e9, _dtz = 1e9, _dtv = 99;
 function ditchT(x, z) {   // distance from the law's line in TILES: the field's own slope normalises it, so the trench keeps one width everywhere
@@ -793,7 +793,7 @@ function colorAt(x, z, h, slope) {
   return out;
 }
 function biomeName(h, x, z) {
-  if (M7 && !seedAt(x, z)) return m7Place(x, z);
+  if (M7 && (g7In(x, z) || !SEAM)) return m7Place(x, z);
   if (inDunPlane(z)) { const d = dunFor(x, z); return d ? d.name : 'the deep dark'; }
   const wl0 = wildLvAt(x, z);
   if (wl0) return h < -0.3 ? 'a lake of lava, the Wilderness' : 'the Wilderness, level ' + wl0;
@@ -3372,7 +3372,7 @@ const capMap = (m, cap) => { if (m.size > cap) { let n = m.size - (cap >> 1); fo
 function refresh() {
   if (M7) {   // Gielinor streams whole map squares (46.); the seed's chunks come only where its world lies within reach
     m7Stream();
-    if (!SEAM || g7Out(focus.x, focus.z) < -(RADIUS + 1) * CHUNK) { for (const [k, rec] of chunks) { disposeChunk(rec); chunks.delete(k); } pending.length = 0; popQueue.length = 0; return; }
+    if (!SEAM || SYN || g7Out(focus.x, focus.z) < -(RADIUS + 1) * CHUNK) { for (const [k, rec] of chunks) { disposeChunk(rec); chunks.delete(k); } pending.length = 0; popQueue.length = 0; return; }
   }
   const pcx = Math.floor(focus.x / CHUNK), pcz = Math.floor(focus.z / CHUNK);
   pending.length = 0;
@@ -3391,7 +3391,7 @@ function refresh() {
 }
 const popQueue = [];
 function pump(budgetMs, maxChunks) {
-  if (M7 && !SEAM) return;
+  if (M7 && (!SEAM || SYN)) return;
   const t0 = performance.now();
   while (popQueue.length && performance.now() - t0 < budgetMs) {   // finish grounds already laid before laying more
     const rec = popQueue.shift();
@@ -3728,6 +3728,7 @@ function osrsApply() {
     return;
   }
   const want = OPT.osrs ? 1 : 0;
+  if (typeof synApply === 'function') synApply();   // the world past Gielinor's rectangle wears the same setting
   if (want === osrsOn) return;
   osrsOn = want;
   osrsLod();   // strangers re-test themselves next frame; osrsKind reads osrsOn and the rigs already out come back
@@ -3961,7 +3962,7 @@ function stepsThisTick(E) {
 }
 /* the town's peace caps the beasts on its commons; PvP itself answers only to the wilderness rings now */
 const SAFE_RM = 1.75, TOWN_CAP = [20, 26, 32, 40, 48];   // spawn-level ceiling inside the belt, by rank (wire format)
-function townCore(x, z) { if (M7 && !seedAt(x, z)) return m7InTown(x, z); const n = nearVillage(x, z); return !!(n && n.d < n.v.r * 1.05); }
+function townCore(x, z) { if (M7 && (g7In(x, z) || !SEAM)) return m7InTown(x, z); const n = nearVillage(x, z); return !!(n && n.d < n.v.r * 1.05); }
 let pvpAck = 0, pvpHold = 0;
 function askPvp(onGo) {
   pvpHold = 1;
@@ -4147,7 +4148,7 @@ const npcCap = () => Math.min(28, 16 + Math.floor(Math.max(0, powerAt(P.tx, P.tz
 const ORIGIN = { x: 0, z: 0 };   // the seed's canonical spawn anchors the danger gradient
 /* how far into the world this ground is: distance does most of the work, altitude and noise season it, and the
    wilderness stacks its level on top — deep rings breed monsters, rune seams and magic groves alike (wire format) */
-const powerAt = (x, z) => M7 && !seedAt(x, z) ? m7Wild(x, z) / 26 : z > 500000 ? dunPower(x, z)
+const powerAt = (x, z) => M7 && (g7In(x, z) || !SEAM) ? m7Wild(x, z) / 26 : z > 500000 ? dunPower(x, z)
   : Math.hypot(x - ORIGIN.x, z - ORIGIN.z) / 1000 + Math.max(0, (heightAt(x, z) - 30) / 40) + fbm(x * 0.00055, z * 0.00055, S + 111, 2) * 0.35
     + wildLvAt(x, z) / 26;
 /* the spawn lottery: every type weighted by log-distance from the ground's target level, heavy-tailed, asymmetric.
@@ -6556,6 +6557,13 @@ function wmPaintTile(tx, tz, tpp) {
   for (let j = 0; j < WM_TILE; j++) {
     const z = oz + (j + 0.5) * tpp;
     for (let i = 0; i <= WM_TILE; i++) wmRow[i] = macroHeight(ox + (i + 0.5) * tpp, z);
+    if (M7 && SYN) {   // the made world's own ground colours, shaded by the field's slope
+      for (let i = 0; i < WM_TILE; i++) {
+        const c = syTileRGB(Math.floor(ox + (i + 0.5) * tpp), -Math.floor(z)), p = (j * WM_TILE + i) * 4, sh = clamp(1 - (wmRow[i + 1] - wmRow[i]) * (tpp >= 8 ? 0.012 : 0.05), 0.72, 1.22);
+        im.data[p] = (c >> 16 & 255) * sh; im.data[p + 1] = (c >> 8 & 255) * sh; im.data[p + 2] = (c & 255) * sh; im.data[p + 3] = 255;
+      }
+      continue;
+    }
     for (let i = 0; i < WM_TILE; i++) mapPixel(im.data, (j * WM_TILE + i) * 4, ox + (i + 0.5) * tpp, z, wmRow[i], wmRow[i + 1] - wmRow[i], tpp, tpp >= 8 ? 0.06 : 0.12, 0.45);
   }
   g.putImageData(im, 0, 0);
@@ -6664,7 +6672,7 @@ function wmSeedLayer(W, H, s, px, pz) {
       const v = villageAt(a, b); if (!v) continue;
       const x = px(v.x), y = pz(v.z);
       if (x < -80 || y < -40 || x > W + 80 || y > H + 40) continue;
-      if (wmZoom >= 2.5) {
+      if (wmZoom >= 2.5 && !(M7 && SYN)) {   // the seed's own plans: a made town is built of the map's buildings instead
         if (!v.b && --vbud < 0) { wmDirty = 1; continue; }   // come back for the rest next frame
         villageBuildings(v);
         for (const bd of v.b) {
@@ -6684,7 +6692,7 @@ function wmSeedLayer(W, H, s, px, pz) {
       wmCtx.lineWidth = 3; wmCtx.strokeStyle = 'rgba(0,0,0,.85)'; wmCtx.strokeText(nm, x, y - 4);
       wmCtx.fillStyle = v.rank >= 3 ? '#ffd34a' : '#f4ead0'; wmCtx.fillText(nm, x, y - 4);
     }
-    if (wmZoom >= 2.5) for (let a = Math.floor((wmCx - half) / RUIN_CELL), a1 = Math.floor((wmCx + half) / RUIN_CELL), bud = 40; a <= a1; a++)   // rune altars: an unseen cell costs a survey, forty a frame
+    if (wmZoom >= 2.5 && !(M7 && SYN)) for (let a = Math.floor((wmCx - half) / RUIN_CELL), a1 = Math.floor((wmCx + half) / RUIN_CELL), bud = 40; a <= a1; a++)   // rune altars: an unseen cell costs a survey, forty a frame
       for (let b = Math.floor((wmCz - halfZ) / RUIN_CELL), b1 = Math.floor((wmCz + halfZ) / RUIN_CELL); b <= b1; b++) {
         if (!ruinCache.has(a * 8191 + b) && --bud < 0) continue;
         const R = ruinAt(a, b); if (R) ico(11, R.x, R.z);
@@ -7191,11 +7199,11 @@ function frame(now) {
   updatePools(tSec);
   if (M7) m7Frame(dt, tSec);   // floors above hidden when covered, figures and ground items in the map's own models
   mapTick();
-  water.visible = !M7 || (SEAM && g7Out(P.rx, P.rz) > -(scene.fog ? scene.fog.far : 400) - 40);   // deep inside the rectangle the seed's sea is past the fog: no plane at all
+  water.visible = !M7 || (SEAM && !SYN && g7Out(P.rx, P.rz) > -(scene.fog ? scene.fog.far : 400) - 40);   // deep inside the rectangle the seed's sea is past the fog: no plane at all
   if (water.visible) { water.position.set(P.rx, 0, P.rz); waterPaint(); }
   seamWater.on.value = M7 ? 1 : 0;
   if (M7 && scene.fog) {   // the map's squares stop at m7Reach; past the rectangle the view opens as far as the seed's own, never over squares not loaded
-    const far = SEAM ? clamp(g7Out(P.rx, P.rz), m7Reach(), OPT.viewRadius * CHUNK * 0.95) : m7Reach();
+    const far = SEAM && !SYN ? clamp(g7Out(P.rx, P.rz), m7Reach(), OPT.viewRadius * CHUNK * 0.95) : m7Reach();
     if (Math.abs(scene.fog.far - far) > 0.5) { scene.fog.far = far; scene.fog.near = far * 0.55; }
   }
   if (markT > 0) { markT -= dt; marker.rotation.y += dt * 2.4; if (markT <= 0) marker.visible = false; }
@@ -12015,7 +12023,7 @@ function m7ItemId(cid) {
 }
 function m7Items() {
   for (const s of MAP07.itemSpawns()) {
-    if (Math.abs(s.x - P.tx) > M7_SPAWN_R || Math.abs(-s.y - P.tz) > M7_SPAWN_R || !MAP07.regionAt(s.x, s.y)) continue;
+    if (Math.abs(s.x - P.tx) > M7_SPAWN_R || Math.abs(-s.y - P.tz) > M7_SPAWN_R || !MAP07.regionAt(s.x, s.y) || MAP07.regionAt(s.x, s.y).syn) continue;   // the map's own items lie in its own squares, not in a made one at the same tiles
     let st = m7ItemState.get(s.i);
     if (!st) m7ItemState.set(s.i, st = { d: null, due: 0 });
     if (st.d && drops.includes(st.d)) continue;
@@ -12184,9 +12192,10 @@ function m7MapRow(data, j, ox, z) {
   const gy = -Math.round(z);
   for (let i = 0; i < MW; i++) {
     const gx = Math.round(ox + i * MSTEP), p = (j * MW + i) * 4;
-    if (SEAM && !g7In(gx, -gy)) { const c = seedTileRGB(gx, -gy); data[p] = c >> 16 & 255; data[p + 1] = c >> 8 & 255; data[p + 2] = c & 255; data[p + 3] = 255; continue; }   // the seed's world past the rectangle
+    if (SEAM && !SYN && !g7In(gx, -gy)) { const c = seedTileRGB(gx, -gy); data[p] = c >> 16 & 255; data[p + 1] = c >> 8 & 255; data[p + 2] = c & 255; data[p + 3] = 255; continue; }   // the seed's world past the rectangle
     let c = MAP07.tileRGB(P.plane, gx, gy), k = 1;
     if (c >= 0) { const wb = MAP07.wallBits(P.plane, gx, gy); if (wb & 15) c = wb & 16 ? 0xc8321e : 0xeeeeee; }
+    else if (SYN && SEAM && !g7In(gx, -gy)) { c = syTileRGB(gx, gy); k = 0.8; }   // a made square not yet up: its ground's own colour, dimmed as the map's unloaded squares are
     else { c = MAP07.worldRGB(gx, gy); k = 0.55; if (c < 0) { c = 0x0c1016; k = 1; } }
     data[p] = (c >> 16 & 255) * k; data[p + 1] = (c >> 8 & 255) * k; data[p + 2] = (c & 255) * k; data[p + 3] = 255;
   }
@@ -12259,6 +12268,7 @@ function m7Ready() {
     MAP07.setBrightness(OPT.brightness);
   }
   if (typeof c7Warm === 'function') c7Warm();
+  if (OPT.osrs && typeof syLoad === 'function') syLoad().catch(() => {});   // the made world's palettes, ahead of the first square past the edge
   return MAP07.load();
 }
 function m7Mode(on) {
@@ -12280,6 +12290,26 @@ function m7Mode(on) {
   if (flip) { MSPAN = on ? 120 : 360; MSTEP = MSPAN / MW; wmZoom = on ? 12 : 10; }   // a tile a pixel on Gielinor's minimap, as the 2007 one reads
   mapOX = 1e9; mapRow = MW; mapImg = null;
   applyOpts();   // the fog closes where the squares stop
+  synApply();
+}
+/* the world past the rectangle is made of the map's own pieces while the 2007 models are on (synth07.js, section 50): the maker
+   feeds map07 its squares and the seed's chunks, spawns and objects stand down there; with the models off the seed world answers
+   as before. The palettes load once, on the way into Gielinor */
+function synApply() {
+  const want = M7 && OPT.osrs && typeof syProvider !== 'undefined' ? 1 : 0;
+  if (want && !SY.data) syLoad().then(() => synApply(), e => console.warn('[seedworld] the world past the map could not load', e && e.message));
+  const on = want && SY.data ? 1 : 0;
+  if (m7Inited && MAP07.ready()) MAP07.setSynth(on ? syProvider : null);
+  if (on === SYN) return;
+  SYN = on;
+  for (const [k, rec] of chunks) { disposeChunk(rec); chunks.delete(k); }
+  pending.length = 0; popQueue.length = 0;
+  for (let i = npcs.length - 1; i >= 0; i--) if (npcs[i].c7 === undefined) removeNpc(npcs[i]);
+  villageCache.clear(); nbrCache.clear(); resetLookups(); _bx = _bz = 1e9;
+  for (const k of [...wmTiles.keys()]) if (k[0] === 's') wmTiles.delete(k);
+  seedRGB.clear();
+  nearDirty = 1; mapOX = 1e9; mapRow = MW; mapImg = null; osMapDirty = 1; wmDirty = 1;
+  if (started && M7) refresh();
 }
 /* the seam's switch: standing inside the rectangle, or past it having come by land or sea, the world round it is the seed's
    (SEAM 1): the map streams only its own rectangle and the seed's chunks, spawns and objects stand beyond. A Gielinor ladder,
@@ -12588,7 +12618,7 @@ function osMapTiles() {   // the picture under the minimap: tiles square round t
   for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
     const gx = x0 + i, gy = yTop - j, wb = MAP07.wallBits(P.plane, gx, gy);
     let c = MAP07.tileRGB(P.plane, gx, gy);
-    if (c < 0) { const sk = tk(gx, -gy); c = !SEAM || g7In(gx, -gy) ? 0 : seedRGB.has(sk) ? seedRGB.get(sk) : seedTileRGB(gx & ~1, -(gy & ~1)); }   // past the rectangle the seed's world: the tile the round minimap already painted, else two tiles a sample until it has
+    if (c < 0) { const sk = tk(gx, -gy); c = !SEAM || g7In(gx, -gy) ? 0 : SYN ? syTileRGB(gx & ~1, gy & ~1) : seedRGB.has(sk) ? seedRGB.get(sk) : seedTileRGB(gx & ~1, -(gy & ~1)); }   // past the rectangle the seed's world: the tile the round minimap already painted, else two tiles a sample until it has
     for (let b = 0; b < 4; b++) for (let a = 0; a < 4; a++) {
       let col = c;
       if (wb & 15 && ((wb & 1 && a === 0) || (wb & 2 && b === 0) || (wb & 4 && a === 3) || (wb & 8 && b === 3))) col = wb & 16 ? 0xee0000 : 0xeeeeee;

@@ -27,6 +27,7 @@
 !/osui.js
 !/content07.js
 !/content07b.js
+!/synth07.js
 
 # the few files the game still fetches from this folder
 !/assets/

@@ -997,8 +997,9 @@ function markTerrain(R) {
   })();
 }
 async function loadRegion(rid) {
-  if (!manifest.has(rid) || regions.has(rid)) return;
+  if (regions.has(rid) || !streams(rid)) return;
   const R = newRegion(rid), gone = () => regions.get(rid) !== R;
+  R.syn = !inMain(rid) && !scopeAll;   // a made square (synth07.js)
   regions.set(rid, R);
   R.groundP = new Promise(res => { R.groundDone = res; });
   try {
@@ -1012,10 +1013,19 @@ async function loadRegion(rid) {
 }
 async function groundStage(R) {
   const rid = R.rid;
-  const [tb, lb] = await Promise.all([getBin(OUT + '/t/' + rid + '.bin'), getBin(OUT + '/l/' + rid + '.bin').catch(e => { if (e.status === 404) return null; throw e; })]);
-  if (regions.get(rid) !== R) return false;
-  Object.assign(R, parseTerrain(tb));
-  R.placed = lb ? parseLocs(lb) : [];
+  if (R.syn) {   // made, not fetched: the maker hands the frame back every few milliseconds of its own
+    let t0 = performance.now();
+    const sq = await synth.square(rid, () => performance.now() - t0 > 5 ? nextFrame().then(() => { t0 = performance.now(); }) : null);
+    if (regions.get(rid) !== R || !sq) return false;
+    Object.assign(R, { H: sq.H, UL: sq.UL, OL: sq.OL, SR: sq.SR, FL: sq.FL, bridge: new Uint8Array(4096), synSpawns: sq.spawns });
+    for (let i = 0; i < 4096; i++) R.bridge[i] = sq.FL[4096 + i] & 2 ? 1 : 0;
+    R.placed = sq.locs.slice();
+  } else {
+    const [tb, lb] = await Promise.all([getBin(OUT + '/t/' + rid + '.bin'), getBin(OUT + '/l/' + rid + '.bin').catch(e => { if (e.status === 404) return null; throw e; })]);
+    if (regions.get(rid) !== R) return false;
+    Object.assign(R, parseTerrain(tb));
+    R.placed = lb ? parseLocs(lb) : [];
+  }
   const bx = R.sqX * 64, by = R.sqY * 64;
   R.box.set(new THREE.Vector3(bx - 0.5, -60, -(by + 64) + 0.5), new THREE.Vector3(bx + 63.5, 200, -by + 0.5));
   /* floor tiles: roof hiding reads solid; a blocked tile setting collides on its render plane */
@@ -1036,7 +1046,7 @@ async function defsStage(R) {
      moment the square is up (their models and frames are fetched per figure, when one stands near enough to be drawn) */
   const ids = new Set(placed.map(p => p.id));
   for (const p of placed) { const pr = doorPairs.get(p.id); if (pr && pr.other < SELF_DOOR) ids.add(pr.other); }
-  const spawnList = spawnsByRegion.get(rid) || [], npcIds = new Set();
+  const spawnList = R.synSpawns || (R.syn ? [] : spawnsByRegion.get(rid)) || [], npcIds = new Set();
   for (const s of spawnList) { npcIds.add(s.id); if (s.as !== undefined) npcIds.add(s.as); }
   const [dd, nd] = await Promise.all([defs('loc', ids), npcIds.size ? defs('npc', npcIds) : {}]);
   const kids = new Set(), nkids = new Set();
@@ -1218,20 +1228,34 @@ const LANES = 4;
 let queue = [], busy = 0;
 /* scope: while game.js lays the seed's world round the main map, only the squares of the main map's rectangle stream (the
    others are Gielinor's own places past it: dungeons, the essence mine, reached by their own ladders and spells) */
-let scopeAll = 1;
+let scopeAll = 1, synth = null;
 const inMain = rid => { const x = rid >> 8, y = rid & 255; return x >= 18 && x <= 60 && y >= 39 && y <= 64; };
+const dropOutside = () => { for (const rid of [...regions.keys()]) if (!inMain(rid)) unloadRegion(rid); queue = queue.filter(inMain); };
 function setScope(all) {
-  scopeAll = all ? 1 : 0;
-  if (!scopeAll) { for (const rid of [...regions.keys()]) if (!inMain(rid)) unloadRegion(rid); queue = queue.filter(inMain); }
+  all = all ? 1 : 0;
+  if (all === scopeAll) return;
+  scopeAll = all;
+  dropOutside();   // the squares past the rectangle were the other scope's: the map's own places, or the made ones
 }
+/* a maker of squares for the world past the rectangle (synth07.js): { has(rid), square(rid, yieldFn) -> Promise<{ H, UL, OL, SR,
+   FL, locs, spawns }> } in the cache's own layout. While set, and the scope is the main map's, every square outside it comes from
+   here instead of the tree; null gives the map back its own squares there */
+function setSynth(p) {
+  if (p === synth) return;
+  synth = p;
+  if (!scopeAll) dropOutside();
+}
+/* a square this scope streams: the main map's own inside the rectangle; past it Gielinor's own places, or the made squares */
+const streams = rid => { const y = rid & 255; return inMain(rid) ? manifest.has(rid) : scopeAll ? manifest.has(rid) : !!(synth && synth.has(rid)); };
 function update(gx, gy, reach) {
   if (!loaded) return;
   const dist = rid => { const x0 = (rid >> 8) * 64, y0 = (rid & 255) * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
-  for (const rid of [...regions.keys()]) if (dist(rid) > reach + 48 || (!scopeAll && !inMain(rid))) unloadRegion(rid);
+  for (const rid of [...regions.keys()]) if (dist(rid) > reach + 48 || (!inMain(rid) && (regions.get(rid).syn ? scopeAll || !synth : !scopeAll))) unloadRegion(rid);
   const rx = gx >> 6, ry = gy >> 6, n = Math.ceil(reach / 64) + 1, list = [], now = performance.now();
   for (let dx = -n; dx <= n; dx++) for (let dy = -n; dy <= n; dy++) {
+    if (ry + dy < 0 || ry + dy > 255 || (rx + dx < 0 && !synth)) continue;   // a square's y is its low byte: the made world stops at y 0 and 16383
     const rid = ((rx + dx) << 8) | (ry + dy);
-    if (rx + dx >= 0 && ry + dy >= 0 && (scopeAll || inMain(rid)) && manifest.has(rid) && !regions.has(rid) && dist(rid) <= reach && !(retryAt.get(rid) > now)) list.push(rid);   // a square resting after a failure waits out its rest
+    if (streams(rid) && !regions.has(rid) && dist(rid) <= reach && !(retryAt.get(rid) > now)) list.push(rid);   // a square resting after a failure waits out its rest
   }
   queue = list.sort((a, b) => dist(a) - dist(b));
   pump();
@@ -1717,7 +1741,7 @@ return {
   yAt, heightAt, bridgeAt, renderPlane, coveredAt, solidAt,
   roofedAt: (p, gx, gy) => { const r = regionAt(gx, gy); if (!r) return false; const i = (gx & 63) * 64 + (gy & 63); return !!(r.FL[p * 4096 + i] & 4 || (p < 3 && r.bridge[i] && r.FL[(p + 1) * 4096 + i] & 4)); },   /* the client's under-a-roof tile flag (settings bit 4), not "anything above": an eave or a balcony lifts nothing */
   canMove: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0), canSail: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0, F_OBJ | F_DECO),
-  los, openTile, flagAt, snapWalkable, wallBetween, F_FULL, waterAt, setScope,
+  los, openTile, flagAt, snapWalkable, wallBetween, F_FULL, waterAt, setScope, setSynth, tileColor,
   pick, transport, climbTarget, toggleDoor, doorPartner, doorPairs,
   npcDefOf, npcFigure, headFigure, animate, figureAct, seqFrames, frameAt, transformVerts, labelGroups, spotanim, animateScenery, defs,
   defSync, itemGeo, itemMesh, itemFor, itemNameIds, itemSpawns: () => itemSpawns,

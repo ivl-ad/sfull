@@ -1317,7 +1317,7 @@ const prayHas = (f, v) => PRAYERS.some(p => (P.prayers & p.bit) && (v === undefi
 /* registration points for the skill sections at the foot of the file: extra task kinds, kill/tick/pool/structure hooks, item-on-object handlers */
 const TASKS = Object.create(null), USE_ON = Object.create(null), onKill = [], tickHooks = [], poolHooks = [], structHooks = [];
 /* settings, shared by the options tab and the dev console */
-const OPT = { camSpeed: 2.0, viewRadius: 7, fog: 1, timers: 1, xpDrops: 1, roofs: 1, hideRoofs: 0, brightness: 1, runMul: 1, retaliate: 1, stuck: 0, pvpWarn: 1, budget: 0, osrs: 1, osrsDist: 99 };
+const OPT = { camSpeed: 2.0, viewRadius: 7, fog: 1, timers: 1, xpDrops: 1, roofs: 1, hideRoofs: 0, brightness: 1, runMul: 1, retaliate: 1, stuck: 0, pvpWarn: 1, budget: 0, osrs: 1, osrsDist: 99, uiFixed: 0 };   // uiFixed: the 2007 frame as the fixed client (1) or laid out to any screen (0)
 /* the 2007 client's own interface (section 48): on while Gielinor plays with "2007 models" on; declared this early because
    applyOpts, which switches it, runs while the options load */
 const OS = { on: 0, ready: 0, sync: null };   // sync: the 2007 settings panel's refreshers while it is built (48.)
@@ -1451,6 +1451,18 @@ document.getElementById('app').appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(SKY, 120, RADIUS * CHUNK * 0.95);
 const camera = new THREE.PerspectiveCamera(58, innerWidth / innerHeight, 0.4, 2600);
+/* the 3D view's rectangle on the page: the whole window, or the fixed 2007 client's 512x334 viewport scaled into its frame
+   (48.). Picking, the projected plates and the floating text all read it */
+const VP = { x: 0, y: 0, w: innerWidth, h: innerHeight };
+function setViewport(x, y, w, h) {
+  x = Math.round(x); y = Math.round(y); w = Math.max(1, Math.round(w)); h = Math.max(1, Math.round(h));
+  const cs = renderer.domElement.style;
+  if (x === VP.x && y === VP.y && w === VP.w && h === VP.h && cs.position) return;
+  VP.x = x; VP.y = y; VP.w = w; VP.h = h;
+  cs.position = 'absolute'; cs.left = x + 'px'; cs.top = y + 'px';
+  renderer.setSize(w, h);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
 /* fog measured horizontally from the player, not by view depth, so zooming out never walks the character into it */
 const fogCenter = { value: new THREE.Vector3() };
 THREE.ShaderChunk.fog_pars_vertex = '#ifdef USE_FOG\nvarying vec3 vFogWorld;\n#endif';
@@ -5806,7 +5818,7 @@ const OPT_ROWS = [
   { k: 'viewRadius', n: 'View distance', min: 3, max: 9, step: 1, fmt: v => v + ' chunks', apply: 1 },
   { k: 'fog', n: 'Distance fog', tog: 1 }, { k: 'retaliate', n: 'Auto retaliate', tog: 1 }, { k: 'timers', n: 'Respawn clocks', tog: 1 }, { k: 'xpDrops', n: 'Xp drops', tog: 1 },
   { k: 'hideRoofs', n: 'Hide all roofs', tog: 1 }, { k: 'pvpWarn', n: 'PvP border warning', tog: 1 },
-  { k: 'osrs', n: '2007 models', tog: 1 },
+  { k: 'osrs', n: '2007 models', tog: 1 }, { k: 'uiFixed', n: 'Fixed interface', tog: 1 },
   { k: 'brightness', n: 'Brightness', min: 0.7, max: 1.4, step: 0.1, fmt: v => Math.round(v * 100) + '%' }
 ];
 const optList = el('optList');
@@ -5851,6 +5863,7 @@ function applyOpts(r) {
   const db = el('devBudget'); if (db) db.classList.toggle('on', !!OPT.budget);
   store.set('seedworld.opt', JSON.stringify(OPT));
   osuiApply();   // Gielinor with the 2007 layer wears the 2007 frame (section 48)
+  osFit();   // in the mode the settings ask for
   osSetSync();
 }
 /* floating combat text, health bars, respawn clocks, xp drops */
@@ -5863,7 +5876,7 @@ const fxFree = f => { f.live = 0; f.el.style.display = 'none'; };
 const _p3 = new THREE.Vector3();
 function project(x, y, z) {
   _p3.set(x, y, z).project(camera);
-  return _p3.z > 1 ? null : [(_p3.x * 0.5 + 0.5) * innerWidth, (-_p3.y * 0.5 + 0.5) * innerHeight];
+  return _p3.z > 1 ? null : [VP.x + (_p3.x * 0.5 + 0.5) * VP.w, VP.y + (-_p3.y * 0.5 + 0.5) * VP.h];
 }
 const place = (e, p) => { e.style.transform = 'translate(' + p[0] + 'px,' + p[1] + 'px)'; };
 const splats = [];
@@ -6317,7 +6330,7 @@ on(window, 'keydown', e => {
 on(window, 'keyup', e => { keys[e.code] = false; });
 const dom = renderer.domElement, ndc = new THREE.Vector2(), rc = new THREE.Raycaster();
 let mx = -1, my = -1, hoverObj = null, drag = 0, dragged = 0, lx = 0, ly = 0;
-function rayAt(x, y) { ndc.set(x / innerWidth * 2 - 1, -(y / innerHeight * 2 - 1)); rc.setFromCamera(ndc, camera); return rc.ray; }
+function rayAt(x, y) { ndc.set((x - VP.x) / VP.w * 2 - 1, -((y - VP.y) / VP.h * 2 - 1)); rc.setFromCamera(ndc, camera); return rc.ray; }
 on(dom, 'pointerdown', e => {
   closeCtx();
   if (e.button === 2) return;
@@ -6821,7 +6834,7 @@ function devMapTp(x, z) {
 on(wmCv, 'contextmenu', e => e.preventDefault());
 on(window, 'contextmenu', e => { if (e.target.closest('#ctx')) e.preventDefault(); });
 on(window, 'resize', () => {
-  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+  osFit();   // the viewport and the 2007 frame's layout together (48.)
   if (wmOpen) { wmResize(); wmDirty = 1; }
 });
 /* ---- 32. RESET ---- */
@@ -7984,7 +7997,7 @@ function labelAt(owner, key, x, y, z, text, cls, html) {
   q.claim = 1;
   if (q.txt !== text) { q.txt = text; if (html) q.el.innerHTML = text; else q.el.textContent = text; }
   if (q.cls !== cls) { q.cls = cls; q.el.className = cls; }
-  q.el.style.transform = 'translate(' + ((_pv.x * 0.5 + 0.5) * innerWidth) + 'px,' + ((-_pv.y * 0.5 + 0.5) * innerHeight) + 'px) translate(-50%,0)';
+  q.el.style.transform = 'translate(' + (VP.x + (_pv.x * 0.5 + 0.5) * VP.w) + 'px,' + (VP.y + (-_pv.y * 0.5 + 0.5) * VP.h) + 'px) translate(-50%,0)';
   return true;
 }
 const DEATH_HTML = '<img src="' + _dmc.toDataURL() + '" alt=""> Your death';
@@ -12434,13 +12447,18 @@ function osBuild() {
     osTopC = c;
     for (const i of [21, 22]) if (c[i]) c[i].el.hidden = true;   // the map and compass masks shape what the client draws there; they are not pictures
     for (const i of [12, 13, 14, 15, 17]) if (c[i]) c[i].el.classList.add('osBelow');   // what folds away with the pack
+    for (const i of [12, 13, 14, 15, 16, 17]) if (c[i]) {   // the pack's block: the resizable layout sets it in the bottom corner
+      c[i].el.classList.add('osInv');
+      for (let p = c[i].el.parentElement; p && p !== osTop; p = p.parentElement) p.classList.add('osInvBox');   // and its 503-tall boxes stop clipping it there
+    }
+    for (const i of [7, 8, 12, 13, 14, 18, 19, 20, 23]) if (c[i]) c[i].el.classList.add('osBg');   // the stone round the minimap and the pack's borders: the resizable layout shows the world through them
     OS_TABS.forEach(([, s, ic], t) => { for (const i of [s, ic]) if (c[i]) { c[i].el.dataset.ostab = t; c[i].el.classList.add('osHit'); } });
     on(osTop, 'click', e => {
       const d = e.target.closest('[data-ostab]');
       if (!d) return;
       const k = OS_TABS[+d.dataset.ostab][0], folded = document.body.classList.contains('invmin');
       if (k === 'op' && k === osTabNow && osSet && osSet.all && !folded) return osSettings();   // back from All Settings
-      if (folded || k === osTabNow) el('invmin').click();   // the lit stone folds the panel away and any stone brings it back, as the resizable client does
+      if (!OPT.uiFixed && (folded || k === osTabNow)) el('invmin').click();   // the lit stone folds the panel away and any stone brings it back, as the resizable client does (the fixed one never folds)
       if (k !== osTabNow || folded) showTab(k);
     });
     osMapInit(c); osOrbsInit(c);
@@ -12474,6 +12492,7 @@ function osuiApply() {
     el('side').insertBefore(el('invmin'), el('side').firstChild); el('side').appendChild(el('panes'));
     el('chatwrap').insertBefore(el('chatmin'), el('chatwrap').firstChild);
     document.body.insertBefore(el('chatbar'), el('chatwrap').nextSibling);
+    osFit();   // the world takes the whole window back
   }
   osTabNow = (document.querySelector('.pane.on') || { id: 'pane-inv' }).id.slice(5);
   if (!on && !document.querySelector('.tab[data-p="' + osTabNow + '"]')) showTab('inv');   // a pane only the frame has a stone for (logout, emotes, music...) gives way to the pack
@@ -12482,23 +12501,38 @@ function osuiApply() {
   dirty.inv = dirty.eq = dirty.sk = dirty.orb = 1;
   drawSpells(); drawPrayers(); drawStyles();
 }
-/* the frame is drawn at its own pixel size where it fits; a small screen scales the column and the chatbox down together */
+/* two layouts, chosen in the settings (OPT.uiFixed):
+   FIXED — the whole 765x503 client, scaled as large as the window allows and centred, black where it cannot fill; the world is
+     drawn only in its 512x334 viewport.
+   RESIZABLE — any screen, natively: the world fills the window, the minimap and its orbs stand in the top right corner without
+     their stone, the pack's block in the bottom right corner without its borders, the chatbox at the bottom left, cropped to the
+     width left beside the pack. A screen shorter than the frame, or narrower than twice its column, scales both down together. */
 function osFit() {
-  if (!OS.on) return;
-  const W = innerWidth, H = innerHeight;
-  let s = Math.min(1, H / 503, W * 0.5 / 249), sc = Math.min(1, W / 519);
-  if (519 * sc + 249 * s > W && 503 * s + 165 * sc > H) { const k = H / (503 * s + 165 * sc); s *= k; sc *= k; }
-  document.documentElement.style.setProperty('--oss', s.toFixed(4));
-  document.documentElement.style.setProperty('--osc', sc.toFixed(4));
+  const W = innerWidth, H = innerHeight, on = !!OS.on, fixed = on && !!OPT.uiFixed, R = document.documentElement.style, px = v => v.toFixed(2) + 'px';
+  document.body.classList.toggle('osFix', fixed); document.body.classList.toggle('osRz', on && !fixed);
+  if (!on) { setViewport(0, 0, W, H); return; }
+  if (fixed) {
+    const s = Math.min(W / 765, H / 503), ox = (W - 765 * s) / 2, oy = (H - 503 * s) / 2;
+    R.setProperty('--oss', s.toFixed(4)); R.setProperty('--osc', s.toFixed(4)); R.setProperty('--osx', px(ox)); R.setProperty('--osy', px(oy));
+    setViewport(ox + 4 * s, oy + 4 * s, 512 * s, 334 * s);
+    if (document.body.classList.contains('invmin')) el('invmin').click();
+  } else {
+    const s = Math.min(1, H / 503, W * 0.5 / 249);
+    R.setProperty('--oss', s.toFixed(4)); R.setProperty('--osc', s.toFixed(4));
+    R.setProperty('--osh', px(H / s)); R.setProperty('--osdy', px(H / s - 503));
+    R.setProperty('--oscw', px(Math.max(120, Math.min(519, (W - 249 * s) / s))));
+    setViewport(0, 0, W, H);
+  }
+  R.setProperty('--osvx', px(VP.x)); R.setProperty('--osvy', px(VP.y)); R.setProperty('--osvr', px(W - VP.x - VP.w)); R.setProperty('--osvb', px(H - VP.y - VP.h));
 }
-on(window, 'resize', osFit);
 
 /* ---- the minimap and compass (548:22 and 548:21): the client draws the scene's minimap sprite, four pixels a tile, rotated
    with the camera about the player and cut to the fixed_minimap mask (1183) — each row from its first to its last clear pixel;
    the compass (169) turns the same way inside its own mask (1184). A tile is its underlay/overlay colour, a wall a white edge,
    a door a red one; npcs, players and ground items are the mapdots sprites, the walk target the map marker's flag. ---- */
-const osMapS = { cv: null, g: null, cmp: null, cg: null, maskM: null, maskC: null, T: null, tx: 1e9, tz: 1e9, pl: -1, x0: 0, yTop: 0, img: {} };
-let osMapDirty = 1;
+const osMapS = { cv: null, g: null, cmp: null, cg: null, maskM: null, maskC: null, T: null, tx: 1e9, tz: 1e9, pl: -1, x0: 0, yTop: 0, R: 40, img: {} };
+let osMapDirty = 1, osMapZoom = 4;
+const osMapZoomBy = f => { const z = clamp(osMapZoom * f, 1.5, 10); if (z !== osMapZoom) { osMapZoom = z; osMapDirty = 1; } };
 function osMask(id, w, h) {   // the drawable rows of a mask sprite as an opaque stencil
   return OSUI.image(id).then(im => {
     const a = document.createElement('canvas'); a.width = w; a.height = h;
@@ -12530,16 +12564,25 @@ function osMapInit(c) {
   const hit = c[24] && c[24].el;   // the compass button: Look North
   if (hit) { hit.classList.add('osHit'); hit.title = 'Look North'; on(hit, 'click', () => { yaw = PI; }); }
   S.cv.classList.add('osHit');
+  S.cv.style.touchAction = 'none';
+  const mmPtr = new Map();
+  let mmPinch = 0, mmPinched = 0;
+  on(S.cv, 'wheel', e => { e.preventDefault(); e.stopPropagation(); osMapZoomBy(e.deltaY < 0 ? 1.15 : 1 / 1.15); }, { passive: false });   // the wheel over the minimap zooms it, not the camera
+  on(S.cv, 'pointerdown', e => { if (!mmPtr.size) mmPinched = 0; mmPtr.set(e.pointerId, { x: e.clientX, y: e.clientY }); if (mmPtr.size === 2) { mmPinch = spanOf(mmPtr); mmPinched = 1; } });
+  on(S.cv, 'pointermove', e => { if (!mmPtr.has(e.pointerId)) return; mmPtr.set(e.pointerId, { x: e.clientX, y: e.clientY }); if (mmPtr.size === 2) { const d = spanOf(mmPtr); if (mmPinch > 0 && d > 0) osMapZoomBy(d / mmPinch); mmPinch = d; } });   // two fingers pinch it, as on the world map
+  on(S.cv, 'pointerup pointercancel pointerleave', e => { mmPtr.delete(e.pointerId); if (mmPtr.size < 2) mmPinch = 0; });
   on(S.cv, 'click', e => {   // a click inside the mask walks there
+    if (mmPinched) return;
     const r = S.cv.getBoundingClientRect(), k = 145 / r.width, px = (e.clientX - r.left) * k - 72, pz = (e.clientY - r.top) * k - 75;
     if (!S.maskM || !S.maskM.getContext('2d').getImageData(Math.round(px + 72), Math.round(pz + 75), 1, 1).data[3]) return;
     const a = -(yaw + PI), cs = Math.cos(a), sn = Math.sin(a);
-    walkTo(P.rx + (px * cs - pz * sn) / 4, P.rz + (px * sn + pz * cs) / 4);
+    walkTo(P.rx + (px * cs - pz * sn) / osMapZoom, P.rz + (px * sn + pz * cs) / osMapZoom);
   });
 }
-function osMapTiles() {   // the picture under the minimap: 80 tiles square round the player, four pixels a tile, north up
-  const S = osMapS, R = 40, N = R * 2, px = N * 4;
-  if (!S.T) { S.T = document.createElement('canvas'); S.T.width = S.T.height = px; }
+function osMapTiles() {   // the picture under the minimap: tiles square round the player (80 at the client's zoom, more zoomed out), four pixels a tile, north up
+  const S = osMapS, R = Math.max(40, Math.ceil(110 / osMapZoom)), N = R * 2, px = N * 4;
+  S.R = R;
+  if (!S.T || S.T.width !== px) { S.T = document.createElement('canvas'); S.T.width = S.T.height = px; }
   const g = S.T.getContext('2d'), im = g.createImageData(px, px), d = im.data;
   const x0 = P.tx - R, yTop = -P.tz + R - 1;
   for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
@@ -12560,17 +12603,17 @@ function osMapTiles() {   // the picture under the minimap: 80 tiles square roun
 function osMapFrame() {
   const S = osMapS;
   if (!S.g || !S.maskM || !M7) return;
-  if (Math.abs(P.tx - S.tx) > 10 || Math.abs(P.tz - S.tz) > 10 || P.plane !== S.pl || osMapDirty) { osMapDirty = 0; osMapTiles(); }
-  const g = S.g, a = yaw + PI, cs = Math.cos(a), sn = Math.sin(a);
+  if (Math.abs(P.tx - S.tx) > S.R / 4 || Math.abs(P.tz - S.tz) > S.R / 4 || P.plane !== S.pl || osMapDirty) { osMapDirty = 0; osMapTiles(); }
+  const g = S.g, a = yaw + PI, cs = Math.cos(a), sn = Math.sin(a), Z = osMapZoom;
   g.globalCompositeOperation = 'source-over';
   g.fillStyle = '#000'; g.fillRect(0, 0, 145, 151);
   g.imageSmoothingEnabled = false;
-  g.save(); g.translate(72, 75); g.rotate(a);
+  g.save(); g.translate(72, 75); g.rotate(a); g.scale(Z / 4, Z / 4);
   g.drawImage(S.T, -Math.round((P.rx - S.x0 + 0.5) * 4), -Math.round((S.yTop + 0.5 + P.rz) * 4));
   g.restore();
   const dot = (x, z, im) => {
     if (!im) return;
-    const dx = (x - P.rx) * 4, dz = (z - P.rz) * 4;
+    const dx = (x - P.rx) * Z, dz = (z - P.rz) * Z;
     if (dx * dx + dz * dz > 11000) return;
     g.drawImage(im, Math.round(72 + dx * cs - dz * sn) - 2, Math.round(75 + dx * sn + dz * cs) - 2);
   };
@@ -12578,10 +12621,10 @@ function osMapFrame() {
   for (const n of npcs) if (!n.dead && (n.pl === undefined || n.pl === P.plane)) dot(n.rx !== undefined ? n.rx : n.tx, n.rz !== undefined ? n.rz : n.tz, S.img.npc);
   for (const R of remotes.values()) if ((R.pl | 0) === P.plane) dot(R.rx !== undefined ? R.rx : R.tx, R.rz !== undefined ? R.rz : R.tz, S.img.player);
   if (marker.visible && S.img.flag) {
-    const dx = (marker.position.x - P.rx) * 4, dz = (marker.position.z - P.rz) * 4;
+    const dx = (marker.position.x - P.rx) * Z, dz = (marker.position.z - P.rz) * Z;
     if (dx * dx + dz * dz < 11000) g.drawImage(S.img.flag, 0, 0, 15, 30, Math.round(72 + dx * cs - dz * sn) - 1, Math.round(75 + dx * sn + dz * cs) - 15, 15, 30);
   }
-  if (typeof c7MapIcons === 'function') c7MapIcons(g, cs, sn);   // bank, shop, altar...: the map-function icons, upright
+  if (typeof c7MapIcons === 'function') c7MapIcons(g, cs, sn, Z);   // bank, shop, altar...: the map-function icons, upright
   g.globalCompositeOperation = 'destination-in';
   g.drawImage(S.maskM, 0, 0);
   g.globalCompositeOperation = 'source-over';
@@ -13441,10 +13484,11 @@ function osSettings() {
     const B = OPT_ROWS.find(r => r.k === 'brightness'), V = OPT_ROWS.find(r => r.k === 'viewRadius');
     sync.push(osSlider(mid, 19, 659, 2858, () => (OPT.brightness - B.min) / (B.max - B.min), v => { const b = Math.round((B.min + v * (B.max - B.min)) * 10) / 10; if (b !== OPT.brightness) { OPT.brightness = b; applyOpts(B); } }));   // a drag writes the options only when the step changes
     sync.push(osSlider(mid, 56, 1162, 1201, () => (OPT.viewRadius - V.min) / (V.max - V.min), v => { const n = Math.round(V.min + v * (V.max - V.min)); if (n !== OPT.viewRadius) { OPT.viewRadius = n; applyOpts(V); } }));
-    const L = osClip(mid, 6, 80, 180, 96);
+    const L = osClip(mid, 6, 76, 180, 100);
     sync.push(osCheck(L, 0, '2007 models', osOpt('osrs'), v => { OPT.osrs = v; icons07Apply(1); osrsApply(); applyOpts(OPT_ROWS.find(r => r.k === 'osrs')); }));
-    sync.push(osCheck(L, 28, 'Hide all roofs', osOpt('hideRoofs'), osSetOpt('hideRoofs')));
-    sync.push(osCheck(L, 56, 'Distance fog', osOpt('fog'), osSetOpt('fog')));
+    sync.push(osCheck(L, 25, 'Hide all roofs', osOpt('hideRoofs'), osSetOpt('hideRoofs')));
+    sync.push(osCheck(L, 50, 'Distance fog', osOpt('fog'), osSetOpt('fog')));
+    sync.push(osCheck(L, 75, 'Fixed interface', osOpt('uiFixed'), osSetOpt('uiFixed')));
   }
   osSteel(h, 3, 49, 184, 176);
   const all = osStoneBtn(h, 25, 228, 140, 30, 'All Settings');

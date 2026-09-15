@@ -374,11 +374,12 @@ function c7IconsNear(x, y, r, fn) {
   for (let i = lo; i < I.length && I[i][1] <= y + r; i++) { const e = I[i]; if (Math.abs(e[0] - x) <= r && e[2] === P.plane) fn(e); }
 }
 /* upright icons on the 2007 minimap (cs, sn: the camera's turn); drawn before the round mask cuts it */
-function c7MapIcons(g, cs, sn) {
-  c7IconsNear(P.tx, -P.tz, 20, e => {
+function c7MapIcons(g, cs, sn, z) {   /* z: the minimap's pixels a tile (4, the client's own; the wheel and a pinch change it) */
+  const k = z || 4;
+  c7IconsNear(P.tx, -P.tz, Math.ceil(80 / k), e => {
     const im = c7IconImg(e[3]);
     if (!im) return;
-    const dx = (e[0] - P.rx) * 4, dz = (-e[1] - P.rz) * 4;
+    const dx = (e[0] - P.rx) * k, dz = (-e[1] - P.rz) * k;
     if (dx * dx + dz * dz > 5000) return;
     g.drawImage(im, Math.round(72 + dx * cs - dz * sn - im.width / 2), Math.round(75 + dx * sn + dz * cs - im.height / 2));
   });

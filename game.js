@@ -825,7 +825,36 @@ function wildD(x, z) {   // signed tiles into (+) or short of (−) the nearest 
   if (M7) best -= Math.max(0, 1100 - g7Out(ix, iz)) * 0.7;   // round Gielinor the bands thin out and part: its neighbours are the seed's calm country, not a lava belt pressed to its coast
   return _wld = best;
 }
-const wildLvAt = (x, z) => { if (M7 && (g7In(x, z) || !SEAM)) return m7Wild(x, z); /* past the rectangle the seed's rings, whichever pieces the ground is made of */ const dp = wildD(x, z); return dp > 0 ? clamp(Math.ceil(dp / 26), 1, 99) : 0; };   // one level per 26 tiles: a level is a RUN, not a step
+const wildLvAt = (x, z) => {
+  if (M7 && (g7In(x, z) || !SEAM)) return m7Wild(x, z);
+  /* past the rectangle the seed's rings, whichever pieces the ground is made of; and in the made world past Gielinor its wilds
+     kingdoms too — its badlands wear the wilderness's ash and lava, and are wilderness in law as in look (wildsDepth) */
+  const dp = M7 && SYN ? Math.max(wildD(x, z), wildsDepth(x, z)) : wildD(x, z);
+  return dp > 0 ? clamp(Math.ceil(dp / 26), 1, 99) : 0;   // one level per 26 tiles: a level is a RUN, not a step
+};
+/* how deep a tile stands in a wilds kingdom: its distance in from the nearest border with a kingdom of any other kind (the kingdoms
+   are the seats' own cells, so a border is the line halfway between two seats); -1 outside one */
+let _wkx = 1e9, _wkz = 1e9, _wkv = -1;
+function wildsDepth(x, z) {
+  const ix = Math.floor(x), iz = Math.floor(z);
+  if (ix === _wkx && iz === _wkz) return _wkv;
+  _wkx = ix; _wkz = iz;
+  const gx = Math.floor(ix / REG_CELL), gz = Math.floor(iz / REG_CELL), seats = [];
+  let s1 = null, d1 = 1e18;
+  for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+    const s = regSite(gx + a, gz + b), d = (s.x - ix) * (s.x - ix) + (s.z - iz) * (s.z - iz);
+    seats.push([s, d]);
+    if (d < d1) { d1 = d; s1 = s; }
+  }
+  if (s1.a.k !== 'wilds') return _wkv = -1;
+  let best = 9999;
+  for (const [s, d] of seats) {
+    if (s === s1 || s.a.k === 'wilds') continue;
+    const L = Math.hypot(s.x - s1.x, s.z - s1.z);
+    if (L > 0) best = Math.min(best, (d - d1) / (2 * L));
+  }
+  return _wkv = best;
+}
 const wildBlend = (x, z) => M7 && g7In(x, z) ? 0 : clamp((wildD(x, z) + 40) / 80, 0, 1);   // the ash creeps in over ~40 tiles each side; the LAW changes at the middle
 let _dtx = 1e9, _dtz = 1e9, _dtv = 99;
 function ditchT(x, z) {   // distance from the law's line in TILES: the field's own slope normalises it, so the trench keeps one width everywhere

@@ -347,7 +347,10 @@ function syGround(gx, gy, m, b, o) {
     if (!road) {
       const deep = -m;
       o[0] = P.ul0; o[2] = 1;
-      o[1] = b === SY_WILD && deep < 4 ? D.lava : P.k === 'mire' && deep < 2.5 ? D.swamp : deep < 1.2 ? 6 : deep < 4.5 ? 442 : deep < 8 ? 445 : 448;
+      /* the shallows at the shore in the tree's clear water (texture 1), then Gielinor's own ocean by depth — its five sea overlays,
+         505 to 517 (textures 150..154, lightest to darkest) — so its sea and the made world's are one sea, with no line where the
+         rectangle stops */
+      o[1] = b === SY_WILD && deep < 4 ? D.lava : P.k === 'mire' && deep < 2.5 ? D.swamp : deep < 1.2 ? 6 : deep < 2.5 ? 505 : deep < 4 ? 508 : deep < 6 ? 511 : deep < 8.5 ? 514 : 517;   // the open sea off the rectangle lies 9 deep: Gielinor's own deepest, as its sea is at its edge
       return 0;
     }
     m = 0.6;   // the road fords the shallows on a causeway

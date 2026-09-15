@@ -57,7 +57,7 @@ const opsOf = def => Object.entries((def && def.ops) || {}).filter(([, o]) => o 
 
 /* ---- assets: config shards come through OSRSK's cache (one download, one parsed copy for the whole game); atoms, frames
    and textures load here. Nothing that failed for a passing reason is remembered: the next build asks again. ---- */
-const shardP = new Map(), shardE = new Map(), modelM = new Map(), fmP = new Map(), faP = new Map(), texMats = new Map(), texMatsT = new Map(), texMatsG = new Map(), texMaps = new Map();
+const shardP = new Map(), shardE = new Map(), modelM = new Map(), fmP = new Map(), faP = new Map(), texMats = new Map(), texMatsT = new Map(), texMatsG = new Map(), texMatsW = new Map(), texMaps = new Map();
 const WHITE = [1, 1, 1];
 const mended = new WeakSet();
 function shard(type, s) {
@@ -134,7 +134,8 @@ function texMap(id) {
     new THREE.TextureLoader().load(OUT + '/tx/' + id + '.png', tex => {
       tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
       t.tex = tex;
-      for (const m of t.mats) { m.map = tex; m.color.setRGB(1, 1, 1); m.needsUpdate = true; }
+      if (isWaterTex(id)) waterTexs.add(tex);
+      for (const m of t.mats) { m.map = tex; if (m.userData.tint) m.color.copy(m.userData.tint); else m.color.setRGB(1, 1, 1); m.needsUpdate = true; }
       t.mats.length = 0;
     }, undefined, () => { if (texMaps.get(id) === t) texMaps.delete(id); });
   }
@@ -146,6 +147,7 @@ function texMat(cache, id, make) {
     const t = texMap(id);
     m = make(t.tex);
     if (!t.tex) { const c = textures[id] ? rgbI(textures[id].avgRgbAdjusted) : WHITE; m.color.setRGB(c[0], c[1], c[2]); t.mats.push(m); }
+    else if (m.userData.tint) m.color.copy(m.userData.tint);
     cache.set(id, m);
   }
   return m;
@@ -467,16 +469,19 @@ const openTile = (rp, gx, gy) => !(flagAt(rp, gx, gy) & F_FULL);
 /* a tile of the map's own water on the ground floor, not under a deck: its overlay wears a water texture (1, or the open
    sea's 130..189). A boat's tile: game.js rows it, walls and rocks still stand (canSail) */
 let waterOL = null;
-function waterAt(plane, gx, gy) {
-  if (plane !== 0) return false;
-  const r = regionAt(gx, gy);
-  if (!r) return false;
+function waterTable() {
   if (!waterOL) {
     waterOL = new Uint8Array(1024);
     for (const k in overlays) { const t = overlays[k] && overlays[k].texture; if (t === 1 || (t >= 130 && t <= 189)) waterOL[(+k + 1) & 1023] = 1; }
   }
+  return waterOL;
+}
+function waterAt(plane, gx, gy) {
+  if (plane !== 0) return false;
+  const r = regionAt(gx, gy);
+  if (!r) return false;
   const i = (gx & 63) * 64 + (gy & 63);
-  return !r.bridge[i] && waterOL[r.OL[i] & 1023] === 1;
+  return !r.bridge[i] && waterTable()[r.OL[i] & 1023] === 1;
 }
 function snapWalkable(rp, gx, gy, maxR) {
   if (openTile(rp, gx, gy)) return [gx, gy];
@@ -826,10 +831,81 @@ function blendAt(x, y) {   /* square-local tile (0..64): its blended HSL16, or -
   return nn && mm ? packHsl((q(sH) * 256 / mm) | 0, (q(sS) / nn) | 0, (q(sL) / nn) | 0) : -1;
 }
 /* a textured overlay (water, lava, cobbles) wears its texture, one repeat a tile, lit like the ground */
-const groundTex = id => texMat(texMatsG, id, map => new THREE.MeshLambertMaterial({ map, side: THREE.FrontSide }));
+/* water: the tree's own water textures (1, and the sea's 130..189) on a surface that catches the sun and drifts, a touch bluer than
+   the flat tint the old client lit them with — one look for every sea, lake and river, Gielinor's and the made world's alike */
+const isWaterTex = t => t === 1 || (t >= 130 && t <= 189);
+const WATER_TINT = new THREE.Color(0.7, 0.93, 1.06), waterTexs = new Set();   // less red than the textures carry: a sea, not a lavender field
+const groundTex = id => texMat(texMatsG, id, map => {
+  if (!isWaterTex(id)) return new THREE.MeshLambertMaterial({ map, side: THREE.FrontSide });
+  const m = new THREE.MeshPhongMaterial({ map, side: THREE.FrontSide, specular: 0x31465c, shininess: 42 });
+  m.userData.tint = WATER_TINT;
+  return m;
+});
+/* a sailing current's marker: a nameless, menuless piece standing in open water that animates (the tree's newest seas lay hundreds of
+   them, drawn here as red hatching over the waves) — not a thing on the water but a chart over it, so it is not laid */
+function seaMark(R, p, def) {
+  if ((p.type !== 10 && p.type !== 11) || !(def.animationId >= 0) || (def.name && def.name !== 'null') || opsOf(def).length) return false;
+  const i = p.x * 64 + p.y;
+  return !p.plane && !R.bridge[i] && waterTable()[R.OL[i] & 1023] === 1;
+}
+const waterMat = () => texMat(texMatsW, WATER_BASE, map => {   // the one sea's material: the base water texture under each vertex's tint
+  const m = new THREE.MeshPhongMaterial({ map, side: THREE.FrontSide, vertexColors: true, specular: 0x31465c, shininess: 42 });
+  m.userData.tint = WATER_TINT;
+  return m;
+});
+function waterFlow(ms) {   // the water textures drift, slowly and a little across one another's grain
+  const t = ms / 1000;
+  for (const tx of waterTexs) { tx.offset.x = (t * 0.021) % 1; tx.offset.y = (t * 0.013) % 1; }
+}
+/* ---- one sea: every ground-floor water tile, Gielinor's and the made world's, is drawn in the one water texture (WATER_BASE, the
+   tree's own), tinted with its own overlay's texture as a colour against that one — the shallows' clear water, the ocean's five
+   depths — and the tints smoothed over the tiles round it (five by five, water only, over the square's edge where the neighbour
+   is in) and read at the tile corners, so the sea runs in one gradient: no line where one overlay meets the next, nor where
+   Gielinor's rectangle stops ---- */
+const WATER_BASE = 150, WATER_R = 2;
+const texRatios = new Map();
+const texRatio = t => { let r = texRatios.get(t); if (!r) { const a = texAvg(t), b = texAvg(WATER_BASE); texRatios.set(t, r = [a[0] / b[0], a[1] / b[1], a[2] / b[2]]); } return r; };
+function waterTileTint(gx, gy) {   // a ground-floor water tile's tint against the one water texture, or null
+  const r = regionRaw(gx, gy);
+  if (!r || !r.OL) return null;
+  const i = (gx & 63) * 64 + (gy & 63), o = r.OL[i] & 1023;
+  if (!o || r.bridge[i]) return null;
+  const d = overlays[o - 1], t = d && d.texture;
+  return t !== undefined && isWaterTex(t) && textures[t] ? texRatio(t) : null;
+}
+function waterCorners(R) {   // the smoothed tint at each of the square's 65x65 tile corners (NaN where no water touches it)
+  const N = 64 + 2 * (WATER_R + 1), raw = new Float32Array(N * N * 4), has = new Uint8Array(N * N), x0 = R.sqX * 64 - WATER_R - 1, y0 = R.sqY * 64 - WATER_R - 1;
+  for (let a = 0; a < N; a++) for (let b = 0; b < N; b++) { const c = waterTileTint(x0 + a, y0 + b); if (c) { const k = a * N + b; has[k] = 1; raw[k * 4] = c[0]; raw[k * 4 + 1] = c[1]; raw[k * 4 + 2] = c[2]; raw[k * 4 + 3] = 1; } }
+  const sm = (src, dx, dy) => {   // a box blur along one axis over the water tiles alone (rgb, and a weight: 1 where a tint stands)
+    const out = new Float32Array(N * N * 4);
+    for (let a = 0; a < N; a++) for (let b = 0; b < N; b++) {
+      let r = 0, g = 0, bl = 0, n = 0;
+      for (let s = -WATER_R; s <= WATER_R; s++) {
+        const u = a + s * dx, v = b + s * dy, k = (u * N + v) * 4;
+        if (u < 0 || v < 0 || u >= N || v >= N || !src[k + 3]) continue;
+        r += src[k]; g += src[k + 1]; bl += src[k + 2]; n++;
+      }
+      const k = (a * N + b) * 4;
+      if (n) { out[k] = r / n; out[k + 1] = g / n; out[k + 2] = bl / n; out[k + 3] = 1; }
+    }
+    return out;
+  };
+  const S = sm(sm(raw, 1, 0), 0, 1), C = new Float32Array(65 * 65 * 3).fill(NaN);
+  for (let cx = 0; cx <= 64; cx++) for (let cy = 0; cy <= 64; cy++) {
+    let r = 0, g = 0, bl = 0, n = 0;
+    for (let a = -1; a <= 0; a++) for (let b = -1; b <= 0; b++) {
+      const u = cx + a + WATER_R + 1, v = cy + b + WATER_R + 1, k = u * N + v;
+      if (!has[k] || !S[k * 4 + 3]) continue;
+      r += S[k * 4]; g += S[k * 4 + 1]; bl += S[k * 4 + 2]; n++;
+    }
+    if (n) { const k = (cx * 65 + cy) * 3; C[k] = r / n; C[k + 1] = g / n; C[k + 2] = bl / n; }
+  }
+  return C;
+}
 function buildTerrain(R) {
-  const lv = [0, 1, 2, 3].map(() => ({ pos: [], col: [], tex: new Map() }));
+  const lv = [0, 1, 2, 3].map(() => ({ pos: [], col: [], tex: new Map(), water: null }));
   const vx = new Float32Array(6), vz = new Float32Array(6), vh = new Float32Array(6), vu = new Float32Array(6), vv = new Float32Array(6), vc = new Array(6);
+  let wc = null;   // the square's water corner tints, made the first time a water tile asks
   for (let p = 0; p < 4; p++) {
     let any = false;
     for (let i = p * 4096; i < (p + 1) * 4096 && !any; i++) if (R.UL[i] || R.OL[i]) any = true;
@@ -874,6 +950,19 @@ function buildTerrain(R) {
         let A = F[f + 1], B = F[f + 2], C = F[f + 3];
         if (A < 4) A = (A - rot) & 3; if (B < 4) B = (B - rot) & 3; if (C < 4) C = (C - rot) & 3;
         if ((vz[B] - vz[A]) * (vx[C] - vx[A]) - (vx[B] - vx[A]) * (vz[C] - vz[A]) < 0) { const s = B; B = C; C = s; }   /* face up */
+        if (over && ot >= 0 && !p && isWaterTex(ot) && !R.bridge[x * 64 + y]) {   // one sea (waterCorners): its tint read at this vertex between the tile's four corners
+          if (!wc) wc = waterCorners(R);
+          const W = b.water || (b.water = { pos: [], uv: [], col: [] }), own = texRatio(ot);
+          for (const k of [A, B, C]) {
+            const fx = vu[k], fy = vv[k], c00 = (x * 65 + y) * 3, c10 = ((x + 1) * 65 + y) * 3, c01 = (x * 65 + y + 1) * 3, c11 = ((x + 1) * 65 + y + 1) * 3;
+            for (let ch = 0; ch < 3; ch++) {
+              const v = (wc[c00 + ch] * (1 - fx) + wc[c10 + ch] * fx) * (1 - fy) + (wc[c01 + ch] * (1 - fx) + wc[c11 + ch] * fx) * fy;
+              W.col.push(v === v ? v : own[ch]);
+            }
+            W.pos.push(vx[k], vh[k], vz[k]); W.uv.push(vu[k], vv[k]);
+          }
+          continue;
+        }
         if (over && ot >= 0) {
           let bk = b.tex.get(ot);
           if (!bk) b.tex.set(ot, bk = { pos: [], uv: [] });
@@ -887,10 +976,18 @@ function buildTerrain(R) {
   for (let p = 0; p < 4; p++) {
     if (R.terr[p]) { disposeMesh(R.terr[p]); R.terr[p] = null; }
     const L = lv[p];
-    if (!L.pos.length && !L.tex.size) continue;
+    if (!L.pos.length && !L.tex.size && !L.water) continue;
     const g = new THREE.Group();
     g.userData.terrain = 1;
     if (L.pos.length) g.add(bake(L.pos, L.col));
+    if (L.water) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(L.water.pos, 3));
+      geo.setAttribute('uv', new THREE.Float32BufferAttribute(L.water.uv, 2));
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(L.water.col, 3));
+      geo.computeVertexNormals();
+      g.add(new THREE.Mesh(geo, waterMat()));
+    }
     for (const [tid, bk] of L.tex) {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute('position', new THREE.Float32BufferAttribute(bk.pos, 3));
@@ -1140,6 +1237,7 @@ async function defsStage(R) {
   for (const p of placed) {
     const def = resolveDef(dd, p.id);
     if (!def || !def.models) continue;
+    if (seaMark(R, p, def)) continue;
     const gx = bx + p.x, gy = by + p.y, [w, l] = footprint(def, p.rot), rp = renderPlane(p.plane, gx, gy);
     const pl = { id: p.id, plane: p.plane, gx, gy, type: p.type, rot: p.rot };
     if (p.type === 5 || p.type === 6 || p.type === 8) pl.disp = decorDisp(p.type, wallOn && dd[wallOn.get(p.plane * 4096 + p.x * 64 + p.y)]);
@@ -1259,6 +1357,7 @@ function lodRegion(R) {   // one square: what it wants, what it builds, what it 
 }
 function lodTick(cx, cy, cz, gx, gy) {   // once a frame from game.js: the camera's world x and z, its height over the player, and the player's tile
   lodCam.x = cx; lodCam.y = cy; lodCam.z = cz; lodCam.gx = gx; lodCam.gy = gy;
+  waterFlow(performance.now());
   for (const R of regions.values()) lodRegion(R);
 }
 async function buildNear(R) {
@@ -1874,7 +1973,7 @@ function load() {
 }
 function init(o) {
   scene = o.scene; fogCenter = o.fogCenter; H = o.hooks || {};
-  THREE.MeshLambertMaterial.prototype.onBeforeCompile = function (shader) { shader.uniforms.fogCenter = fogCenter; };   /* the fog is measured from the player, as every seedworld material's is */
+  THREE.MeshLambertMaterial.prototype.onBeforeCompile = THREE.MeshPhongMaterial.prototype.onBeforeCompile = function (shader) { shader.uniforms.fogCenter = fogCenter; };   /* the fog is measured from the player, as every seedworld material's is (the water's glinting one too) */
   root = new THREE.Group(); root.visible = false;
   planeG = [0, 1, 2, 3].map(() => { const g = new THREE.Group(); root.add(g); return g; });
   amb = new THREE.AmbientLight(0xffffff, 0.65); sun = new THREE.DirectionalLight(0xffffff, 0.9);

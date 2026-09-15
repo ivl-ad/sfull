@@ -204,6 +204,8 @@
   #wmKey img,#wmKey canvas{width:20px;height:20px;image-rendering:pixelated;flex:0 0 auto}
   #wmCtl{position:absolute;right:8px;bottom:8px;display:flex;flex-direction:column;gap:4px}
   #wmCtl button{width:34px;height:34px;font-size:17px;padding:0;line-height:1}
+  #wmCtl button.on{background:#7a5a1e;color:#ffd34a;box-shadow:0 0 0 2px #ffd34a inset}
+  #wmCv.tp{cursor:crosshair}
   #bgmBtn{position:fixed;top:10px;right:12px;z-index:80;font-size:18px;padding:4px 8px;line-height:1}
   body.ingame #bgmBtn{display:none}
   #spellGrid{display:grid;grid-template-columns:1fr 1fr;gap:2px}
@@ -356,6 +358,13 @@
   .wof:hover{box-shadow:inset 0 0 0 1px var(--bevel-2)}
   .wof.sel,.wchar.sel{box-shadow:inset 0 0 0 1px var(--amber);background:rgba(255,190,80,.07)}
   #welCols{margin-top:2px}
+  /* the front door goes straight into Gielinor: the world list folds away behind "Other worlds" */
+  #welAuto{display:none;margin-top:10px}
+  #welcome.auto #welAuto{display:block}
+  #welcome.auto #welCols,#welcome.auto .wsub{display:none}
+  #welcome.auto #welBox{width:min(340px,92vw)}
+  #welAutoList{display:block;margin-top:10px;font-size:12px;color:#c9b27a;cursor:pointer;text-decoration:underline}
+  #welAutoList[hidden],#welAutoGo[hidden]{display:none}
   /* a short screen (landscape phone) lays the map beside the controls; the lobby scrolls either way */
   @media (max-height:560px){
     #welBox{width:min(620px,96vw)}

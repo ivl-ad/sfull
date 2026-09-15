@@ -6714,7 +6714,7 @@ function wmLoop() {
   if (wmDirty) { wmDirty = 0; wmDraw(); }
   requestAnimationFrame(wmLoop);
 }
-function openWorldMap() { if (wmOpen) return; wmOpen = 1; wmDirty = 1; wmEl.classList.add('on'); el('wmKey').style.display = M7 ? 'none' : ''; wmCx = P.rx; wmCz = P.rz; wmResize(); wmLoop(); }   // Gielinor's map carries its own icons
+function openWorldMap() { if (wmOpen) return; wmOpen = 1; wmDirty = 1; wmEl.classList.add('on'); el('wmTp').hidden = !(started && devOK()); wmTpSet(0); el('wmKey').style.display = M7 ? 'none' : ''; wmCx = P.rx; wmCz = P.rz; wmResize(); wmLoop(); }   // Gielinor's map carries its own icons
 function closeWorldMap() { wmOpen = 0; wmEl.classList.remove('on'); }
 el('wmX').onclick = closeWorldMap;
 function wmZoomAt(sx, sy, f) {   // the tile under the cursor stays under it
@@ -6734,7 +6734,7 @@ let wmPinch = 0;
 on(wmCv, 'pointerdown', e => {
   e.preventDefault();
   try { wmCv.setPointerCapture(e.pointerId); } catch {}
-  wmPtr.set(e.pointerId, { x: e.clientX, y: e.clientY, b: e.button });
+  wmPtr.set(e.pointerId, { x: e.clientX, y: e.clientY, b: e.button, x0: e.clientX, y0: e.clientY });
   if (wmPtr.size === 2) wmPinch = spanOf(wmPtr);
 });
 on(wmCv, 'pointermove', e => {
@@ -6743,7 +6743,7 @@ on(wmCv, 'pointermove', e => {
   wmPos.textContent = (M7 ? wx + ', ' + -wz : wx + ', ' + wz) + ' — ' + biomeName(heightAt(wx, wz), wx, wz);
   const prev = wmPtr.get(e.pointerId);
   if (!prev) return;
-  wmPtr.set(e.pointerId, { x: e.clientX, y: e.clientY, b: prev.b });
+  wmPtr.set(e.pointerId, { x: e.clientX, y: e.clientY, b: prev.b, x0: prev.x0, y0: prev.y0 });
   if (wmPtr.size === 2) {
     const d = spanOf(wmPtr);
     if (wmPinch > 0 && d > 0) { const it = wmPtr.values(), a = it.next().value, b = it.next().value; wmZoomAt((a.x + b.x) / 2 - r.left, (a.y + b.y) / 2 - r.top, d / wmPinch); }
@@ -6751,7 +6751,73 @@ on(wmCv, 'pointermove', e => {
   } else if (prev.b === 1) wmZoomAt(wmW / 2, wmH / 2, Math.exp(-(e.clientY - prev.y) * 0.012));
   else { wmCx -= (e.clientX - prev.x) / s; wmCz -= (e.clientY - prev.y) / s; wmDirty = 1; }
 });
-on(wmCv, 'pointerup pointercancel', e => { wmPtr.delete(e.pointerId); if (wmPtr.size < 2) wmPinch = 0; });
+on(wmCv, 'pointerup pointercancel', e => {
+  const p = wmPtr.get(e.pointerId);
+  wmPtr.delete(e.pointerId); if (wmPtr.size < 2) wmPinch = 0;
+  if (wmTpArm && p && e.type === 'pointerup' && p.b === 0 && Math.hypot(e.clientX - p.x0, e.clientY - p.y0) < 6) {   // a click, not a drag: the armed dev teleport
+    const r = wmCv.getBoundingClientRect(), s = wmZoom / WM_TPP;
+    devMapTp(Math.round(wmCx + (e.clientX - r.left - wmW / 2) / s), Math.round(wmCz + (e.clientY - r.top - wmH / 2) / s));
+  }
+});
+/* DEVELOPER: the map's teleport (the console unlocked — offline, the sandbox, or the password). Arm it, click the map: you land on
+   the nearest ground a body can stand on to the click, in whichever world the map shows there */
+let wmTpArm = 0;
+const wmTpSet = on => { wmTpArm = on ? 1 : 0; el('wmTp').classList.toggle('on', !!wmTpArm); wmCv.classList.toggle('tp', !!wmTpArm); };
+el('wmTp').onclick = () => wmTpSet(!wmTpArm);
+function seedLandNear(x, z) {   // the seed's nearest dry ground: rings of 8 tiles out to 640, then along the line back toward the click
+  const land = (a, b) => !(M7 && g7Out(a, b) < 2) && macroHeight(a, b) > 0.6;
+  if (land(x, z)) return { x, z };
+  for (let r = 8; r <= 640; r += 8) {
+    let best = null, bd = 1e9;
+    for (let i = -r; i <= r; i += 8) for (const [a, b] of [[x + i, z - r], [x + i, z + r], [x - r, z + i], [x + r, z + i]]) {
+      const d = Math.hypot(a - x, b - z);
+      if (d < bd && land(a, b)) { bd = d; best = [a, b]; }
+    }
+    if (!best) continue;
+    const n = Math.ceil(bd);
+    let fx = best[0], fz = best[1];
+    for (let t = 1; t <= n; t++) { const a = Math.round(best[0] + (x - best[0]) * t / n), b = Math.round(best[1] + (z - best[1]) * t / n); if (!land(a, b)) break; fx = a; fz = b; }
+    return { x: fx, z: fz };
+  }
+  return null;
+}
+function m7LandNear(gx, gy) {   // Gielinor's nearest land by its own map picture, four tiles a pixel; the landing square snaps the last few tiles
+  if (MAP07.isLand(gx, gy)) return [gx, gy];
+  for (let r = 4; r <= 480; r += 4) {
+    let best = null, bd = 1e9;
+    for (let i = -r; i <= r; i += 4) for (const [a, b] of [[gx + i, gy - r], [gx + i, gy + r], [gx - r, gy + i], [gx + r, gy + i]]) {
+      const d = Math.hypot(a - gx, b - gy);
+      if (d < bd && g7In(a, -b) && MAP07.isLand(a, b)) { bd = d; best = [a, b]; }
+    }
+    if (best) return best;
+  }
+  return null;
+}
+function devMapTp(x, z) {
+  wmTpSet(0);
+  if (!started || !devOK()) return;
+  if (P.dead) return say('Not while you are dead.', 'bad');
+  closeOverlays();
+  if (M7) {
+    const here = !SEAM ? m7WmHere() : null;
+    if (here && x >= here[0] && x < here[2] && -z >= here[1] && -z < here[3]) {   // the Gielinor place past the edge you stand in (its own map shows only there)
+      teleport(x, z, 300, P.plane, 0); P.snapR = 32;
+      return say('Teleported to ' + x + ', ' + -z + '.', 'lv');
+    }
+    if (g7In(x, z)) {
+      const q = m7LandNear(x, -z);
+      if (!q) return say('There is no ground near there.', 'bad');
+      teleport(q[0], -q[1], 300, 0, 1); P.snapR = 32;   // snap7 steps onto the nearest walkable tile once the square is up
+      return say('Teleported to ' + q[0] + ', ' + q[1] + '.', 'lv');
+    }
+  }
+  const q = seedLandNear(x, z);
+  if (!q) { teleport(x, z, 300, 0, 1); return say('Open sea as far as the eye can see: you are in your boat.', 'lv'); }
+  teleport(q.x, q.z, 400, 0, 1);
+  const s = openNear(q.x, q.z, 12);
+  if (s && (s.x !== P.tx || s.z !== P.tz)) placePlayer(s.x, s.z);
+  say('Teleported to ' + P.tx + ', ' + (M7 ? -P.tz : P.tz) + ' — ' + biomeName(walkY(P.tx, P.tz), P.tx, P.tz) + '.', 'lv');
+}
 on(wmCv, 'contextmenu', e => e.preventDefault());
 on(window, 'contextmenu', e => { if (e.target.closest('#ctx')) e.preventDefault(); });
 on(window, 'resize', () => {
@@ -8194,7 +8260,7 @@ async function enterWorld(seed) {
   dressAvatar();
   drawInv(); drawEq(); drawSk(); drawOrbs();
   WEL.classList.add('gone');
-  setTimeout(() => { WEL.style.display = 'none'; }, 420);
+  setTimeout(() => { if (started) WEL.style.display = 'none'; }, 420);   // unless you already signed out again inside the fade
   setGo('Enter this world', 0);
   started = 1;
   bgmPlay();   // the score belongs to the world, not to the login screen; this is where its four megabytes are asked for
@@ -8394,7 +8460,7 @@ function toWorldSelect(saved) {   // back to the world list, still signed in
   WEL.style.display = ''; WEL.classList.remove('gone');
   setGo('Enter this world', 0);
   if (!OFFLINE && AUTH) loadCharacterList(); else if (OFFLINE) offChars();
-  pollPopulation();
+  welAuto(saved ? 'You have signed out. Your character is saved.' : 'You have signed out — recent progress was not saved.', 1);
   say(saved ? 'You have signed out. Your character is saved.' : 'You have signed out — recent progress was not saved.', saved ? 'lv' : 'bad');
 }
 el('signout').onclick = signOut;
@@ -8466,11 +8532,25 @@ async function afterLogin() {
   LOG.classList.add('gone');
   setTimeout(() => { LOG.style.display = 'none'; }, 400);
   el('welWho').textContent = OFFLINE ? 'Playing offline — your characters live in this browser' : 'Signed in as ' + (NAME || 'Adventurer');
-  welSeedEl.value = (OFFLINE ? store.get('seedworld.off.last') || SEED : SEED) || 'lumbridge';   // offline remembers the last world you stood in
-  previewSeed(welSeedEl.value);
-  if (OFFLINE) offChars(); else await loadCharacterList(1);
-  pollPopulation();
+  welSeedEl.value = 'gielinor';
+  enterGielinor();   // no world list: signing in (or Play offline) walks straight into Gielinor
+  if (OFFLINE) offChars(); else loadCharacterList(1);   // the list stays ready behind "Other worlds"
 }
+/* the front door: the compact box says what is happening, and only a failure or a sign-out offers the button again (and the
+   world list, one link away) */
+function welAuto(msg, idle) {
+  WEL.classList.add('auto');
+  el('welAutoMsg').textContent = msg;
+  el('welAutoGo').hidden = el('welAutoList').hidden = !idle;
+}
+async function enterGielinor() {
+  welAuto('Loading Gielinor…', 0);
+  welSeedEl.value = 'gielinor';
+  await enterWorld('gielinor');
+  if (!started) welAuto(el('welPop').textContent || 'Gielinor could not load. Try again.', 1);
+}
+el('welAutoGo').onclick = () => enterGielinor();
+el('welAutoList').onclick = () => { WEL.classList.remove('auto'); previewSeed(curSeed()); pollPopulation(); };
 let haveChars = new Set(), popTimer = 0;
 async function loadCharacterList(cached) {   // existing characters become one-click entries
   const box = el('welChars');
@@ -8522,8 +8602,7 @@ async function pollPopulation() {   // only while the select screen is up; alway
     else if (!j) lmsg('Server unreachable — you can still play offline.', 'warn');
     else lmsg('That saved key has no account here.', 'bad');
   }
-  welSeedEl.value = 'lumbridge';
-  previewSeed('lumbridge');
+  WEL.classList.add('auto');   // what shows behind the login is the front door, not the world list
 })();
 
 /* ---- 45. SKILLS: one block a skill, in dependency order. A block defines its own items, recipes, objects and verbs, and registers what the world
@@ -12045,7 +12124,7 @@ function m7Frame(dt) {
   if (P.plane !== m7PlaneWas) { m7PlaneWas = P.plane; mapOX = 1e9; mapRow = MW; }
   if (P.snap7 && MAP07.regionAt(P.tx, -P.tz)) {   // a landing square is up: step off whatever the tile holds
     P.snap7 = 0;
-    const [x, y] = MAP07.snapWalkable(P.plane, P.tx, -P.tz, 8);
+    const [x, y] = MAP07.snapWalkable(P.plane, P.tx, -P.tz, P.snapR || 8); P.snapR = 0;   // a dev map landing looks further for a floor
     if (x !== P.tx || y !== -P.tz) placePlayer(x, -y);
   }
   for (const p of m7Props) {

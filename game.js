@@ -6557,13 +6557,6 @@ function wmPaintTile(tx, tz, tpp) {
   for (let j = 0; j < WM_TILE; j++) {
     const z = oz + (j + 0.5) * tpp;
     for (let i = 0; i <= WM_TILE; i++) wmRow[i] = macroHeight(ox + (i + 0.5) * tpp, z);
-    if (M7 && SYN) {   // the made world's own ground colours, shaded by the field's slope
-      for (let i = 0; i < WM_TILE; i++) {
-        const c = syTileRGB(Math.floor(ox + (i + 0.5) * tpp), -Math.floor(z)), p = (j * WM_TILE + i) * 4, sh = clamp(1 - (wmRow[i + 1] - wmRow[i]) * (tpp >= 8 ? 0.012 : 0.05), 0.72, 1.22);
-        im.data[p] = (c >> 16 & 255) * sh; im.data[p + 1] = (c >> 8 & 255) * sh; im.data[p + 2] = (c & 255) * sh; im.data[p + 3] = 255;
-      }
-      continue;
-    }
     for (let i = 0; i < WM_TILE; i++) mapPixel(im.data, (j * WM_TILE + i) * 4, ox + (i + 0.5) * tpp, z, wmRow[i], wmRow[i + 1] - wmRow[i], tpp, tpp >= 8 ? 0.06 : 0.12, 0.45);
   }
   g.putImageData(im, 0, 0);
@@ -6630,6 +6623,7 @@ function wmSeedLayer(W, H, s, px, pz) {
   const sv = SEAM;
   if (M7) SEAM = 1;
   try {
+  if (M7 && SYN && typeof syMapLayer === 'function') return syMapLayer(W, H, s, px, pz);   // the made world past the rectangle draws its own map (50.)
   const half = W / 2 / s, halfZ = H / 2 / s, tpp = M7 ? (wmZoom >= 16 ? 1 : wmZoom >= 4 ? 2 : wmZoom >= 1 ? 8 : wmZoom >= 0.4 ? 32 : 64) : wmLod(), span = WM_TILE * tpp, size = span * s, pre = M7 ? 's' : '';   // Gielinor's map spans a continent to a wall: the seed round it follows from 32 tiles a pixel to 1
   const x0 = Math.floor((wmCx - half) / span), x1 = Math.floor((wmCx + half) / span), z0 = Math.floor((wmCz - halfZ) / span), z1 = Math.floor((wmCz + halfZ) / span);
   const missing = [];
@@ -6672,7 +6666,7 @@ function wmSeedLayer(W, H, s, px, pz) {
       const v = villageAt(a, b); if (!v) continue;
       const x = px(v.x), y = pz(v.z);
       if (x < -80 || y < -40 || x > W + 80 || y > H + 40) continue;
-      if (wmZoom >= 2.5 && !(M7 && SYN)) {   // the seed's own plans: a made town is built of the map's buildings instead
+      if (wmZoom >= 2.5) {   // the seed's own plans
         if (!v.b && --vbud < 0) { wmDirty = 1; continue; }   // come back for the rest next frame
         villageBuildings(v);
         for (const bd of v.b) {
@@ -6692,7 +6686,7 @@ function wmSeedLayer(W, H, s, px, pz) {
       wmCtx.lineWidth = 3; wmCtx.strokeStyle = 'rgba(0,0,0,.85)'; wmCtx.strokeText(nm, x, y - 4);
       wmCtx.fillStyle = v.rank >= 3 ? '#ffd34a' : '#f4ead0'; wmCtx.fillText(nm, x, y - 4);
     }
-    if (wmZoom >= 2.5 && !(M7 && SYN)) for (let a = Math.floor((wmCx - half) / RUIN_CELL), a1 = Math.floor((wmCx + half) / RUIN_CELL), bud = 40; a <= a1; a++)   // rune altars: an unseen cell costs a survey, forty a frame
+    if (wmZoom >= 2.5) for (let a = Math.floor((wmCx - half) / RUIN_CELL), a1 = Math.floor((wmCx + half) / RUIN_CELL), bud = 40; a <= a1; a++)   // rune altars: an unseen cell costs a survey, forty a frame
       for (let b = Math.floor((wmCz - halfZ) / RUIN_CELL), b1 = Math.floor((wmCz + halfZ) / RUIN_CELL); b <= b1; b++) {
         if (!ruinCache.has(a * 8191 + b) && --bud < 0) continue;
         const R = ruinAt(a, b); if (R) ico(11, R.x, R.z);
@@ -12306,7 +12300,7 @@ function synApply() {
   pending.length = 0; popQueue.length = 0;
   for (let i = npcs.length - 1; i >= 0; i--) if (npcs[i].c7 === undefined) removeNpc(npcs[i]);
   villageCache.clear(); nbrCache.clear(); resetLookups(); _bx = _bz = 1e9;
-  for (const k of [...wmTiles.keys()]) if (k[0] === 's') wmTiles.delete(k);
+  for (const k of [...wmTiles.keys()]) if (k[0] === 's' || k[0] === 'y') wmTiles.delete(k);   // the seed's pieces and the made world's (50.)
   seedRGB.clear();
   nearDirty = 1; mapOX = 1e9; mapRow = MW; mapImg = null; osMapDirty = 1; wmDirty = 1;
   if (started && M7) refresh();
@@ -12587,6 +12581,7 @@ function osMapInit(c) {
   S.cmp.className = S.cv.className = 'osg';
   OSUI.at(box, S.cmp, 29, 0); OSUI.at(box, S.cv, 54, 5);
   box.insertBefore(S.cmp, before); box.insertBefore(S.cv, before);   // at() appends; the cover (1182) must stay on top
+  before.style.pointerEvents = 'none';   // ...and let the wheel, pinches and clicks through its hole to the map (the click reads the mask itself)
   S.g = S.cv.getContext('2d'); S.cg = S.cmp.getContext('2d');
   osMask(1183, 145, 151).then(m => { S.maskM = m; });
   osMask(1184, 32, 33).then(m => { S.maskC = m; });

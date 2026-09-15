@@ -214,6 +214,8 @@ function faceUV(m, f, i0, i2, uv, o) {
   }
 }
 const uvTmp = new Float32Array(6);
+const texAvgs = new Map();
+const texAvg = tid => { let c = texAvgs.get(tid); if (!c) texAvgs.set(tid, c = textures[tid] ? rgbI(textures[tid].avgRgbAdjusted) : WHITE); return c; };   // a texture seen from afar
 /* the client never draws render-type-2 faces nor alpha-255 ones: modellers use them for hidden helper geometry */
 const faceHidden = (m, f) => (m.types !== null && m.types[f] === 2) || (m.alphas !== null && m.alphas[f] > 250);
 
@@ -533,7 +535,13 @@ function appendModel(sink, m, t, flat) {
     const a = idx[f * 3 + i0] * 3, b = idx[f * 3 + 1] * 3, c = idx[f * 3 + i2] * 3, al = flat || !m.alphas ? 0 : m.alphas[f], op = 1 - al / 255;
     const ax = out[a], ay = out[a + 1], az = out[a + 2], bx = out[b], by = out[b + 1], bz = out[b + 2], cx = out[c], cy = out[c + 1], cz = out[c + 2];
     if (ud) { grow(ud, ax, ay, az); grow(ud, bx, by, bz); grow(ud, cx, cy, cz); }
+    if (sink.avg && al) continue;   // a far level draws nothing see-through
     if (!flat && tid >= 0 && textures[tid] !== undefined) {
+      if (sink.avg) {   // a far level: the texture's own average colour, one flat mesh
+        const c = texAvg(tid);
+        sink.pos.push(ax, ay, az, bx, by, bz, cx, cy, cz); sink.col.push(c[0], c[1], c[2], c[0], c[1], c[2], c[0], c[1], c[2]); sink.owners.push(null);
+        continue;
+      }
       const T = al ? sink.ttex : sink.tex;
       let bk = T.get(tid);
       if (!bk) T.set(tid, bk = { pos: [], uv: [], owners: [], col: al ? [] : null });
@@ -714,7 +722,7 @@ function animateScenery(gx, gy, dtMs) {   /* the player's OSRS tile; call once a
   animClock += dtMs;
   for (const R of regions.values()) {
     const A = R.anim;
-    if (!A || gx < R.sqX * 64 - ANIM_R || gx > R.sqX * 64 + 63 + ANIM_R || gy < R.sqY * 64 - ANIM_R || gy > R.sqY * 64 + 63 + ANIM_R) continue;
+    if (!A || (R.lodV && !R.lodV.d) || gx < R.sqX * 64 - ANIM_R || gx > R.sqX * 64 + 63 + ANIM_R || gy < R.sqY * 64 - ANIM_R || gy > R.sqY * 64 + 63 + ANIM_R) continue;
     for (let p = 0; p < 4; p++) {
       const B = A[p];
       if (!B || !planeG[p].visible) continue;
@@ -994,7 +1002,7 @@ function toggledPlacement(pl) {
    The spent look is laid at build time, hidden, so a model trimmed from the cache later can never leave a hole. */
 function dynamic(R, def, pl, ud, spec) {
   const g = new THREE.Group();
-  planeG[ud.plane].add(g);
+  lodBox(R, 'd', ud.plane).add(g);   // with the square's near level: shown and hidden with it
   const s = makeSink();
   drawLoc(s, def, pl, ud, false);
   const whole = flushSink(s, g), spent = spentLook(def, pl, spec, g);
@@ -1198,42 +1206,66 @@ async function sceneryStage(R) {
     /* the seams: the east, north and north-east neighbours lend the heights our edge pieces stand on */
     const nb = [[1, 0], [0, 1], [1, 1]].map(([dx, dy]) => regions.get(ridSq(R.sqX + dx, R.sqY + dy))).filter(n => n && !n.H);
     if (nb.length) { await Promise.race([Promise.all(nb.map(n => n.groundP)), sleep(2500)]); if (gone()) return; }
-    const run = buildLane.then(() => gone() ? 0 : buildScenery(R));
-    buildLane = run.catch(() => {});
-    await run;
+    R.lodS = { d: 0, f: 0 }; R.lodV = { d: 0, c: 0, f: 0, g: 0 };   // lodTick builds and shows its levels from here
+    lodRegion(R);
   } finally { scenic--; unpin(R.mids); }
 }
-/* ---- the far view: a view distance past the old reach streams squares hundreds of tiles out, and there a square's clutter — its
-   flowers, grass tufts, pebbles and ground dressing, anything a tile across with no menu — is too small to see and costs more than
-   everything else it draws. A square built farther than LOD_FAR leaves it for later and lays it once you come within LOD_NEAR; the
-   default reach never streams a square that far, so nothing changes there ---- */
-const LOD_FAR = 176, LOD_NEAR = 128;
-const lodFocus = { gx: 0, gy: 0, reach: 0 };
-const squareDist = (R, gx, gy) => { const x0 = R.sqX * 64, y0 = R.sqY * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
-const clutter = q => !q.ud && q.seq === undefined && (q.pl.type === 22 || ((q.pl.type === 10 || q.pl.type === 11) && (q.def.width || 1) <= 1 && (q.def.length || 1) <= 1));
-async function buildClutter(R) {   // a far-built square's clutter, laid now that it is near
-  const list = R.clutter, rid = R.rid, gone = () => regions.get(rid) !== R;
-  R.clutter = null;
-  if (!list || !list.length) return;
-  const mids = [];
-  for (const q of list) for (const m of q.def.models || []) mids.push(m.model);
-  pin(mids);
-  try {
-    await models(mids);
-    await breathe();
-    if (gone()) return;
-    const sinks = [0, 1, 2, 3].map(() => makeSink());
-    for (const q of list) { drawLoc(sinks[q.rp], q.def, q.pl, null, false); if (overBudget()) { await breathe(); if (gone()) return; } }
-    for (let p = 0; p < 4; p++) { const g = new THREE.Group(); planeG[p].add(g); R.groups.push(g); flushSink(sinks[p], g); }
-  } finally { unpin(mids); }
+/* ---- levels of detail, by how far the camera stands from a square — not the player: a camera backed far off sees every square from
+   afar, the one underfoot too.
+   near (the camera within LOD_IN tiles): the square as the client draws it — every piece in its textures, its doors that swing, its
+        flames and flags in motion — and its clutter (flowers, grass tufts, pebbles, ground dressing: a tile across with no menu)
+        only within CLUTTER_IN, where anything so small can be seen at all;
+   far  (past LOD_OUT): one mesh a floor of what shapes the view — walls, roofs, trees, rocks, every piece more than a tile across — in
+        each texture's own average colour; never a room's furniture, a wall's trinkets, see-through glass or clutter.
+   Each level is built the first time it is wanted (the near one too when the player stands close enough to click the square's
+   pieces), one square at a time in the build lane, and a square keeps showing the level it has until the one wanted stands: from
+   far off the world is all there in outline, and it sharpens as the camera comes in; nothing pops into being ---- */
+const LOD_IN = 72, LOD_OUT = 84, CLUTTER_IN = 40, CLUTTER_OUT = 48, GRAIN_IN = 300, GRAIN_OUT = 320, LOD_TOUCH = 48;   // grain: a far level's lone trees and rocks, which the very farthest squares leave out
+const lodCam = { x: 0, y: 1e4, z: 0, gx: 0, gy: 0 };
+const isClutter = q => !q.ud && !q.door && !q.dyn && q.seq === undefined && (q.pl.type === 22 || ((q.pl.type === 10 || q.pl.type === 11) && (q.def.width || 1) <= 1 && (q.def.length || 1) <= 1));
+function lodBox(R, k, p) {   // a square's container for one level (d near, c clutter, f far) on one floor, made on first use
+  const K = R.lodG || (R.lodG = { d: [], c: [], f: [], g: [] });
+  let g = K[k][p];
+  if (!g) { g = K[k][p] = new THREE.Group(); g.visible = !!(R.lodV && R.lodV[k]); planeG[p].add(g); R.groups.push(g); }
+  return g;
 }
-async function buildScenery(R) {
-  const rid = R.rid, gone = () => regions.get(rid) !== R, sinks = [0, 1, 2, 3].map(() => makeSink()), later = [], anims = [[], [], [], []];
+function lodQueue(R, k) {   // a square's near ('d') or far ('f') level, built once, in the build lane
+  if (R.lodS[k]) return;
+  R.lodS[k] = 1;
+  const rid = R.rid, run = buildLane.then(async () => {
+    if (regions.get(rid) !== R) return;
+    scenic++; pin(R.mids);
+    try {
+      await models(R.mids);   // what a trim let go since the square first came in
+      if (regions.get(rid) !== R) return;
+      if (k === 'd') await buildNear(R); else await buildFar(R);
+      if (regions.get(rid) !== R) return;
+      R.lodS[k] = 2; R.built = 1; lodRegion(R);
+    } finally { scenic--; unpin(R.mids); }
+  });
+  buildLane = run.catch(e => console.warn('[map07] scenery ' + rid, e));
+}
+function lodRegion(R) {   // one square: what it wants, what it builds, what it shows
+  if (!R.lodS) return;
+  const C = lodCam, bx = R.sqX * 64, by = R.sqY * 64, V = R.lodV;
+  const dx = Math.max(bx - 0.5 - C.x, 0, C.x - bx - 63.5), dz = Math.max(-(by + 63.5) - C.z, 0, C.z + by - 0.5), dy = Math.max(0, C.y - 4);   // C.y: the camera's height over the player
+  const cd = Math.sqrt(dx * dx + dz * dz + dy * dy), pd = Math.max(bx - C.gx, 0, C.gx - bx - 63, by - C.gy, C.gy - by - 63);
+  const wantNear = V.d ? cd < LOD_OUT : cd < LOD_IN;
+  if (wantNear || pd < LOD_TOUCH) lodQueue(R, 'd');
+  if (!wantNear) lodQueue(R, 'f');
+  const d = R.lodS.d === 2 && (wantNear || R.lodS.f !== 2), f = !d && R.lodS.f === 2, c = d && (V.c ? cd < CLUTTER_OUT : cd < CLUTTER_IN), g = f && (V.g ? cd < GRAIN_OUT : cd < GRAIN_IN);
+  const set = (k, on) => { if (V[k] === on) return; V[k] = on; if (R.lodG) for (const x of R.lodG[k]) if (x) x.visible = on; };
+  set('d', d); set('c', c); set('f', f); set('g', g);
+}
+function lodTick(cx, cy, cz, gx, gy) {   // once a frame from game.js: the camera's world x and z, its height over the player, and the player's tile
+  lodCam.x = cx; lodCam.y = cy; lodCam.z = cz; lodCam.gx = gx; lodCam.gy = gy;
+  for (const R of regions.values()) lodRegion(R);
+}
+async function buildNear(R) {
+  const rid = R.rid, gone = () => regions.get(rid) !== R, sinks = [0, 1, 2, 3].map(() => makeSink()), fine = [0, 1, 2, 3].map(() => makeSink()), later = [], anims = [[], [], [], []];
   await breathe();
   if (gone()) return;
-  const far = lodFocus.reach > LOD_FAR && squareDist(R, lodFocus.gx, lodFocus.gy) > LOD_FAR;
   for (const q of R.work) {
-    if (far && clutter(q)) { (R.clutter || (R.clutter = [])).push(q); continue; }
     if (q.door || q.dyn) { later.push(q); continue; }
     if (q.seq !== undefined) {   /* an animated piece keeps its models and transforms, to be posed later */
       const rec = { rec: [], ud: null };
@@ -1241,24 +1273,43 @@ async function buildScenery(R) {
       if (rec.rec.length) anims[q.rp].push({ rec: rec.rec, ud: q.ud, seq: q.seq, ph: q.ph });
       continue;
     }
-    drawLoc(sinks[q.rp], q.def, q.pl, q.ud, false);
+    drawLoc((isClutter(q) ? fine : sinks)[q.rp], q.def, q.pl, q.ud, false);
     if (overBudget()) { await breathe(); if (gone()) return; }
   }
   for (let p = 0; p < 4; p++) {
-    const g = new THREE.Group();
-    planeG[p].add(g); R.groups.push(g);
+    const g = lodBox(R, 'd', p);
     flushSink(sinks[p], g);
     if (anims[p].length) { R.anim = R.anim || []; R.anim[p] = animFlush(anims[p], g); }
+    if (fine[p].pos.length || fine[p].tex.size || fine[p].tpos.length || fine[p].ttex.size) flushSink(fine[p], lodBox(R, 'c', p));
     if (overBudget()) { await breathe(); if (gone()) return; }
   }
   for (const q of later) {
     if (q.door) {
       const key = q.pl.plane + ',' + q.pl.gx + ',' + q.pl.gy + ',' + q.pl.type;
       spawnDoor(R, key, q.pl, locOverrides.get(key) || q.pl);
-    } else { dynamic(R, q.def, q.pl, q.ud, q.spec); R.groups.push(q.ud.dyn); }
+    } else dynamic(R, q.def, q.pl, q.ud, q.spec);
     if (overBudget()) { await breathe(); if (gone()) return; }
   }
-  R.work = null; R.built = 1;
+}
+async function buildFar(R) {
+  const rid = R.rid, gone = () => regions.get(rid) !== R, bx = R.sqX * 64, by = R.sqY * 64;
+  const sinks = [0, 1, 2, 3].map(() => Object.assign(makeSink(), { avg: 1 })), grain = [0, 1, 2, 3].map(() => Object.assign(makeSink(), { avg: 1 }));
+  await breathe();
+  if (gone()) return;
+  for (const q of R.work) {
+    if (q.door || !q.def || isClutter(q)) continue;
+    const t = q.pl.type, small = (q.def.width || 1) <= 1 && (q.def.length || 1) <= 1;
+    if (t === 22 || (t >= 4 && t <= 8)) continue;   // ground dressing, and what hangs on a wall
+    if ((t === 10 || t === 11) && small && R.FL[q.pl.plane * 4096 + (q.pl.gx - bx) * 64 + (q.pl.gy - by)] & 4) continue;   // a room's furniture, under its roof
+    if (q.ud && q.ud.st) continue;   // a felled tree, an emptied vein
+    const rp = q.rp !== undefined ? q.rp : renderPlane(q.pl.plane, q.pl.gx, q.pl.gy);
+    drawLoc(((t === 10 || t === 11) && small ? grain : sinks)[rp], q.def, q.pl, null, false);   // a lone tree, rock or post out of doors is the landscape's grain: kept apart, to go first
+    if (overBudget()) { await breathe(); if (gone()) return; }
+  }
+  for (let p = 0; p < 4; p++) {
+    if (sinks[p].pos.length) lodBox(R, 'f', p).add(bake(sinks[p].pos, sinks[p].col));
+    if (grain[p].pos.length) lodBox(R, 'g', p).add(bake(grain[p].pos, grain[p].col));
+  }
 }
 function applyExt(src, only) {
   const e = src.ext;
@@ -1274,7 +1325,7 @@ function spawnDoor(R, key, orig, pl) {
   const [w, l] = footprint(def, pl.rot), ud = newOwner(R, pl, def, lid, w, l);
   ud.door = { key, orig, pl };
   dynamic(R, def, pl, ud, null);
-  R.owners.push(ud); R.groups.push(ud.dyn);
+  R.owners.push(ud);
 }
 function toggleDoor(ud, mate) {
   const R = ud.R, { key, orig } = ud.door;
@@ -1341,9 +1392,7 @@ const streams = rid => inMain(rid) ? manifest.has(rid) : scopeAll ? manifest.has
 function update(gx, gy, reach) {
   if (!loaded) return;
   const dist = rid => { const x0 = sqXOf(rid) * 64, y0 = sqYOf(rid) * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
-  lodFocus.gx = gx; lodFocus.gy = gy; lodFocus.reach = reach;
   for (const rid of [...regions.keys()]) if (dist(rid) > reach + 48 || (!inMain(rid) && (regions.get(rid).syn ? scopeAll || !synth : !scopeAll))) unloadRegion(rid);
-  for (const R of regions.values()) if (R.clutter && R.built && !R.clutterQ && dist(R.rid) < LOD_NEAR) { R.clutterQ = 1; const run = buildLane.then(() => buildClutter(R)); buildLane = run.catch(() => {}); }   // come near a far-built square: its clutter, in the build lane
   const rx = gx >> 6, ry = gy >> 6, n = Math.ceil(reach / 64) + 1, list = [], now = performance.now();
   for (let dx = -n; dx <= n; dx++) for (let dy = -n; dy <= n; dy++) {
     if (!synth && (ry + dy < 0 || ry + dy > 255 || rx + dx < 0)) continue;   // the tree's squares keep to the byte; the made world runs every way
@@ -1849,7 +1898,7 @@ return {
   canMove: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0), canSail: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0, F_OBJ | F_DECO),
   los, openTile, flagAt, snapWalkable, wallBetween, F_FULL, waterAt, setScope, setSynth, tileColor,
   pick, transport, climbTarget, toggleDoor, doorPartner, doorPairs,
-  npcDefOf, npcFigure, headFigure, animate, figureAct, seqFrames, frameAt, transformVerts, labelGroups, spotanim, animateScenery, defs,
+  npcDefOf, npcFigure, headFigure, animate, figureAct, seqFrames, frameAt, transformVerts, labelGroups, spotanim, animateScenery, lodTick, defs,
   defSync, itemGeo, itemMesh, itemFor, itemNameIds, itemSpawns: () => itemSpawns,
   tileRGB, wallBits, worldImage, worldRGB, WORLD_IMG, isLand, squareCanvas, clean, opsOf, ridSq, sqXOf, sqYOf, sourceSquare, spawnCount: id => spawnN.get(id) || 0,
 };

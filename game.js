@@ -7445,6 +7445,7 @@ function frame(now) {
   camera.position.set(P.rx - Math.sin(yaw) * cp * d, cy + eye + sp * d, P.rz - Math.cos(yaw) * cp * d);
   if (dunCam) camera.position.y = Math.max(camera.position.y, DUN_FLOOR + 16);
   camera.lookAt(P.rx, cy + eye, P.rz);
+  if (M7) MAP07.lodTick(camera.position.x, camera.position.y - cy, camera.position.z, P.tx, -P.tz);   // each square's detail by how far the camera stands from it (map07 levels of detail)
   if (spellT > 0) {
     spellT -= dt;
     const k = clamp(spellT / 0.42, 0, 1);
@@ -12235,14 +12236,14 @@ function m7Spawn(s, key) {
 /* after the lunge and the bob have placed the group: an even-sized body centres between tiles. A hundred-odd figures
    re-posing every frame is most of Gielinor's frame, so the pose is spent only where it is seen: relit close by, posed
    on its old normals at range, held off screen or far away (its clock still runs, so it never snaps). */
-const m7Frus = new THREE.Frustum(), m7PM = new THREE.Matrix4(), m7Sph = new THREE.Sphere();
+const m7Frus = new THREE.Frustum(), m7PM = new THREE.Matrix4(), m7Sph = new THREE.Sphere(), M7_FIG_FAR = 150;
 let m7FrusF = -1;
 function m7Figure(n, dt) {
   if (n.vo) { n.mesh.position.x += n.vo; n.mesh.position.z -= n.vo; }
   const d = Math.max(Math.abs(n.tx - P.tx), Math.abs(n.tz - P.tz)), moving = n.tx !== n.px || n.tz !== n.pz;
   if (m7FrusF !== hoverFrame) { m7FrusF = hoverFrame; m7Frus.setFromProjectionMatrix(m7PM.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)); }
   m7Sph.center.copy(n.mesh.position); m7Sph.center.y += n.h7 / 2; m7Sph.radius = Math.max(1, n.h7) * Math.max(1, n.t.sz);
-  const seen = m7Frus.intersectsSphere(m7Sph);
+  const seen = m7Frus.intersectsSphere(m7Sph) && camera.position.distanceToSquared(m7Sph.center) < M7_FIG_FAR * M7_FIG_FAR;   // a figure too far from the camera to make out is not drawn either (a camera backed far off)
   n.fig.mesh.visible = seen;   // off screen is not drawn at all: the figure opts out of three's own culling (its poses move past any fixed bound); the pick sphere and the bars read n.mesh, which stays
   MAP07.animate(n.fig, moving, dt * 1000, !seen || d > 40 ? 2 : d <= 12 ? 0 : 1);   // the clock runs either way, so a figure never snaps when it comes back into view
 }

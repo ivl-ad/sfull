@@ -412,8 +412,8 @@ function clipLoc(R, def, id, pl, w, l) {
   if ((t >= 9 && t <= 21) && ct !== 0 && !(t === 9 && doorPairs.has(id))) for (let dx = 0; dx < w; dx++) for (let dy = 0; dy < l; dy++) orFlag(R, rp, pl.gx + dx, pl.gy + dy, F_OBJ | (bp ? P_OBJ : 0));
 }
 /* one step, |dx|,|dy| <= 1, OSRS north = +dy; the client's own masks, diagonals needing both orthogonals */
-function canMove(rp, x, y, dx, dy, proj, last) {
-  const B = proj ? (last ? 0 : P_OBJ) : F_FULL, s = proj ? 9 : 0, f = (a, b) => flagAt(rp, a, b);
+function canMove(rp, x, y, dx, dy, proj, last, base) {   /* base: what fills a tile (a boat ignores the floor flag water carries) */
+  const B = proj ? (last ? 0 : P_OBJ) : base === undefined ? F_FULL : base, s = proj ? 9 : 0, f = (a, b) => flagAt(rp, a, b);
   const m = bits => B | (bits << s);
   const N = !(f(x, y + 1) & m(F_S)), S = !(f(x, y - 1) & m(F_N)), E = !(f(x + 1, y) & m(F_W)), W = !(f(x - 1, y) & m(F_E));
   if (!dx) return dy > 0 ? N : dy < 0 ? S : true;
@@ -435,6 +435,20 @@ function los(rp, ax, ay, bx, by) {
   return true;
 }
 const openTile = (rp, gx, gy) => !(flagAt(rp, gx, gy) & F_FULL);
+/* a tile of the map's own water on the ground floor, not under a deck: its overlay wears a water texture (1, or the open
+   sea's 130..189). A boat's tile: game.js rows it, walls and rocks still stand (canSail) */
+let waterOL = null;
+function waterAt(plane, gx, gy) {
+  if (plane !== 0) return false;
+  const r = regionAt(gx, gy);
+  if (!r) return false;
+  if (!waterOL) {
+    waterOL = new Uint8Array(1024);
+    for (const k in overlays) { const t = overlays[k] && overlays[k].texture; if (t === 1 || (t >= 130 && t <= 189)) waterOL[(+k + 1) & 1023] = 1; }
+  }
+  const i = (gx & 63) * 64 + (gy & 63);
+  return !r.bridge[i] && waterOL[r.OL[i] & 1023] === 1;
+}
 function snapWalkable(rp, gx, gy, maxR) {
   if (openTile(rp, gx, gy)) return [gx, gy];
   for (let r = 1; r <= (maxR || 3); r++) for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++)
@@ -1202,14 +1216,22 @@ function unloadRegion(rid) {
 /* ---- streaming: every square within reach of the player, nearest first, four fetching at once; far ones go ---- */
 const LANES = 4;
 let queue = [], busy = 0;
+/* scope: while game.js lays the seed's world round the main map, only the squares of the main map's rectangle stream (the
+   others are Gielinor's own places past it: dungeons, the essence mine, reached by their own ladders and spells) */
+let scopeAll = 1;
+const inMain = rid => { const x = rid >> 8, y = rid & 255; return x >= 18 && x <= 60 && y >= 39 && y <= 64; };
+function setScope(all) {
+  scopeAll = all ? 1 : 0;
+  if (!scopeAll) { for (const rid of [...regions.keys()]) if (!inMain(rid)) unloadRegion(rid); queue = queue.filter(inMain); }
+}
 function update(gx, gy, reach) {
   if (!loaded) return;
   const dist = rid => { const x0 = (rid >> 8) * 64, y0 = (rid & 255) * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
-  for (const rid of [...regions.keys()]) if (dist(rid) > reach + 48) unloadRegion(rid);
+  for (const rid of [...regions.keys()]) if (dist(rid) > reach + 48 || (!scopeAll && !inMain(rid))) unloadRegion(rid);
   const rx = gx >> 6, ry = gy >> 6, n = Math.ceil(reach / 64) + 1, list = [], now = performance.now();
   for (let dx = -n; dx <= n; dx++) for (let dy = -n; dy <= n; dy++) {
     const rid = ((rx + dx) << 8) | (ry + dy);
-    if (rx + dx >= 0 && ry + dy >= 0 && manifest.has(rid) && !regions.has(rid) && dist(rid) <= reach && !(retryAt.get(rid) > now)) list.push(rid);   // a square resting after a failure waits out its rest
+    if (rx + dx >= 0 && ry + dy >= 0 && (scopeAll || inMain(rid)) && manifest.has(rid) && !regions.has(rid) && dist(rid) <= reach && !(retryAt.get(rid) > now)) list.push(rid);   // a square resting after a failure waits out its rest
   }
   queue = list.sort((a, b) => dist(a) - dist(b));
   pump();
@@ -1694,7 +1716,8 @@ return {
   update, regions, clear, regionAt, pending, manifest: () => manifest,
   yAt, heightAt, bridgeAt, renderPlane, coveredAt, solidAt,
   roofedAt: (p, gx, gy) => { const r = regionAt(gx, gy); if (!r) return false; const i = (gx & 63) * 64 + (gy & 63); return !!(r.FL[p * 4096 + i] & 4 || (p < 3 && r.bridge[i] && r.FL[(p + 1) * 4096 + i] & 4)); },   /* the client's under-a-roof tile flag (settings bit 4), not "anything above": an eave or a balcony lifts nothing */
-  canMove: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0), los, openTile, flagAt, snapWalkable, wallBetween, F_FULL,
+  canMove: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0), canSail: (rp, x, y, dx, dy) => canMove(rp, x, y, dx, dy, 0, 0, F_OBJ | F_DECO),
+  los, openTile, flagAt, snapWalkable, wallBetween, F_FULL, waterAt, setScope,
   pick, transport, climbTarget, toggleDoor, doorPartner, doorPairs,
   npcDefOf, npcFigure, headFigure, animate, figureAct, seqFrames, frameAt, transformVerts, labelGroups, spotanim, animateScenery, defs,
   defSync, itemGeo, itemMesh, itemFor, itemNameIds, itemSpawns: () => itemSpawns,

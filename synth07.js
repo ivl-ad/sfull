@@ -99,9 +99,8 @@ function syRot(T, r) {
   const N = T.N.slice(), I = T.I.slice();
   for (let q = 0; q < N.length; q += 4) { const x = N[q + 1], y = N[q + 2]; N[q + 1] = tx(x, y, 1, 1); N[q + 2] = ty(x, y, 1, 1); }
   for (let q = 0; q < I.length; q += 3) { const x = I[q + 1], y = I[q + 2]; I[q + 1] = tx(x, y, 1, 1); I[q + 2] = ty(x, y, 1, 1); }
-  let M = null;
-  if (T.M) { M = new Uint8Array(W2 * L2); for (let x = 0; x < W; x++) for (let y = 0; y < L; y++) M[tx(x, y, 1, 1) * L2 + ty(x, y, 1, 1)] = T.M[x * L + y]; }
-  return rots[r] = { k: T.k, w: W2, l: L2, p: T.p, g, dv: new DataView(g.buffer), L: Lr, N, I, Z: T.Z, M, rots: null, turn: r, src: T };
+  const turn = A => { if (!A) return A; const B = new Uint8Array(W2 * L2); for (let x = 0; x < W; x++) for (let y = 0; y < L; y++) B[tx(x, y, 1, 1) * L2 + ty(x, y, 1, 1)] = A[x * L + y]; return B; };
+  return rots[r] = { k: T.k, w: W2, l: L2, p: T.p, g, dv: new DataView(g.buffer), L: Lr, N, I, Z: T.Z, M: turn(T.M), safe: turn(T.safe), rots: null, turn: r, src: T };
 }
 /* ---- borrowed pieces, cut from the main map's own squares where synth.json says they lie and fetched from the tree through map07
    the first time a made city or a stretch of made country takes one. Two kinds:
@@ -113,6 +112,8 @@ function syRot(T, r) {
    Its heights are pressed as a building's are; its people are its keepers and the main map's anybodies, never its somebodies. The
    same shape as a building template, so everything that lays one lays this ---- */
 const SYP = new Map(), SYP_T = new Map();
+const SY_CHORE = /^(talk-to|attack|pickpocket|examine|follow|shoo-away|pet|lure|knock-out|steal-from)$/i;
+const syServes = ops => ops.some(o => o && !SY_CHORE.test(o));   // an npc that works a trade: trade, bank, exchange, collect, heal, travel, decant...
 const SY_NATURAL = /tree|rock|plant|fern|bush|grass|flower|daisies|bullrush|reed|mushroom|shrub|weed|thistle|root|stump|vine|cactus/i;   // tools/bake07/synth.mjs NATURAL, word for word
 const syPieceKey = d => d.slice(0, 4).join(':');
 function syPiece(desc) {
@@ -225,18 +226,40 @@ function syPiece(desc) {
       if (x >= 0 && y >= 0 && x < W && y < L && !drop[at(x, y)] && (s.plane | 0) < 4) { rawN.push(s); nids.add(s.as !== undefined ? s.as : s.id); }
     }
     const nd = nids.size ? await MAP07.defs('npc', [...nids]) : {}, N = [];
-    let staff = 0, folk = 0;
+    let folk = 0;
     for (const s of rawN) {
       const d = nd[s.as !== undefined ? s.as : s.id];
       if (!d || !d.models) continue;
-      const o = MAP07.opsOf(d).map(x => x.toLowerCase());
-      if (o.includes('trade') || o.includes('bank')) { if (staff++ >= 3) continue; }
-      else if (MAP07.spawnCount(s.id) < 3 || (d.combatLevel | 0) > 40 || folk++ >= Math.round(W * L / 160)) continue;   // anybody, not somebody; nothing that starts a fight in the street
-      N.push(s.id, s.x - X0, s.y - Y0, s.plane | 0);
+      /* a whole structure brings every soul the main map keeps in it, where it stands: the Exchange its clerks, bankers and
+         price-askers, a palace its king, court and guards, a ruin its skeletons. A district brings whoever works in it (a keeper,
+         a banker, a clerk, a healer...) and a few of the main map's anybodies, never its somebodies nor a fighter */
+      if (!whole && !syServes(MAP07.opsOf(d)) && (MAP07.spawnCount(s.id) < 3 || (d.combatLevel | 0) > 40 || folk++ >= Math.round(W * L / 160))) continue;
+      N.push(s.as !== undefined ? s.as : s.id, s.x - X0, s.y - Y0, s.plane | 0);   // the body it wears: a spawn whose own def has no model is dressed by its 'as'
+    }
+    /* its safe floors: a roofed block (four ways) with a banker, a clerk or a booth in it or against it — a bank or the Exchange,
+       where no player may strike another (sySafeAt) */
+    let safe = null;
+    {
+      const mark = new Uint8Array(W * L);
+      for (let q = 0; q < N.length; q += 4) { const o = MAP07.opsOf(nd[N[q]] || {}).map(x => x.toLowerCase()); if (o.includes('bank') || o.includes('exchange')) mark[at(N[q + 1], N[q + 2])] = 1; }
+      for (const [q, x, y] of raw) { const d = dd[q.id]; if (d && !drop[at(x, y)] && /bank booth|bank chest|^bank$|exchange booth|grand exchange/i.test(MAP07.clean(d.name || ''))) mark[at(x, y)] = 1; }
+      const seen = new Uint8Array(W * L);
+      for (let s0 = 0; s0 < W * L; s0++) {
+        if (!roof[s0] || drop[s0] || seen[s0]) continue;
+        const comp = [s0], st = [s0];
+        let hit = false;
+        seen[s0] = 1;
+        while (st.length) {
+          const c = st.pop(), x = (c / L) | 0, y = c % L;
+          for (let a = -1; a <= 1 && !hit; a++) for (let b = -1; b <= 1; b++) { const u = x + a, v = y + b; if (u >= 0 && v >= 0 && u < W && v < L && mark[at(u, v)]) { hit = true; break; } }
+          for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const u = x + dx, v = y + dy, k = at(u, v); if (u >= 0 && v >= 0 && u < W && v < L && roof[k] && !drop[k] && !seen[k]) { seen[k] = 1; comp.push(k); st.push(k); } }
+        }
+        if (hit) { safe = safe || new Uint8Array(W * L); for (const c of comp) safe[c] = 1; }
+      }
     }
     const I = [], MI = typeof c7Get === 'function' ? c7Get('mapicons.json') : null;
     if (MI) for (const e of MI.i) if (e[0] >= X0 && e[0] < X0 + W && e[1] >= Y0 && e[1] < Y0 + L && !e[2] && !drop[at(e[0] - X0, e[1] - Y0)]) I.push(e[3], e[0] - X0, e[1] - Y0);
-    const t = { k: kind, w: W, l: L, p: P, g, dv, L: Ls, N, I, Z, M, rots: null, piece: key };
+    const t = { k: kind, w: W, l: L, p: P, g, dv, L: Ls, N, I, Z, M, safe, rots: null, piece: key };
     SYP_T.set(key, t);
     return t;
   })();
@@ -585,7 +608,7 @@ function syGuardPick(P, u, u2) {
 }
 /* a city into a square: its paving, its buildings on their feathered footings, its people */
 function syCityInto(C, bx, by, D, sq) {
-  const { H, UL, OL, SR, FL, locs, spawns, occ, inTown } = sq, P = D.bio[C.b], v = C.v, AV = C.AV, AW = C.AW;
+  const { H, UL, OL, SR, FL, locs, spawns, occ, inTown, safe } = sq, P = D.bio[C.b], v = C.v, AV = C.AV, AW = C.AW;
   const i0 = Math.floor((bx - 4 - C.gx) / AV), i1 = Math.floor((bx + 67 - C.gx) / AV), j0 = Math.floor((by - 4 - C.gy) / AV), j1 = Math.floor((by + 67 - C.gy) / AV), nj = j1 - j0 + 1;
   const blocks = [];
   for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) blocks.push(syCityBlock(C, i, j));
@@ -616,7 +639,7 @@ function syCityInto(C, bx, by, D, sq) {
       H[i] = Math.round(H[i] + (s.base - H[i]) * k);
       H[4096 + i] = H[i] - 240; H[8192 + i] = H[i] - 480; H[12288 + i] = H[i] - 720;
     }
-    syStamp(s, s, bx, by, H, UL, OL, SR, FL, locs, spawns, occ);
+    syStamp(s, s, bx, by, H, UL, OL, SR, FL, locs, spawns, occ, safe);
   }
   const taken = new Set(), A = D.animals || {};
   const person = ([x, y, role, px, py]) => {
@@ -717,12 +740,19 @@ async function sySettleNear(bx, by) {
 const syMonLv = (gx, gy, q) => clamp(4 + 236 * Math.pow(q, 1.1) + wildLvAt(gx, -gy) * 1.2 + noise2(gx * 0.0021, gy * 0.0021, S + 1710) * (5 + 25 * q), 1, 400);
 /* ---- a square ---- */
 function syRememb(rid, sq) { SY.cache.set(rid, sq); if (SY.cache.size > 24) SY.cache.delete(SY.cache.keys().next().value); return sq; }
+/* the made world's safe floors, a square at a time as each is made: inside a bank or the Exchange (syStamp marks them from its
+   buildings' own), where the made world's lawless ground gives way; a square not made (or not kept) has none */
+const SY_SAFE = new Map();
+function sySafeAt(gx, gy) {
+  const m = SY_SAFE.get(MAP07.ridSq(Math.floor(gx / 64), Math.floor(gy / 64)));
+  return !!(m && m[(gx & 63) * 64 + (gy & 63)]);
+}
 async function sySquare(rid, yieldFn) {
   if (SY.cache.has(rid)) return SY.cache.get(rid);
   const D = await syLoad();
   const sqX = MAP07.sqXOf(rid), sqY = MAP07.sqYOf(rid), bx = sqX * 64, by = sqY * 64;
   const H = new Int16Array(16384), UL = new Uint16Array(16384), OL = new Uint16Array(16384), SR = new Uint8Array(16384), FL = new Uint8Array(16384);
-  const locs = [], spawns = [], occ = new Uint8Array(4096), M = new Float32Array(4096), BI = new Uint8Array(4096), inTown = new Uint8Array(4096);
+  const locs = [], spawns = [], occ = new Uint8Array(4096), M = new Float32Array(4096), BI = new Uint8Array(4096), inTown = new Uint8Array(4096), safe = new Uint8Array(4096);
   let seg = performance.now(), cpu = 0;
   const pause = async () => { if (yieldFn) { const w = yieldFn(); if (w) { const d = performance.now() - seg; cpu += d; SY.block = Math.max(SY.block || 0, d); await w; seg = performance.now(); } } };
   /* the field on the global four-tile lattice, bilinear between: the one costly sample */
@@ -750,7 +780,7 @@ async function sySquare(rid, yieldFn) {
   /* towns: streets, the open square, then the buildings over them; cities: their plan (syCityInto) */
   const { towns, cities } = await sySettleNear(bx, by);
   await pause();
-  for (const C of cities) { syCityInto(C, bx, by, D, { H, UL, OL, SR, FL, locs, spawns, occ, inTown }); await pause(); }
+  for (const C of cities) { syCityInto(C, bx, by, D, { H, UL, OL, SR, FL, locs, spawns, occ, inTown, safe }); await pause(); }
   for (const t of towns) {
     const P = D.bio[t.b];
     for (let x = 0; x < 64; x++) for (let y = 0; y < 64; y++) {
@@ -770,7 +800,7 @@ async function sySquare(rid, yieldFn) {
         H[i] = Math.round(H[i] + (s.base - H[i]) * k);
         H[4096 + i] = H[i] - 240; H[8192 + i] = H[i] - 480; H[12288 + i] = H[i] - 720;
       }
-      syStamp(s, s, bx, by, H, UL, OL, SR, FL, locs, spawns, occ);
+      syStamp(s, s, bx, by, H, UL, OL, SR, FL, locs, spawns, occ, safe);
     }
     for (let q = 0, n = 2 + t.rank; q < n; q++) {   // folk about the square
       const hh = hash2(t.gx + q * 5, t.gy - q * 3, S + 950) >>> 0, gx = t.gx - t.heart + hh % (t.heart * 2 + 1), gy = t.gy - t.heart + (hh >>> 10) % (t.heart * 2 + 1);
@@ -792,7 +822,7 @@ async function sySquare(rid, yieldFn) {
       H[i] = Math.round(H[i] + (s.base - H[i]) * k);
       H[4096 + i] = H[i] - 240; H[8192 + i] = H[i] - 480; H[12288 + i] = H[i] - 720;
     }
-    syStamp(s, s, bx, by, H, UL, OL, SR, FL, locs, spawns, occ);
+    syStamp(s, s, bx, by, H, UL, OL, SR, FL, locs, spawns, occ, safe);
     const A = D.animals || {}, P = D.bio[BI[Math.min(4095, Math.max(0, (f.x0 + 8 - bx) * 64 + f.y0 + 8 - by))]];
     const hf = hash2(f.x0, f.y0, S + 1745) >>> 0, beasts = t.k === 'farm' ? 2 + hf % 4 : t.k === 'camp' ? 1 + hf % 2 : 0;
     for (let q = 0; q < beasts; q++) {   // hens and cattle on a farm, a traveller or two at a camp
@@ -891,6 +921,8 @@ async function sySquare(rid, yieldFn) {
   for (const s of spawns) { const i = 'y' + s.x + '_' + s.y + '_' + (s.plane | 0) + '_' + s.id; if (!seenK.has(i)) { seenK.add(i); s.i = i; named.push(s); } }
   cpu += performance.now() - seg;
   SY.made = (SY.made || 0) + 1; SY.cpu = (SY.cpu || 0) + cpu; SY.worst = Math.max(SY.worst || 0, cpu);   // what a made square costs, for the dev console
+  SY_SAFE.set(rid, safe.some(Boolean) ? safe : null);
+  if (SY_SAFE.size > 512) SY_SAFE.delete(SY_SAFE.keys().next().value);
   return syRememb(rid, { H, UL, OL, SR, FL, locs, spawns: named });
 }
 function syCells(bx, by, cell, pad) {   // lattice cells (seed x, z) whose members can land in the square
@@ -899,8 +931,10 @@ function syCells(bx, by, cell, pad) {   // lattice cells (seed x, z) whose membe
     for (let cz = Math.floor((-(by + 64) - pad) / cell); cz <= Math.floor((-by + pad) / cell); cz++) out.push([cx, cz]);
   return out;
 }
-function syStamp(s, town, bx, by, H, UL, OL, SR, FL, locs, spawns, occ) {
+function syStamp(s, town, bx, by, H, UL, OL, SR, FL, locs, spawns, occ, safe) {
   const t = s.t, W = t.w, L = t.l, dv = t.dv, g = t.g, Mk = t.M;
+  if (t.safe === undefined) { t.safe = null; if (t.k === 'bank') { t.safe = new Uint8Array(W * L); for (let x = 0; x < W; x++) for (let y = 0; y < L; y++) t.safe[x * L + y] = g[(x * L + y) * 8 + 5] & 4; } }   // a bank's own roofed floor
+  const Sf = safe && t.safe;
   for (let x = 0; x < W; x++) {
     const gx = s.x0 + x;
     if (gx < bx || gx >= bx + 64) continue;
@@ -910,6 +944,7 @@ function syStamp(s, town, bx, by, H, UL, OL, SR, FL, locs, spawns, occ) {
       const i = (gx - bx) * 64 + (gy - by), m = Mk ? Mk[x * L + y] : 2;
       if (!m) continue;   // a structure's box that is not the structure: the country's, as it lies
       occ[i] = 1;
+      if (Sf && Sf[x * L + y]) safe[i] = 1;
       for (let p = t.p; p < 4; p++) H[p * 4096 + i] = town.base + dv.getInt16(((0 * W + x) * L + y) * 8 + 6, true) - 240 * p;   // storeys the building has none of stand on its ground
       for (let p = 0; p < t.p; p++) {
         const r = ((p * W + x) * L + y) * 8, u = dv.getUint16(r, true), ol = dv.getUint16(r + 2, true), j = p * 4096 + i;

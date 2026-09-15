@@ -3452,6 +3452,8 @@ const isWater = h => h < SEA;   // the seed's sea level; a tile anywhere asks wa
 /* water under a tile: the seed's sea level, or Gielinor's own water overlays (46.) — its sea is rowed only by a boat put out from a
    quay (m7RowOut) or come in from the open sea; nobody wades into it */
 const waterAt = (x, z) => seedAt(x, z) ? walkY(x, z) < SEA : MAP07.waterAt(P.plane, x, -z);
+/* a dock of Gielinor's (docks.json: its gangplanks, buoys, moored boats and charter ports, each a box of tiles) */
+const m7Dock = (x, z) => { const D = typeof c7Get === 'function' ? c7Get('docks.json') : null, y = -z; if (D) for (const d of D.d) if (x >= d[0] && x <= d[2] && y >= d[1] && y <= d[3]) return true; return false; };
 const STUCK_CLIMB = 8.5;   // stuck mode clears the 6.5-unit ledges; masonry stays shut
 /* a doorway is a step, not a cliff: a house floor sits on the lot's high corner, so on sloping ground the
    threshold can stand further above the grass than an ordinary stride. The doorstep budget covers the
@@ -3462,8 +3464,19 @@ function canStep(fx, fz, tx, tz, own, pl) {
     if (shut(tk(tx, tz) + fk, own) && !shut(tk(fx, fz) + fk, own)) return false;   // already inside something that isn't ours: walk out through it
   if (M7) {
     const ga = !seedAt(fx, fz), gb = !seedAt(tx, tz), p = pl === undefined ? P.plane : pl;
-    if (ga && gb) return MAP07.waterAt(p, fx, -fz) && MAP07.waterAt(p, tx, -tz) ? MAP07.canSail(p, fx, -fz, tx - fx, fz - tz)   // afloat: the map's walls and rocks still stand, its water does not
-      : MAP07.canMove(p, fx, -fz, tx - fx, fz - tz);   // the map's own walls and floors, on the walker's plane
+    if (ga && gb) {
+      const wa = MAP07.waterAt(p, fx, -fz), wb = MAP07.waterAt(p, tx, -tz);
+      if (wa && wb) return MAP07.canSail(p, fx, -fz, tx - fx, fz - tz);   // afloat: the map's walls and rocks still stand, its water does not
+      /* the boat's own step, judged by the land it leaves or reaches: Gielinor's shore takes a boat only at its docks (docks.json),
+         and a boat is put out from it only by rowing out (m7RowOut); past Gielinor the water is anyone's — walk into it and you
+         are in your boat, row up to any shore and you step onto it */
+      if (wa !== wb) {
+        const lx = wa ? tx : fx, lz = wa ? tz : fz;
+        if (g7In(lx, lz)) return wa && m7Dock(lx, lz) && MAP07.canMove(p, fx, -fz, tx - fx, fz - tz);
+        return MAP07.canSail(p, fx, -fz, tx - fx, fz - tz);
+      }
+      return MAP07.canMove(p, fx, -fz, tx - fx, fz - tz);   // the map's own walls and floors, on the walker's plane
+    }
     if (ga || gb) return waterAt(fx, fz) && waterAt(tx, tz);   // the seam is open sea: only a boat crosses it
   }
   const a = walkY(fx, fz), b = walkY(tx, tz), aw = isWater(a), bw = isWater(b);
@@ -4107,10 +4120,11 @@ function stepsThisTick(E) {
 const SAFE_RM = 1.75, TOWN_CAP = [20, 26, 32, 40, 48];   // spawn-level ceiling inside the belt, by rank (wire format)
 function townCore(x, z) { if (M7 && (g7In(x, z) || !SEAM)) return m7InTown(x, z); const n = nearVillage(x, z); return !!(n && n.d < n.v.r * 1.05); }
 let pvpAck = 0, pvpHold = 0;
-function askPvp(onGo) {
+function askPvp(onGo, made) {
   pvpHold = 1;
-  showModal('Entering the Wilderness',
-    '<p class="smsg">The scorched ground ahead is the <b>Wilderness</b>: other players can attack you, its level climbs the deeper you go, and dying to one while skulled costs everything you carry.</p>' +
+  showModal(made ? 'Leaving Gielinor' : 'Entering the Wilderness',
+    (made ? '<p class="smsg">The lands past Gielinor are <b>lawless</b>: any player within 10 combat levels of you can attack you anywhere but inside a bank or the Grand Exchange, and dying to one while skulled costs everything you carry.</p>'
+      : '<p class="smsg">The scorched ground ahead is the <b>Wilderness</b>: other players can attack you, its level climbs the deeper you go, and dying to one while skulled costs everything you carry.</p>') +
     '<label class="chk"><input type="checkbox" id="pvpNo"> Don\'t show this again</label>' +
     '<div class="wrow2"><button id="pvpGo">Continue</button><button id="pvpStay">Cancel</button></div>',
     'It can be turned back on in Setup under "PvP border warning".');
@@ -4163,11 +4177,15 @@ function walkTick() {
   for (let i = 0; i < want && P.path.length; i++) {
     const n = P.path[0];
     if (!canStep(P.tx, P.tz, n.x, n.z)) { stopWalk(); break; }
-    if (OPT.pvpWarn && !pvpAck && wildLvAt(n.x, n.z) && !wildLvAt(P.tx, P.tz)) { askPvp(); break; }   // the border asks once — afloat too: lava has no ditch to dig
+    if (OPT.pvpWarn && !pvpAck) {   // the border asks once — afloat too: lava has no ditch to dig. Into the Wilderness, or off Gielinor's peace onto the made world's lawless ground
+      const la = pvpLaw(P.tx, P.tz), lb = pvpLaw(n.x, n.z);
+      if (lb.wild && !la.wild) { askPvp(); break; }
+      if (lb.lv && !la.lv && !la.safe) { askPvp(null, 1); break; }
+    }
     P.path.shift();
     if (took) P.via.push(P.tx, P.tz);   // the tiles between this tick's two ends: a run round a corner is drawn round it (36.)
     P.tx = n.x; P.tz = n.z; took++;
-    if (pvpAck && !wildLvAt(P.tx, P.tz)) pvpAck = 0;
+    if (pvpAck && !pvpLaw(P.tx, P.tz).lv) pvpAck = 0;
   }
   P.moved = took;
   if (took) {
@@ -4806,14 +4824,27 @@ function skullUp() {
   if (!was) { say('A skull rises over your head: all you carry is forfeit to your killer.', 'bad'); sendEquip(); markDirty(2); }
 }
 const remoteCb = R => { for (const id of (R.eq || [])) if (typeof id === 'string' && id[0] === 'c' && id[1] === ':') return clamp(parseInt(id.slice(2), 10) || 0, 3, 126); return 0; };
-/* the wilderness law: PvP lives only inside the rings, and its level is how far beneath you your prey may stand.
-   Punching up is always allowed — the smaller fighter takes the risk — and answering a standing aggressor is always clean. */
+/* the law of a tile. Gielinor's: PvP lives only inside the Wilderness, and its level is how far beneath you your prey may stand
+   (punching up is always allowed — the smaller fighter takes the risk). The made world past Gielinor is lawless ground: players
+   within ten combat levels of each other may fight anywhere but inside a bank or the Grand Exchange (sySafeAt), and its own
+   Wilderness keeps the Wilderness's law, never narrower than those ten. { lv: the reach in combat levels, 0 for none; wild: the
+   Wilderness level, 0 outside it; safe: a bank's or the Exchange's floor } */
+function pvpLaw(x, z) {
+  const w = wildLvAt(x, z);
+  if (M7 && SYN && !g7In(x, z)) {
+    if (typeof sySafeAt === 'function' && sySafeAt(x, -z)) return { lv: 0, wild: 0, safe: 1 };
+    return { lv: Math.max(10, w), wild: w, safe: 0 };
+  }
+  return { lv: w, wild: w, safe: 0 };
+}
+/* answering a standing aggressor is always clean */
 function pvpGate(o) {
-  const wa = wildLvAt(P.tx, P.tz), wb = wildLvAt(o.tx, o.tz);
-  if (!wa || !wb) return 'You can only attack other players in the Wilderness.';
+  const a = pvpLaw(P.tx, P.tz), b = pvpLaw(o.tx, o.tz);
+  if (!a.lv || !b.lv) return a.safe || b.safe ? 'No one may fight inside a bank or the Grand Exchange.' : 'You can only attack other players in the Wilderness.';
   if ((pvpFoes.get(o.pid) || 0) > tickN) return null;
-  const theirs = remoteCb(o), wl = Math.min(wa, wb);
-  if (theirs && combatLevel() - theirs > wl) return 'Level ' + wl + ' Wilderness will not let you strike so far beneath you.';
+  const theirs = remoteCb(o), wl = Math.min(a.lv, b.lv), diff = theirs ? combatLevel() - theirs : 0;
+  if (a.wild && b.wild) { if (diff > wl) return 'Level ' + Math.min(a.wild, b.wild) + ' Wilderness will not let you strike so far beneath you.'; }
+  else if (Math.abs(diff) > wl) return 'Past Gielinor you may only fight players within ' + wl + ' combat levels of you.';
   return null;
 }
 const skullTex = new THREE.CanvasTexture(_dmc); skullTex.magFilter = THREE.NearestFilter;
@@ -5635,7 +5666,7 @@ function shopSell(slotIdx) {
   const it = ITEMS[s.id], price = sellPrice(it);
   if (!invSwap('coins', price, s.id, 1)) return say(FULL, 'bad');
   const st = openShop && openShop.stock.find(q => q.id === s.id);
-  if (st) st.n++; else if (openShop) openShop.stock.push({ id: s.id, n: 1 });   // what you sell them, they will sell back
+  if (st) st.n++; else if (openShop) openShop.stock.push({ id: s.id, n: 1, sold: 1 });   // what you sell them, they will sell back
   gpMade += price;
   say('You sell a ' + it.name.toLowerCase() + ' for ' + price + ' coins.');
   markDirty(1); drawShop();
@@ -5800,18 +5831,65 @@ function showMake(title, rows, o) {
   showModal(title, gridOf(rows.map((r, i) => mkRow('data-mk="' + i + '"', r.id, mkName(r), mkOk(r) ? 'level ' + r.lv : 'needs ' + mkWhy(r), '', mkOk(r) ? '' : ' no'))),
     'Click an item to make it; you keep going until you run out or walk off.');
 }
+/* ---- a made-world shop's shelves: the lands past Gielinor keep no shop tables, so every shop there keeps its own stock, drawn
+   from the world seed by where its keeper stands and kept for the session. Its kind's plain goods are always on the shelf (each
+   shop its own count of each, coming back a piece at a time). Every better piece its kind could carry is a chance of its own, rolled
+   again each time that piece's cooldown turns, and only some shops ever carry a given piece: the dearer the piece, the rarer the
+   roll, the longer the wait and the fewer it keeps — the dearest one at a time. Further from Gielinor the rolls come up more often.
+   The rolls are the seed's and the world clock's, so every player finds the same shelf; what one buys is theirs alone ---- */
+const synShops = new Map();
+const synU = (a, b, c) => (hash2(a | 0, b | 0, (S + c) | 0) >>> 0) / 4294967296;
+function synShopRoll(sh, e, now) {   // bring one shelf up to the world clock
+  if (e.sold) return;
+  if (!e.rare) { if (e.n < e.mx) { const back = Math.floor((now - e.t) / e.per); if (back > 0) { e.n = Math.min(e.mx, e.n + back); e.t += back * e.per; } } else e.t = now; return; }
+  for (let k = Math.max(Math.floor(e.t / e.per) + 1, Math.floor(now / e.per) - 24); k <= Math.floor(now / e.per) && e.n < e.mx; k++)
+    if (synU(sh.h ^ e.hid, k, 7003) < e.p) e.n = Math.min(e.mx, e.n + e.lot);   // this turn of its cooldown, a piece (a bundle of a stackable) comes in
+  e.t = now;
+}
+function synShopStock(o, kind) {
+  const key = kind + ':' + o.hx + ':' + o.hz, now = globalTick();
+  let sh = synShops.get(key);
+  if (!sh) {
+    const h = hash2(o.hx, o.hz, S + 7001 + SHOP[kind].i) | 0, q = typeof synReach === 'function' ? synReach(o.hx, o.hz) : 0, list = [], seen = new Set();
+    sh = { h, list };
+    for (const s of shopStock(kind, 0)) {   // the plain goods: always kept, this shop's own count
+      const v = ITEMS[s.id].val || 1, mx = Math.max(1, Math.round(s.n * (0.5 + synU(h, hashSeed(s.id), 7004))));
+      seen.add(s.id);
+      list.push({ id: s.id, n: mx, mx, per: clamp(Math.round(6 + Math.sqrt(v) * 1.5), 8, 600), t: now, rare: 0 });
+    }
+    const better = shopStock(kind, 2);
+    if (kind === 'general') for (let t = 0; t <= 6; t++) for (const p of ['hatchet', 'pickaxe']) better.push({ id: TIERS[t].k + '_' + p, n: 3 });
+    for (const s of better) {
+      if (seen.has(s.id) || !ITEMS[s.id]) continue;
+      seen.add(s.id);
+      const hid = hashSeed(s.id), v = Math.max(1, ITEMS[s.id].val || 1);
+      if (synU(h, hid, 7005) > 0.35 + 0.35 * q) continue;   // this shop never carries it
+      const mx = Math.max(1, Math.round(s.n * Math.min(1, Math.sqrt(300 / v)) * (0.5 + synU(h, hid, 7006) * 0.7)));
+      const e = { id: s.id, n: 0, mx, lot: mx >= 20 ? Math.ceil(mx / 10) : 1, hid, rare: 1,
+        p: Math.min(0.6, clamp(0.8 / (1 + Math.pow(v / 150, 0.7)), 0.006, 0.5) * (1 + 0.5 * q)),   // an iron hatchet near every turn, an adamant pickaxe one in ten, a rune platebody one or two in a hundred
+        per: clamp(Math.round(60 * Math.pow(v / 100, 0.6)), 60, 20000) };   // under a minute for the cheap, five for a rune pickaxe, twenty for a rune platebody, hours for the dearest
+      e.t = now - e.per * 3;   // the shelf as three of its turns have left it
+      list.push(e);
+    }
+    synShops.set(key, sh);
+    if (synShops.size > 400) synShops.delete(synShops.keys().next().value);
+  }
+  for (const e of sh.list) synShopRoll(sh, e, now);
+  return sh.list;
+}
 function startShop(o) {
   clearUse(); P.uspell = null;
   bankOpen = 0;
   const n = nearVillage(o.x, o.z), k = SHOP_KINDS[o.k];
   openShop = { kind: k.k, name: o.shopN || k.n, tier: o.tier !== undefined ? o.tier : n ? n.v.tier : 0 };   // a Gielinor shopkeeper carries its own sign and stock tier (46.)
-  openShop.stock = shopStock(openShop.kind, openShop.tier);
+  openShop.made = o.hx !== undefined && M7 && SYN && !g7In(o.hx, o.hz);
+  openShop.stock = openShop.made ? synShopStock(o, k.k) : shopStock(openShop.kind, openShop.tier);
   say(o.browse || 'You browse the ' + openShop.name.toLowerCase() + '.');
   drawShop();
 }
 function drawShop() {
   if (!openShop) return;
-  const rows = openShop.stock.map(s => { const it = ITEMS[s.id], p = buyPrice(it); return mkRow(s.n > 0 ? 'data-buy="' + s.id + '"' : '', s.id, it.name, s.n > 0 ? s.n + ' in stock' : 'out of stock', '<b class="gp">' + p + '</b>', s.n > 0 && coins() >= p ? '' : ' no', s.n); });
+  const rows = openShop.stock.filter(s => s.n > 0 || !s.rare && !s.sold).map(s => { const it = ITEMS[s.id], p = buyPrice(it); return mkRow(s.n > 0 ? 'data-buy="' + s.id + '"' : '', s.id, it.name, s.n > 0 ? s.n + ' in stock' : 'out of stock', '<b class="gp">' + p + '</b>', s.n > 0 && coins() >= p ? '' : ' no', s.n); });
   paintModal(openShop.name + ' — ' + coins() + ' gp', gridOf(rows), 'Click to buy. Click anything in your pack to sell it here.');
 }
 on(modalBody, 'click', e => {
@@ -6520,7 +6598,7 @@ on(dom, 'contextmenu', e => {
   if (g) {
     const dx2 = Math.round(g.x), dz2 = Math.round(g.z);
     if (nearDitch(dx2, dz2)) opts.push({ t: 'Jump over', o: 'Wilderness ditch', f: () => ditchClick(dx2, dz2) });
-    if (M7 && !P.afloat && !seedAt(dx2, dz2) && waterAt(dx2, dz2) && chebDist(P.tx, P.tz, dx2, dz2) <= 6) opts.push({ t: 'Row out', o: 'Sea', f: () => m7RowOut(dx2, dz2) });   // Gielinor's sea is rowed from its shore, the road to the world past the map
+    if (M7 && !P.afloat && !seedAt(dx2, dz2) && waterAt(dx2, dz2) && chebDist(P.tx, P.tz, dx2, dz2) <= 6 && (!g7In(dx2, dz2) || m7Dock(dx2, dz2) || m7Dock(P.tx, P.tz))) opts.push({ t: 'Row out', o: 'Sea', f: () => m7RowOut(dx2, dz2) });   // Gielinor's sea is rowed from its docks, the road to the world past the map; past it any water will do
     opts.push({ t: 'Walk here', o: '', f: () => walkTo(g.x, g.z) });
   }
   openCtx(e.clientX, e.clientY, opts);
@@ -7083,9 +7161,9 @@ function openStuck() {
 el('stuck').onclick = () => { if (!OPT.stuck) openStuck(); else setStuck(0); };   // turning it on gets the explanation; off is one click
 function updateZoneTags() {
   el('stuckTag').style.display = OPT.stuck ? 'block' : 'none';
-  const wl = wildLvAt(P.tx, P.tz), t = el('pvpTag');
-  t.style.display = wl ? 'flex' : 'none';
-  if (wl && t._lv !== wl) { t._lv = wl; t.querySelector('span').textContent = 'Wilderness · level ' + wl; }
+  const law = pvpLaw(P.tx, P.tz), t = el('pvpTag'), txt = law.wild ? 'Wilderness · level ' + law.wild : law.lv ? 'PvP · within ' + law.lv + ' levels' : '';
+  t.style.display = txt ? 'flex' : 'none';
+  if (txt && t._lv !== txt) { t._lv = txt; t.querySelector('span').textContent = txt; }
 }
 function drawPvpTag() { el('pvpTag').querySelector('img').src = (g07(MK07, 'pvp') && mkArt(MK07.pvp)) || drawIcon('skull', '#ff5a3a', '#ffd9c9'); }
 drawPvpTag();
@@ -7898,7 +7976,7 @@ function onNet(m) {
       break;
     case 11: {   // someone hit us
       const R = ensureRemote(m[1]); let dmg = clamp(m[2] | 0, 0, HIT_MAX);
-      if (P.dead || !wildLvAt(P.tx, P.tz)) break;   // outside the wilderness no blade can reach you
+      if (P.dead || !pvpLaw(P.tx, P.tz).lv) break;   // outside the wilderness (and past Gielinor, inside a bank or the Exchange) no blade can reach you
       pvpFoes.set(String(m[1]), tickN + FOE_T);   // they struck first (or struck at all): answering them costs no skull, for a while
       if (!pvpOn) { pvpOn = 1; say('You are under attack!', 'bad'); }
       if (m[4] && dmg > 0 && prayHas('prot', m[4])) { dmg = Math.floor(dmg * 0.6); say('Your prayer turns part of the blow aside.'); }   // overheads soften another player's hit by 40%
@@ -12122,11 +12200,14 @@ function m7Spawn(s, key) {
   if (!def || !def.models || !name || name === 'null') return 0;
   const pl = s.plane | 0, size = def.size || 1;
   if (/fishing spot/i.test(name)) return m7Spot(s, key, def, name, pl);
-  const t = m7Type(def), [sx, sy] = MAP07.snapWalkable(pl, s.x, s.y, 3), fp = (size - 1) >> 1, x = sx + fp, z = -(sy + fp);
-  let still = def.walkingAnimation === undefined || def.walkingAnimation === def.standingAnimation ? 1 : 0, wr = s.wr;
+  /* whoever works a counter stands where the map puts them, though no one could walk there: the Exchange's clerks and bankers stand
+     inside its solid central desk, and a nudge to the nearest open tile put them out among the customers */
+  const serves = /banker|clerk/i.test(name) || MAP07.opsOf(def).some(q => q && !/^(talk-to|attack|pickpocket|examine|follow|shoo-away|pet|trade)$/i.test(q)), keep = serves && !MAP07.openTile(pl, s.x, s.y);
+  const t = m7Type(def), [sx, sy] = keep ? [s.x, s.y] : MAP07.snapWalkable(pl, s.x, s.y, 3), fp = (size - 1) >> 1, x = sx + fp, z = -(sy + fp);
+  let still = keep || def.walkingAnimation === undefined || def.walkingAnimation === def.standingAnimation ? 1 : 0, wr = s.wr;
   /* the made world says how each of its people keeps to its place (synth07): a banker at the booth, a shopkeeper behind the counter,
      whoever came with a building within it; its spawns carry a wander reach, and the watch a beat (pat) */
-  if (s.tp && !still) { const o = MAP07.opsOf(def).map(q => q.toLowerCase()); if (o.includes('bank') || /banker/i.test(name)) still = 1; else wr = o.includes('trade') ? 1 : 3; }
+  if (s.tp && !still) { const o = MAP07.opsOf(def).map(q => q.toLowerCase()); if (o.includes('trade')) wr = 1; else if (/banker|clerk/i.test(name) || o.some(q => q && !/^(talk-to|attack|pickpocket|examine|follow|shoo-away|pet)$/.test(q))) still = 1; else wr = 3; }   // a clerk, a banker, a healer at the desk
   const kh = hashSeed(key), mesh = new THREE.Group();
   scene.add(mesh);
   let dest = null;
@@ -12254,7 +12335,7 @@ function m7NpcOpts(n) {
     else if (low === 'pickpocket') out.push({ t: 'Pickpocket', o: name, f: t.pick ? act(n, 'pick') : ui(() => say('You find nothing worth taking.'), 1) });
     else if (low === 'bank') out.push({ t: 'Bank', o: name, f: ui(() => openBank()) });
     else if (low === 'exchange') out.push({ t: 'Exchange', o: name, f: ui(() => openGE()) });
-    else if (low === 'trade') out.push({ t: 'Trade', o: name, f: ui(() => startShop(Object.assign({ x: n.tx, z: n.tz }, m7Shop(name)))) });
+    else if (low === 'trade') out.push({ t: 'Trade', o: name, f: ui(() => startShop(Object.assign({ x: n.tx, z: n.tz, hx: n.home.x, hz: n.home.z }, m7Shop(name)))) });   // its home tile names a made-world shop's own shelves
     else if (low === 'assignment' && M7_SLAYER[nm] !== undefined) out.push({ t: 'Assignment', o: name, f: ui(() => typeof c7Slayer === 'function' ? c7Slayer(n) : slayerTalk({ t: 12, k: M7_SLAYER[nm], n: name, x: n.tx, z: n.tz })) });
     else if (/^hair/.test(low)) out.push({ t: op, o: name, f: ui(() => openBarber()) });
     else if (low === 'teleport' && M7_ESSENCE.has(nm)) out.push({ t: 'Teleport', o: name, f: ui(() => tpTo(2911, -4832, 'to the rune essence mine', TP_CAP_ITEM, 0)) });
@@ -12446,6 +12527,7 @@ function m7Mode(on) {
     m7DropMeshes.clear(); m7Live.clear(); m7ItemState.clear();
   }
   if (on) OS.fail = 0;   // a frame that failed to load gets another try on each entry
+  if (on && typeof c7Json === 'function') c7Json('docks.json').catch(() => {});   // the shore's docks are asked of before the first boat
   M7 = on; SEAM = 0; P.realm = 1;
   if (m7Inited) { if (on && !flip) MAP07.clear(); MAP07.setActive(on); MAP07.setScope(1); }   // back in from the world list: loadSeed has emptied objIndex, so every square returns through onRegion
   water.visible = !on;
@@ -12500,7 +12582,7 @@ function seamCheck(x, z) {
   nearDirty = 1; mapOX = 1e9; mapRow = MW; mapImg = null; osMapDirty = 1; wmDirty = 1;
 }
 /* a boat put out from Gielinor's shore: from beside its water (two tiles at most) onto the sea tile nearest the click */
-const m7Launch = (lx, lz, wx, wz) => Math.abs(wx - lx) + Math.abs(wz - lz) === 1 && waterAt(wx, wz) && !waterAt(lx, lz) && MAP07.canSail(P.plane, lx, -lz, wx - lx, lz - wz);   // a shore tile and the water beside it, no quay wall or fence between
+const m7Launch = (lx, lz, wx, wz) => Math.abs(wx - lx) + Math.abs(wz - lz) === 1 && waterAt(wx, wz) && !waterAt(lx, lz) && (!g7In(lx, lz) || m7Dock(lx, lz)) && MAP07.canSail(P.plane, lx, -lz, wx - lx, lz - wz);   // a shore tile and the water beside it, no quay wall or fence between; in Gielinor, a dock's
 function m7RowOut(x, z) {
   if (P.afloat || P.dead) return;
   P.rowAt = null;
@@ -12517,6 +12599,7 @@ function m7RowOut(x, z) {
       for (const [a, b] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) if (m7Launch(lx, lz, lx + a, lz + b)) { const d = Math.hypot(lx + a - x, lz + b - z) * 2 + chebDist(P.tx, P.tz, lx, lz); if (d < ld) { ld = d; land = [lx, lz]; } }
     }
     const p = land && findPath(P.tx, P.tz, land[0], land[1], 0);
+    if (!land && g7In(x, z)) return say('Boats put out from Gielinor only at its docks and piers.');
     if (!p) return say('You can\'t put a boat out from here.');
     if (!p.length) return say('You can\'t put a boat out from here.');   // no nearer shore than this, and no water to leave by
     closeOverlays(); P.task = null; P.path = p; P.goal = null; P.rowAt = [x, z];

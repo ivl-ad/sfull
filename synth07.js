@@ -44,7 +44,12 @@ function syLoad() {
         street: syCum(b.street), guard: syCum(b.guard), byName: new Map() };
     });
     for (const P of bio) for (const e of P.npc) { const n = e[3] || String(e[0]); (P.byName.get(n) || P.byName.set(n, []).get(n)).push(e); }   // a monster's level variants, lowest first
-    SY.data = { bio, ores: j.ores, trees: j.trees, fish: j.fish || [], lava: j.lava || 19, swamp: j.swamp || 7, stack: j.stack || {}, tplKinds: j.tpl, map: j.map || null, icons: j.icons || {} };
+    const watch = new Set();
+    for (const k of SY_BIO) for (const e of (j.bio[k] && j.bio[k].guard) || []) watch.add(e[0]);
+    for (const P of bio) P.civ = P.folk && syCum(P.folk.e.filter(e => !watch.has(e[0]))) || P.folk;   // the townsfolk without the watch among them
+    const an = j.animals || {};
+    SY.data = { bio, ores: j.ores, trees: j.trees, fish: j.fish || [], lava: j.lava || 19, swamp: j.swamp || 7, stack: j.stack || {}, tplKinds: j.tpl, map: j.map || null, icons: j.icons || {},
+      animals: { fowl: syCum(an.fowl), stock: syCum(an.stock), small: syCum(an.small) } };
     return SY.data;
   }, e => { SY.loading = null; throw e; });
   return SY.loading;
@@ -58,7 +63,7 @@ function syTpl(b) {
       const w8 = syBreath(); if (w8) await w8;
       const bin = atob(t.g), g = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) g[i] = bin.charCodeAt(i);
-      const T = { k: t.k, w: t.w, l: t.l, p: t.p, g, dv: new DataView(g.buffer), L: t.L, N: t.N, I: t.I || [] }, cx = Math.floor(t.o[0] / 384), cy = Math.floor(t.o[1] / 384), ck = cx + ':' + cy;
+      const T = { k: t.k, w: t.w, l: t.l, p: t.p, g, dv: new DataView(g.buffer), L: t.L, N: t.N, I: t.I || [], Z: t.Z || [], rots: null }, cx = Math.floor(t.o[0] / 384), cy = Math.floor(t.o[1] / 384), ck = cx + ':' + cy;
       (byKind[t.k] = byKind[t.k] || []).push(T);
       const C = cells[ck] = cells[ck] || { n: 0, cx, cy };   // where it was cut from: one town is built in one place's own style
       (C[t.k] = C[t.k] || []).push(T); C.n++;
@@ -68,6 +73,33 @@ function syTpl(b) {
     return SY.tpl[b] = byKind;
   }, e => { SY.tplP[b] = null; throw e; });
   return SY.tplP[b];
+}
+/* a building turned r quarter turns clockwise, as the client turns an instanced map chunk: a tile (x, y) goes to (y, W-1-x) each turn,
+   a piece's corner moves by its footprint (width and length swapped while its own turn is odd), and every piece's turn and every
+   overlay shape's turn goes round with it. Made once a building and turn */
+function syRot(T, r) {
+  r &= 3;
+  if (!r) return T;
+  const rots = T.rots || (T.rots = []);
+  if (rots[r]) return rots[r];
+  const W = T.w, L = T.l, W2 = r & 1 ? L : W, L2 = r & 1 ? W : L, g = new Uint8Array(T.p * W2 * L2 * 8);
+  const tx = (x, y, sx, sy) => r === 1 ? y : r === 2 ? W - x - sx : L - y - sy, ty = (x, y, sx, sy) => r === 1 ? W - x - sx : r === 2 ? L - y - sy : x;
+  for (let p = 0; p < T.p; p++) for (let x = 0; x < W; x++) for (let y = 0; y < L; y++) {
+    const s = ((p * W + x) * L + y) * 8, o = ((p * W2 + tx(x, y, 1, 1)) * L2 + ty(x, y, 1, 1)) * 8;
+    g.set(T.g.subarray(s, s + 8), o);
+    g[o + 4] = (T.g[s + 4] & 0xfc) | ((T.g[s + 4] + r) & 3);
+  }
+  const Z = new Map();
+  for (let q = 0; q < T.Z.length; q += 2) Z.set(T.Z[q], T.Z[q + 1]);
+  const L0 = T.L, Lr = new Array(L0.length);
+  for (let q = 0, k = 0; q < L0.length; q += 6, k++) {
+    const wl = Z.get(k) || 17, odd = L0[q + 2] & 1, sx = odd ? wl & 15 : wl >> 4, sy = odd ? wl >> 4 : wl & 15, x = L0[q + 3], y = L0[q + 4];
+    Lr[q] = L0[q]; Lr[q + 1] = L0[q + 1]; Lr[q + 2] = (L0[q + 2] + r) & 3; Lr[q + 3] = tx(x, y, sx, sy); Lr[q + 4] = ty(x, y, sx, sy); Lr[q + 5] = L0[q + 5];
+  }
+  const N = T.N.slice(), I = T.I.slice();
+  for (let q = 0; q < N.length; q += 4) { const x = N[q + 1], y = N[q + 2]; N[q + 1] = tx(x, y, 1, 1); N[q + 2] = ty(x, y, 1, 1); }
+  for (let q = 0; q < I.length; q += 3) { const x = I[q + 1], y = I[q + 2]; I[q + 1] = tx(x, y, 1, 1); I[q + 2] = ty(x, y, 1, 1); }
+  return rots[r] = { k: T.k, w: W2, l: L2, p: T.p, g, dv: new DataView(g.buffer), L: Lr, N, I, Z: T.Z, rots: null, turn: r, src: T };
 }
 /* the ground under a tile: the seed's field, levelled where a made city stands, flattened onto its town's table as the seed does */
 function syField(gx, gy) {
@@ -173,16 +205,18 @@ function syTown(v) {
   if (SY.towns.size > 200) for (const k of [...SY.towns.keys()].slice(0, 60)) SY.towns.delete(k);
   return p;
 }
-/* ---- cities: every settlement of rank 2 or more (game.js villageAt — a metro city's whole sprawl, or another's core) ----
+/* ---- cities: every settlement of rank 2 or more (game.js villageAt — a great city's whole sprawl, or another's core) ----
    A made city is planned the way a grown one reads. Avenues run AV tiles apart through its heart, north-south and east-west,
-   crossing at an open square; each super-block between them is cut by side streets into blocks, and each block is packed in
-   rows with whole buildings of the city's country — its civic heart (keeps, banks, churches, shops), its market ring, its streets
-   of houses, its thinning suburbs, a park here and there — each district styled from one real place, the next country's buildings
-   standing in for what its own lacks, and one far country's thrown in now and then. Every plot is checked against the ground
-   before it is built on: dry, not too steep, clear of the highways, inside the city's outline. A block is a pure function of its
-   city and its index, planned the first time a square or a map piece needs it, so a city of thousands of buildings costs what the
-   squares round you do. Its people come with it — townsfolk on the side streets and avenues, the watch, a crowd in the square —
-   standing only on the paving. */
+   crossing at an open square; each super-block between them is cut by side streets into blocks, and each block is packed on a
+   skyline with whole buildings, each standing whichever of four ways fits — its civic heart (keeps, banks, churches, shops), its
+   market ring, its streets of houses, its thinning suburbs, a park here and there. Each district is styled from one real place of
+   the city's country, the next country's buildings stand in for what its own lacks, and far countries' are thrown in the more
+   often the further out the city lies. Every plot is checked against the ground before it is built on: dry, not too steep, clear
+   of the highways, inside the city's outline. A block is a pure function of its city and its index, planned the first time a
+   square or a map piece needs it, so a city of thousands of buildings costs what the squares round you do.
+   Its people belong to its places: the folk of each building at home or at its door, the watch at the square, at a keep's gate
+   and walking the avenues, hens in the yards, cattle and sheep on the suburbs' grass, squirrels and rabbits in the parks, the odd
+   rat, a few passers-by and a crowd in the square — each kept to its place by the reach its spawn carries. */
 const SYC = { blocks: new Map() };
 const syMod = (a, n) => ((a % n) + n) % n;
 const SYC_KIND = [   // the districts, by distance from the heart in sprawls: [reach, what their plots hold ('' a garden)]
@@ -191,27 +225,33 @@ const SYC_KIND = [   // the districts, by distance from the heart in sprawls: [r
   [0.8, [['house', 9], ['shop', 1.4], ['smithy', 0.6], ['church', 0.25], ['', 0.8]]],
   [1e9, [['house', 6], ['smithy', 0.4], ['shop', 0.4], ['', 4]]],
 ].map(([d, l]) => [d, syCum(l)]);
+/* a person's role in a city, and how far from its place it strays: 0 passer-by, 1 guard at a post, 2 guard on a beat (walks it),
+   3 at home, 4 fowl, 5 stock, 6 small beasts, 7 the crowd in the square, 8 guard at a gate */
+const SYC_WR = [6, 2, 0, 3, 3, 4, 5, 4, 2, 6];   // 9: a stroller in a park
+const SYC_STOCK = new Set(['meadows', 'highlands', 'greenwood', 'reach']);   // the countries that graze cattle and sheep in their suburbs
 function syCity(v) {
   if (v.syc) return v.syc;
   const gx = Math.round(v.x), gy = Math.round(-v.z), b = syBioAt(gx, gy), bn = SY_BIO[b], h = hash2(gx, gy, S + 1700) >>> 0, q = synReach(v.x, v.z);
   const fall = SY_FALL[bn] || ['meadows'], far = SY_BIO.filter(k => k !== bn && k !== 'wilds' && !fall.includes(k)), P = SY.data.bio[b];
+  const nFar = Math.min(far.length, 1 + (q > 0.45 ? 1 : 0) + (q > 0.8 ? 1 : 0)), fars = [];   // the further out, the more far countries a city has seen
+  for (let k = 0; k < nFar; k++) fars.push(far[(h >>> (8 + k * 3)) % far.length]);
   const AV = v.sprawl < 110 ? [30, 32, 34, 36][h & 3] : v.sprawl < 320 ? [36, 40, 44, 44][h & 3] : [40, 44, 48, 52][h & 3];   // a town's blocks are a town's size
   return v.syc = { v, key: gx + ':' + gy, gx, gy, b, bn, q, h, R: v.sprawl, AV, AW: v.sprawl >= 320 ? 4 : 3,
     plaza: Math.max(2, Math.min(Math.floor(v.sprawl * 0.22), 3 + v.rank + Math.round(q * 9))), lane: P.paths.includes(10) ? 10 : P.path,
-    dens: 0.6 + 1.4 * q, sets: [bn].concat(fall, [far[(h >>> 8) % far.length]]), T: null, ready: null, crowd: null };
+    dens: 0.6 + 1.4 * q, sets: [...new Set([bn].concat(fall, fars))], nFall: 1 + fall.length, stock: SYC_STOCK.has(bn), T: null, ready: null, crowd: null };
 }
-function syCityReady(C) {   // its country's buildings, its neighbours', and its far country's
+function syCityReady(C) {   // its country's buildings, its neighbours', and its far countries'
   if (C.T) return Promise.resolve(C);
   return C.ready || (C.ready = Promise.all(C.sets.map(syTpl)).then(T => { C.T = T; return C; }));
 }
 const syCityOK = C => !!(C.T || (C.sets.every(k => SY.tpl[k]) && (C.T = C.sets.map(k => SY.tpl[k]))));
 function syCityList(C, k, i, j, u) {   // the buildings a plot of kind k draws from
-  const own = C.T[0], vary = C.T[C.T.length - 1];
-  if (u < 0.07 && vary[k] && vary[k].length) return vary[k];   // one far country's, for variety
+  const own = C.T[0], nf = C.T.length - C.nFall;
+  if (nf > 0 && u < 0.06 + 0.16 * C.q) { const V = C.T[C.nFall + Math.floor(u * 997) % nf]; if (V && V[k] && V[k].length) return V[k]; }   // a far country's, for variety
   const cells = own.cells || [];
-  if (cells.length && u < 0.8) { const st = cells[(hash2(C.gx + (i >> 2) * 131, C.gy + (j >> 2) * 71, S + 1703) >>> 0) % cells.length]; if (st[k] && st[k].length) return st[k]; }   // a district's style: one real place's
+  if (cells.length && u < 0.8 - 0.3 * C.q) { const st = cells[(hash2(C.gx + (i >> 1) * 131, C.gy + (j >> 1) * 71, S + 1703) >>> 0) % cells.length]; if (st[k] && st[k].length) return st[k]; }   // a district's style: one real place's
   if (own[k] && own[k].length) return own[k];
-  for (let n = 1; n < C.T.length - 1; n++) if (C.T[n][k] && C.T[n][k].length) return C.T[n][k];
+  for (let n = 1; n < C.nFall; n++) if (C.T[n] && C.T[n][k] && C.T[n][k].length) return C.T[n][k];
   return own.house || [];
 }
 const syInPlaza = (C, x, y, m) => x >= C.gx - C.plaza - m && x <= C.gx + C.AW - 1 + C.plaza + m && y >= C.gy - C.plaza - m && y <= C.gy + C.AW - 1 + C.plaza + m;
@@ -237,14 +277,14 @@ function syCityBlock(C, i, j) {   // needs C.T (syCityOK)
   if (B) return B;
   const AV = C.AV, AW = C.AW, x0 = C.gx + i * AV + AW, y0 = C.gy + j * AV + AW, x1 = C.gx + (i + 1) * AV - 1, y1 = C.gy + (j + 1) * AV - 1;
   const hs = hash2(C.gx + i * 977, C.gy + j * 613, S + 1702) >>> 0, dq = Math.hypot((x0 + x1) / 2 - C.gx, (y0 + y1) / 2 - C.gy) / C.R;
-  const heart = i >= -1 && i <= 0 && j >= -1 && j <= 0;
-  B = { i, j, x0, y0, x1, y1, streets: [], parcels: [], folk: [], park: 0 };
+  const heart = i >= -1 && i <= 0 && j >= -1 && j <= 0, leaves = [];
+  B = { i, j, x0, y0, x1, y1, streets: [], parcels: [], people: [], park: 0, dq };
   SYC.blocks.set(key, B);
   if (SYC.blocks.size > 6000) for (const k of [...SYC.blocks.keys()].slice(0, 1500)) SYC.blocks.delete(k);
   if (dq > EXT_MAX + 0.25) return B;   // wholly past any outline
-  if (!heart && dq > 0.2 && hs % 100 < 5 + dq * 6) B.park = 1;   // a park: the country's own ground, its trees and flowers
+  if (!heart && dq > 0.2 && hs % 100 < 5 + dq * 6) { B.park = 1; leaves.push([x0, y0, x1, y1]); }   // a park: the country's own ground, its trees and flowers
   else {
-    const kinds = SYC_KIND.find(e => (heart ? 0 : dq) <= e[0])[1], deep = heart || dq < 0.16 ? 0 : dq < 0.42 ? 1 : 3, leaves = [];
+    const kinds = SYC_KIND.find(e => (heart ? 0 : dq) <= e[0])[1], deep = heart || dq < 0.16 ? 0 : dq < 0.42 ? 1 : 3;
     const cut = (a, b, c, d, depth, hh) => {   // side streets two tiles wide, each block split along its longer side
       const w = c - a + 1, l = d - b + 1;
       if (depth >= deep || (w <= 18 + (hh & 15) && l <= 18 + (hh & 15)) || Math.max(w, l) < 22) { leaves.push([a, b, c, d]); return; }
@@ -263,10 +303,17 @@ function syCityBlock(C, i, j) {   // needs C.T (syCityOK)
         if (y > d - 5) break;
         let run = 0;
         while (x + run < W && top[x + run] <= y) run++;
-        const kind = syPick(kinds, syU(a + x, y, 1706))[0], u2 = syU(a + x + 3, y - 5, 1707), u3 = syU(a + x - 7, y + 2, 1708);
-        const fitsIn = t => t.w <= run && t.l <= d - y + 1;
-        let L = kind ? syCityList(C, kind, i, j, u2).filter(fitsIn) : [];
-        if (!L.length && kind !== '') L = syCityList(C, 'house', i, j, u2).filter(fitsIn);
+        const kind = syPick(kinds, syU(a + x, y, 1706))[0], u2 = syU(a + x + 3, y - 5, 1707), u3 = syU(a + x - 7, y + 2, 1708), room = d - y + 1;
+        const turned = L => {   // the buildings that fit the gap, each the way its own turn (or the next) stands it
+          const out = [];
+          for (const t of L) {
+            const r0 = (hash2(t.w * 131 + a + x, t.l * 71 + y, S + 1709) >>> 0) & 3;
+            for (let dr = 0; dr < 2; dr++) { const r = (r0 + dr) & 3, w2 = r & 1 ? t.l : t.w, l2 = r & 1 ? t.w : t.l; if (w2 <= run && l2 <= room) { out.push([t, r, w2, l2]); break; } }
+          }
+          return out;
+        };
+        let L = kind ? turned(syCityList(C, kind, i, j, u2)) : [];
+        if (!L.length && kind !== '') L = turned(syCityList(C, 'house', i, j, u2));
         let w = run, l;
         if (!L.length) {   // nothing fits the gap (or a garden was drawn): it stays a yard up to its neighbours' line
           let next = d + 1;
@@ -275,34 +322,63 @@ function syCityBlock(C, i, j) {   // needs C.T (syCityOK)
           l = Math.max(kind === '' ? 8 : 1, next - y);
           if (kind === '') w = Math.min(run, 9);
         } else {
-          L.sort((p, q) => q.w * q.l - p.w * p.l);
-          const t = L[Math.floor(u3 * Math.min(L.length, 4))], p = { t, x0: a + x, y0: y, x1: a + x + t.w - 1, y1: y + t.l - 1, base: 0 };   // among the biggest few that fit, so the block fills
+          L.sort((p, q) => q[2] * q[3] - p[2] * p[3]);
+          const [t, r, w2, l2] = L[Math.floor(u3 * Math.min(L.length, 5))], p = { t: syRot(t, r), x0: a + x, y0: y, x1: a + x + w2 - 1, y1: y + l2 - 1, base: 0 };   // among the biggest few that fit, so the block fills
           if (syCityPlot(C, p)) B.parcels.push(p);
-          w = Math.min(run, t.w + 1); l = t.l + 1;
+          w = Math.min(run, w2 + 1); l = l2 + 1;
         }
         for (let k = x; k < x + w; k++) top[k] = y + l;
       }
     }
   }
-  /* its people: townsfolk along its side streets and the two avenues it owns (west and south), and now and then the watch */
-  for (const [a, b, c, d] of B.streets) for (let k = 0, n = Math.round((c - a + 1) * (d - b + 1) * C.dens / 30); k < n; k++) {
-    const hh = hash2(a * 7 + k, b * 13 - k, S + 1723) >>> 0;
-    B.folk.push([a + hh % (c - a + 1), b + (hh >>> 10) % (d - b + 1), 0]);
+  /* its people and beasts, each tied to a place (sySquare keeps only those standing where their role allows) */
+  const PP = B.people, open = (x, y) => !B.parcels.some(p => x >= p.x0 - 1 && x <= p.x1 + 1 && y >= p.y0 - 1 && y <= p.y1 + 1) && !B.streets.some(r => x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]);
+  for (const p of B.parcels) {
+    const hp = hash2(p.x0 * 31 + p.y1, p.y0 * 17 - p.x1, S + 1730) >>> 0, t = p.t, w = p.x1 - p.x0 + 1, l = p.y1 - p.y0 + 1;
+    const folk = t.k === 'house' ? [0, 1, 1, 1, 2, 2, 3][hp % 7] : t.k === 'big' ? 2 : hp % 3 ? 1 : 0;   // a shop's, a bank's, a church's own come with it
+    for (let f = 0; f < folk; f++) {   // at home, mostly indoors, now and then at the door
+      const hf = hash2(hp + f * 7, f, S + 1731) >>> 0;
+      PP.push(hf & 3 ? [p.x0 + 2 + hf % Math.max(1, w - 4), p.y0 + 2 + (hf >>> 8) % Math.max(1, l - 4), 3] : [p.x0 + (hf >>> 4) % w, hf & 64 ? p.y0 : p.y1, 3]);
+    }
+    if (t.k === 'big') { PP.push([p.x0 - 1, p.y0 + (l >> 1), 8]); PP.push([p.x1 + 1, p.y0 + (l >> 1), 8]); }   // a keep's gate is kept
+    if (t.k === 'house' && dq > 0.3 && hp % 100 < 50) for (let f = 0, n = 1 + (hp >>> 9) % 3; f < n; f++) {   // hens in the yard
+      const hf = hash2(hp - f * 5, f + 11, S + 1732) >>> 0;
+      PP.push([p.x0 - 1 + hf % (w + 2), hf & 128 ? p.y1 + 1 : p.y0 - 1, 4]);
+    }
   }
+  const yardSpots = (n, role, salt) => {   // n open places among the block's buildings: gardens, pastures, lawns
+    for (let k = 0, got = 0; k < n * 6 && got < n; k++) {
+      const hh = hash2(x0 + k * 13 + salt, y0 - k * 7, S + 1733) >>> 0, x = x0 + hh % (x1 - x0 + 1), y = y0 + (hh >>> 12) % (y1 - y0 + 1);
+      if (open(x, y)) { PP.push([x, y, role]); got++; }
+    }
+  };
+  if (B.park) { yardSpots(2 + hs % 3, 6, 1); yardSpots(Math.round(C.dens), 9, 2); }   // squirrels, rabbits and birds, and a stroller or two
+  else if (C.stock && dq > 0.7) yardSpots(2 + (hs >>> 5) % 4, 5, 3);   // the suburbs keep cattle and sheep
+  if ((hs >>> 11) % 100 < 20) yardSpots(1, 6, 4);   // the odd rat about the buildings
   const wx = C.gx + i * AV, sy = C.gy + j * AV;
-  for (let k = 0, n = Math.round(AV * 2 * AW * C.dens / 44); k < n; k++) {
-    const hh = hash2(wx * 3 + k, sy * 5 - k, S + 1724) >>> 0;
-    B.folk.push(k & 1 ? [wx + hh % AW, sy + (hh >>> 8) % AV, 0] : [wx + AW + (hh >>> 8) % (AV - AW), sy + hh % AW, 0]);
+  for (let k = 0, n = Math.round(C.dens * (1 + (hs >>> 14) % 2)); k < n; k++) {   // passers-by: along the side streets and the two avenues this block owns (west and south)
+    const hh = hash2(wx * 3 + k, sy * 5 - k, S + 1724) >>> 0, r = B.streets[k % (B.streets.length + 1)];
+    PP.push(r ? [r[0] + hh % (r[2] - r[0] + 1), r[1] + (hh >>> 10) % (r[3] - r[1] + 1), 0] : k & 1 ? [wx + hh % AW, sy + (hh >>> 8) % AV, 0] : [wx + AW + (hh >>> 8) % (AV - AW), sy + hh % AW, 0]);
   }
-  if ((hs >>> 20) % 100 < 25 + 50 * C.q) B.folk.push([wx + (hs >>> 3) % AW, sy + (hs >>> 9) % AV, 1]);
+  if ((hs >>> 20) % 100 < 30 + 35 * C.q) {   // the watch walks this block's stretch of avenue, north and back or east and back
+    const ns = (hs >>> 27) & 1, a = AW >> 1;
+    PP.push(ns ? [wx + a, sy + 1, 2, wx + a, sy + AV - 2] : [wx + 1, sy + a, 2, wx + AV - 2, sy + a]);
+  }
   return B;
 }
 function syCrowd(C) {   // the heart square's crowd, and the watch at its corners
   if (C.crowd) return C.crowd;
   const pl = C.plaza, side = pl * 2 + C.AW, out = [];
-  for (let k = 0, n = Math.round(side * side * C.dens / 18); k < n; k++) { const hh = hash2(C.gx + k * 31, C.gy - k * 17, S + 1722) >>> 0; out.push([C.gx - pl + hh % side, C.gy - pl + (hh >>> 12) % side, 0]); }
+  for (let k = 0, n = Math.max(2, Math.round(side * side * C.dens / 60)); k < n; k++) { const hh = hash2(C.gx + k * 31, C.gy - k * 17, S + 1722) >>> 0; out.push([C.gx - pl + hh % side, C.gy - pl + (hh >>> 12) % side, 7]); }
   for (const [dx, dy] of [[-pl, -pl], [pl + C.AW - 1, -pl], [-pl, pl + C.AW - 1], [pl + C.AW - 1, pl + C.AW - 1]]) out.push([C.gx + dx, C.gy + dy, 1]);
   return C.crowd = out;
+}
+/* the guards a city draws on: its own country's watch half the time, else any watch the made world has (all but the wilds') */
+function syGuardPick(P, u, u2) {
+  const D = SY.data;
+  if (!D.guardAll) { const ids = new Map(); for (const B of D.bio) if (B.k !== 'wilds' && B.guard) for (const e of B.guard.e) ids.set(e[0], 1); D.guardAll = syCum([...ids.keys()].map(id => [id, 1])); }
+  const pal = u < 0.5 && P.guard ? P.guard : D.guardAll || P.folk;
+  return syPick(pal, u2);
 }
 /* a city into a square: its paving, its buildings on their feathered footings, its people */
 function syCityInto(C, bx, by, D, sq) {
@@ -318,7 +394,7 @@ function syCityInto(C, bx, by, D, sq) {
     const gx = bx + x, gy = by + y, k = x * 64 + y;
     if (!cityHolds(v, gx, -gy)) continue;
     const B = blocks[(Math.floor((gx - C.gx) / AV) - i0) * nj + Math.floor((gy - C.gy) / AV) - j0];
-    inTown[k] = B.park ? 2 : 1;   // 2: a park keeps the country's trees; neither has monsters
+    inTown[k] = B.park || B.dq > 0.7 ? 2 : 1;   // 2: a park and the suburbs' gardens keep the country's trees; neither has monsters
     if (plot[k] || FL[k] & 1) continue;
     let paved = syMod(gx - C.gx, AV) < AW || syMod(gy - C.gy, AV) < AW || syInPlaza(C, gx, gy, 0);
     if (!paved) for (const r of B.streets) if (gx >= r[0] && gx <= r[2] && gy >= r[1] && gy <= r[3]) { paved = true; break; }
@@ -335,17 +411,22 @@ function syCityInto(C, bx, by, D, sq) {
     }
     syStamp(s, s, bx, by, H, UL, OL, SR, FL, locs, spawns, occ);
   }
-  const taken = new Set();
-  const person = ([x, y, role]) => {
+  const taken = new Set(), A = D.animals || {};
+  const person = ([x, y, role, px, py]) => {
     if (x < bx || x >= bx + 64 || y < by || y >= by + 64) return;
     const k = (x - bx) * 64 + (y - by);
-    if (plot[k] || occ[k] || FL[k] & 1 || OL[k] !== C.lane || taken.has(k)) return;   // on the paving, one to a tile
+    if (taken.has(k) || FL[k] & 1 || !cityHolds(v, x, -y)) return;
+    const paved = OL[k] === C.lane;
+    if (role === 3 ? !plot[k] : role === 4 || role === 5 || role === 8 ? plot[k] || paved || occ[k] : role === 6 || role === 9 ? plot[k] || occ[k] : !paved) return;   // at home in its building; in a yard; anywhere open; else on the paving
+    const u = syU(x, y, 1720), u2 = syU(x, y, 1721);
+    const e = role === 1 || role === 2 || role === 8 ? syGuardPick(P, u, u2) : role === 4 ? syPick(A.fowl, u2) : role === 5 ? syPick(A.stock, u2) : role === 6 ? syPick(A.small, u2)
+      : syPick(u < (role === 3 ? 0.35 : 0.55) && P.street ? P.street : P.civ || P.folk, u2);
+    if (!e) return;
     taken.add(k);
-    const pal = role === 1 ? P.guard || P.folk : syU(x, y, 1720) < 0.6 && P.street ? P.street : P.folk, e = syPick(pal, syU(x, y, 1721));
-    if (e) spawns.push({ id: e[0], x, y, plane: 0 });
+    spawns.push(role === 2 ? { id: e[0], x, y, plane: 0, pat: [px, py] } : { id: e[0], x, y, plane: 0, wr: SYC_WR[role] });
   };
-  for (const B of blocks) B.folk.forEach(person);
-  if (syInPlaza(C, bx, by, 64) && syInPlaza(C, bx + 63, by + 63, 64)) syCrowd(C).forEach(person);
+  for (const B of blocks) B.people.forEach(person);
+  if (bx <= C.gx + C.AW + C.plaza && bx + 63 >= C.gx - C.plaza && by <= C.gy + C.AW + C.plaza && by + 63 >= C.gy - C.plaza) syCrowd(C).forEach(person);
 }
 /* the settlements a square must lay: the made cities whose outlines may reach it, and the hamlets and villages whose tables do */
 async function sySettleNear(bx, by) {
@@ -371,7 +452,7 @@ function syRememb(rid, sq) { SY.cache.set(rid, sq); if (SY.cache.size > 24) SY.c
 async function sySquare(rid, yieldFn) {
   if (SY.cache.has(rid)) return SY.cache.get(rid);
   const D = await syLoad();
-  const sqX = rid >> 8, sqY = rid & 255, bx = sqX * 64, by = sqY * 64;
+  const sqX = MAP07.sqXOf(rid), sqY = MAP07.sqYOf(rid), bx = sqX * 64, by = sqY * 64;
   const H = new Int16Array(16384), UL = new Uint16Array(16384), OL = new Uint16Array(16384), SR = new Uint8Array(16384), FL = new Uint8Array(16384);
   const locs = [], spawns = [], occ = new Uint8Array(4096), M = new Float32Array(4096), BI = new Uint8Array(4096), inTown = new Uint8Array(4096);
   let seg = performance.now(), cpu = 0;
@@ -513,9 +594,13 @@ async function sySquare(rid, yieldFn) {
       spawns.push({ id: e[0], x: sx, y: sy, plane: 0 });
     }
   }
+  /* every spawn its own name, from where it stands and what it is: the key its wander, its respawn and its death are kept by
+     (m7Npcs reads 'g' + i), so no two walk in step and no death is shared */
+  const named = [], seenK = new Set();
+  for (const s of spawns) { const i = 'y' + s.x + '_' + s.y + '_' + (s.plane | 0) + '_' + s.id; if (!seenK.has(i)) { seenK.add(i); s.i = i; named.push(s); } }
   cpu += performance.now() - seg;
   SY.made = (SY.made || 0) + 1; SY.cpu = (SY.cpu || 0) + cpu; SY.worst = Math.max(SY.worst || 0, cpu);   // what a made square costs, for the dev console
-  return syRememb(rid, { H, UL, OL, SR, FL, locs, spawns });
+  return syRememb(rid, { H, UL, OL, SR, FL, locs, spawns: named });
 }
 function syCells(bx, by, cell, pad) {   // lattice cells (seed x, z) whose members can land in the square
   const out = [];
@@ -551,7 +636,7 @@ function syStamp(s, town, bx, by, H, UL, OL, SR, FL, locs, spawns, occ) {
   for (let q = 0; q < Ns.length; q += 4) {
     const nx = s.x0 + Ns[q + 1], ny = s.y0 + Ns[q + 2];
     if (nx < bx || nx >= bx + 64 || ny < by || ny >= by + 64) continue;
-    spawns.push({ id: Ns[q], x: nx, y: ny, plane: Ns[q + 3] });
+    spawns.push({ id: Ns[q], x: nx, y: ny, plane: Ns[q + 3], tp: 1 });   // tp: came with its building (m7Spawn keeps a banker at the booth, a keeper at the counter)
   }
 }
 /* the colour of a tile on the minimaps and the world map, without its scenery; town: a town's middle as one patch of its paving

@@ -65,7 +65,8 @@ let villageCache = new Map(), nbrCache = new Map();
    run-and-walk cycle averages ~1.2 tiles a tick — 2 a second (2.3 at 99 agility). Coasts to row round, rivers, ridges and bank
    trips take a quarter of that back: ~1.5 tiles a second over the ground, so 2^18 tiles is ~48 hours on the move — weeks of
    travel for the devoted, a year of ordinary play spent going one way. The renderer's 32-bit vertices still hold a 64th of a
-   tile there. Only east and west run that far: the squares stop at y 0 and 16383. Nothing here touches the seed's own world. */
+   tile there, and the made squares run that far every way (map07's square ids outgrow the cache's byte for y). Nothing here
+   touches the seed's own world. */
 const SYN_FAR = 262144, SYN_LOG = Math.log1p(SYN_FAR / 1500);
 const synReach = (x, z) => M7 && SYN ? Math.min(1, Math.log1p(Math.max(0, g7Out(x, z)) / 1500) / SYN_LOG) : 0;
 const SPRAWL_G = [0, 0, 8, 10, 13];   // how many core radii more a town, a city and a metropolis spread at the far reach
@@ -209,42 +210,73 @@ function siteInfo(cx, cz) {
       if (rank >= 0) s = { cx, cz, x: px, z: pz, y: Math.round(y), rank, r: Math.round(Math.min(RANKS[rank].R, capR)), reg: A, h3: hash2(cx, cz, S + 24), sprawl: 0 };
       /* a made city's sprawl as it could grow (villageAt settles what it may): its core (r) keeps the table, the gates and the belt;
          its streets run on over the country round it, out to a radius that grows with the reach and with the rank the place wished
-         for (a core is held to its cell; a sprawl is not), short of Gielinor's sea. The wilderness cuts its streets off where the
-         ditch runs (cityHolds), so a city beside the wilds is clipped, not shrunk */
+         for (a core is held to its cell; a sprawl is not), short of Gielinor's sea. How much room the wilds leave it is measured only
+         for the cities that could be great (siteRoom) */
       if (s && q > 0 && rank >= 2) s.sprawl = Math.round(Math.max(s.r, Math.min(sprawlOf(Math.max(rank, want), q), METRO_MAX, (g7Out(px, pz) - 260) / EXT_MAX)));
     }
   }
   villageCache.set(k, s);
   return s;
 }
-/* THE MADE WORLD'S METROPOLISES. The world past the rectangle is cut into metro cells of METRO settlement cells a side (2000 tiles),
-   and each holds at most one sprawling city: the town of rank 2 or more there with the widest sprawl (the luckier on a tie). A
-   metro city that a stronger one in the next metro cell would touch gives its sprawl up; any settlement a surviving metro city's
-   outline reaches is swallowed into it; every other town or city keeps its core size. Each answer is a handful of cached
-   lookups, and nothing can overlap by construction. */
-const METRO = 8, METRO_CELL = METRO * SETTLE_CELL, METRO_MAX = 1260;   // sprawl * EXT_MAX stays inside two metro cells' reach
-const cityPri = s => s.sprawl * 1024 + (s.h3 & 1023);
-function metroCand(mx, mz) {
-  const key = 'mc' + mx + ':' + mz;
+/* THE MADE WORLD'S GREAT CITIES. The world past the rectangle is cut two ways: into metro cells of 8 settlement cells a side (2000
+   tiles), each holding at most one metropolis, and into town cells of 4 (1000 tiles), each holding at most one great town. A cell's
+   city is its town of rank 2 or more with the widest sprawl (the luckier on a tie), grown to its tier's cap. It gives its sprawl
+   up to a higher tier's city that would touch it, or to a stronger one of its own tier; any settlement a standing city's outline
+   reaches is swallowed into it; every other town or city keeps its core size. Each answer is a few dozen cached lookups, and
+   nothing can overlap by construction. */
+const CITY_TIERS = [{ n: 8, max: 1260, k: 'm' }, { n: 4, max: 560, k: 'd' }];   // metropolises, then the great towns between them
+const METRO_MAX = CITY_TIERS[0].max;
+/* the room a city at s has: along twelve rays from its heart, 48 tiles a step, how far to the wilderness (the bands' edges wander
+   too fast for wildD at the heart to say) and how far to open sea — neither the nearest ray, so a great city may be cut off by the
+   ditch on a side or run along a coast, but most of it stands on open country */
+function siteRoom(s) {
+  if (s.room !== undefined) return s.room;
+  const reach = Math.min(s.sprawl, METRO_MAX) * EXT_MAX, sea = [], wild = [];
+  for (let k = 0; k < 12; k++) {
+    const sx = Math.sin(k * TAU / 12), cz = Math.cos(k * TAU / 12);
+    let wet = reach, ditch = reach;
+    for (let r = 48; r < reach; r += 48) {
+      const x = s.x + sx * r, z = s.z + cz * r;
+      if (wildD(x, z) > -30) { ditch = r - 24; break; }   // past the ditch the ray is done: the city stops there on this side
+      if (wet === reach && macroHeight(x, z) < -5) wet = r - 24;   // open sea or a deep lake: a river (never below -3.2) runs through a city
+    }
+    sea.push(Math.min(wet, ditch)); wild.push(ditch);
+  }
+  sea.sort((a, b) => a - b); wild.sort((a, b) => a - b);
+  return s.room = Math.max(s.r, Math.floor(Math.min(wild[2], sea[4]) / EXT_MAX));   // two sides may meet the wilds (cityHolds clips the streets there), four the sea
+}
+const tierSprawl = (s, T) => Math.min(s.sprawl, T.max, s.room === undefined ? 1e9 : s.room);
+const cityPri = (s, T) => tierSprawl(s, T) * 1024 + (s.h3 & 1023);
+function tierCand(ti, mx, mz) {
+  const T = CITY_TIERS[ti], key = T.k + 'c' + mx + ':' + mz;
   let c = nbrCache.get(key);
   if (c !== undefined) return c;
-  c = null;
-  for (let a = 0; a < METRO; a++) for (let b = 0; b < METRO; b++) {
-    const s = siteInfo(mx * METRO + a, mz * METRO + b);
-    if (s && s.sprawl > s.r && g7Out(s.x, s.z) >= 480 && s.z <= 0 && s.z > -16384 && (!c || cityPri(s) > cityPri(c))) c = s;   // inside the made world's band of squares
+  const top = [];   // the three that could spread furthest, then whichever of them the wilds leave the most room
+  for (let a = 0; a < T.n; a++) for (let b = 0; b < T.n; b++) {
+    const s = siteInfo(mx * T.n + a, mz * T.n + b);
+    if (s && s.sprawl > s.r && g7Out(s.x, s.z) >= 480) { top.push(s); top.sort((p, q) => Math.min(q.sprawl, T.max) - Math.min(p.sprawl, T.max)); if (top.length > 3) top.pop(); }
   }
+  c = null;
+  for (const s of top) { siteRoom(s); if (tierSprawl(s, T) > s.r && (!c || cityPri(s, T) > cityPri(c, T))) c = s; }
   nbrCache.set(key, c);
   return c;
 }
-function metroWin(mx, mz) {   // the metro cell's sprawling city, if no stronger neighbour's outline would meet it
-  const key = 'mw' + mx + ':' + mz;
+function tierWin(ti, mx, mz) {   // the cell's great city, if nothing above it or stronger beside it would meet its outline
+  const T = CITY_TIERS[ti], key = T.k + 'w' + mx + ':' + mz;
   let w = nbrCache.get(key);
   if (w !== undefined) return w;
-  w = metroCand(mx, mz);
-  if (w) for (let a = -1; a <= 1 && w; a++) for (let b = -1; b <= 1 && w; b++) {
+  w = tierCand(ti, mx, mz);
+  for (let u = 0; u < ti && w; u++) {   // a higher tier's standing city (the tiers above never ask the ones below)
+    const U = CITY_TIERS[u], ux = Math.floor(w.cx / U.n), uz = Math.floor(w.cz / U.n);
+    for (let a = -2; a <= 2 && w; a++) for (let b = -2; b <= 2 && w; b++) {
+      const o = tierWin(u, ux + a, uz + b);
+      if (o && (o === w || Math.hypot(o.x - w.x, o.z - w.z) < (tierSprawl(o, U) + tierSprawl(w, T)) * EXT_MAX + 40)) w = null;
+    }
+  }
+  for (let a = -2; a <= 2 && w; a++) for (let b = -2; b <= 2 && w; b++) {   // a stronger one of its own tier, if that one stands: priorities only climb, so this ends
     if (!a && !b) continue;
-    const o = metroCand(mx + a, mz + b);
-    if (o && cityPri(o) > cityPri(w) && Math.hypot(o.x - w.x, o.z - w.z) < (o.sprawl + w.sprawl) * EXT_MAX + 40 && metroWin(mx + a, mz + b) === o) w = null;   // the stronger must itself stand: priorities only climb, so this ends
+    const o = tierCand(ti, mx + a, mz + b);
+    if (o && cityPri(o, T) > cityPri(w, T) && Math.hypot(o.x - w.x, o.z - w.z) < (tierSprawl(o, T) + tierSprawl(w, T)) * EXT_MAX + 40 && tierWin(ti, mx + a, mz + b) === o) w = null;
   }
   nbrCache.set(key, w);
   return w;
@@ -256,20 +288,17 @@ function villageAt(cx, cz) {
   if (v !== undefined) return v;
   const s = siteInfo(cx, cz);
   v = null;
-  let win = null;
-  if (s && s.sprawl) {   // the made world: a metro city sprawls, anything its outline reaches is swallowed, other cities keep their core
-    const mx = Math.floor(cx / METRO), mz = Math.floor(cz / METRO), own = s.rank >= 2 ? s.r * EXT_MAX : s.r * 1.8;
-    for (let a = -1; a <= 1 && s; a++) for (let b = -1; b <= 1; b++) {
-      const w = metroWin(mx + a, mz + b);
-      if (!w) continue;
-      if (w === s) { win = w; continue; }
-      if (Math.hypot(w.x - s.x, w.z - s.z) < w.sprawl * EXT_MAX + own + 20) { villageCache.set(k, null); return null; }
-    }
-  } else if (s && M7 && SYN) {   // a hamlet or a village the made world keeps must stand clear of any metro city's outline too
-    const mx = Math.floor(cx / METRO), mz = Math.floor(cz / METRO);
-    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
-      const w = metroWin(mx + a, mz + b);
-      if (w && Math.hypot(w.x - s.x, w.z - s.z) < w.sprawl * EXT_MAX + s.r * 1.8 + 20) { villageCache.set(k, null); return null; }
+  let tierOf = -1;
+  if (s && M7 && SYN) {   // the made world: a great city sprawls, and anything its outline reaches is swallowed
+    const own = s.rank >= 2 ? s.r * EXT_MAX : s.r * 1.8;
+    for (let ti = 0; ti < CITY_TIERS.length; ti++) {
+      const T = CITY_TIERS[ti], mx = Math.floor(cx / T.n), mz = Math.floor(cz / T.n);
+      for (let a = -2; a <= 2; a++) for (let b = -2; b <= 2; b++) {
+        const w = tierWin(ti, mx + a, mz + b);
+        if (!w) continue;
+        if (w === s) { if (tierOf < 0) tierOf = ti; continue; }
+        if (Math.hypot(w.x - s.x, w.z - s.z) < tierSprawl(w, T) * EXT_MAX + own + 20) { villageCache.set(k, null); return null; }
+      }
     }
   }
   if (s) {
@@ -280,8 +309,8 @@ function villageAt(cx, cz) {
           pf: sh.pf, pn: sh.pn, po: sh.po, pc: sh.pc, rects: sh.rects, kind: sh.kind, ext: Math.sqrt(asp) * sh.pmax,
           pk: role === 2 ? 1 : PLAN_ODDS[rank].findIndex(c => hp % 100 < c), rot: rank >= 2 ? 0 : ((hp >>> 8) & 255) / 256 * PI / 2,   // a planned town's grid runs with its frame
           G: null, b: null, f: null, keep: null, wall: null, trees: null, spots: null, name: null, lm: null, fur: null, shrine: null, booth: null, pen: null, dock: null, guild: null });
-    v.sprawl = win ? s.sprawl : s.sprawl ? s.r : 0;   // a made city: its metro's sprawls, the rest are cities of their core's size (synth07's plan either way)
-    v.metro = win ? 1 : 0;
+    v.sprawl = tierOf >= 0 ? tierSprawl(s, CITY_TIERS[tierOf]) : s.sprawl ? s.r : 0;   // a made city: a great one sprawls to its tier's cap, the rest keep their core's size (synth07's plan either way)
+    v.metro = tierOf + 1;   // 1 a metropolis, 2 a great town, 0 neither
   }
   villageCache.set(k, v);
   return v;
@@ -291,16 +320,18 @@ function villageAt(cx, cz) {
 function citiesIn(x0, z0, x1, z1) {
   const out = [];
   if (!M7 || !SYN) return out;
-  const R = METRO_MAX * EXT_MAX * 1.25 + 40;   // 1.25: the levelled ground eases out to 1.2 sprawls along the outline (synth07's syCityLevel)
-  for (let mx = Math.floor((x0 - R) / METRO_CELL); mx <= Math.floor((x1 + R) / METRO_CELL); mx++)
-    for (let mz = Math.floor((z0 - R) / METRO_CELL); mz <= Math.floor((z1 + R) / METRO_CELL); mz++) {
-      const w = metroWin(mx, mz);
-      if (!w) continue;
-      const e = w.sprawl * EXT_MAX * 1.25 + 8;
-      if (w.x + e < x0 || w.x - e > x1 || w.z + e < z0 || w.z - e > z1) continue;
-      const v = villageAt(w.cx, w.cz);
-      if (v && v.metro) out.push(v);
-    }
+  for (const T of CITY_TIERS) {
+    const cell = T.n * SETTLE_CELL, R = T.max * EXT_MAX * 1.25 + 40;   // 1.25: the levelled ground eases out to 1.2 sprawls along the outline (synth07's syCityLevel)
+    for (let mx = Math.floor((x0 - R) / cell); mx <= Math.floor((x1 + R) / cell); mx++)
+      for (let mz = Math.floor((z0 - R) / cell); mz <= Math.floor((z1 + R) / cell); mz++) {
+        const w = tierWin(CITY_TIERS.indexOf(T), mx, mz);
+        if (!w) continue;
+        const e = tierSprawl(w, T) * EXT_MAX * 1.25 + 8;
+        if (w.x + e < x0 || w.x - e > x1 || w.z + e < z0 || w.z - e > z1) continue;
+        const v = villageAt(w.cx, w.cz);
+        if (v && v.metro && !out.includes(v)) out.push(v);
+      }
+  }
   const r = RANKS[4].R * EXT_MAX * 1.25 + 8;
   for (let cx = Math.floor((x0 - r) * INV_CELL); cx <= Math.floor((x1 + r) * INV_CELL); cx++)
     for (let cz = Math.floor((z0 - r) * INV_CELL); cz <= Math.floor((z1 + r) * INV_CELL); cz++) {
@@ -4478,7 +4509,19 @@ function villageSpawn(v, i) {
   return Object.assign(r, { t: pickMonster(x, z, h, pw), x, z, pw });
 }
 /* the shared wander: destination is a pure function of (key hash, shared tick) */
-const wanderAt = (kh, tick, hx, hz) => { const r = hash2(kh ^ tick, tick, S + 777); return r % 6 === 0 ? { x: hx + ((r >>> 8) % 11) - 5, z: hz + ((r >>> 16) % 11) - 5 } : null; };
+const wanderAt = (kh, tick, hx, hz, wr) => {   // wr: how far from home it strays (5 unless its spawn says otherwise; 0 stands still)
+  const q = wr === undefined ? 5 : wr;
+  if (q <= 0) return null;
+  const r = hash2(kh ^ tick, tick, S + 777);
+  return r % 6 === 0 ? { x: hx + ((r >>> 8) % (2 * q + 1)) - q, z: hz + ((r >>> 16) % (2 * q + 1)) - q } : null;
+};
+/* a watchman walks a beat: from his post to its far end and back, pausing at each, on a clock of his own */
+function patrolAt(n) {
+  const per = 40 + (n.kh >>> 3) % 32, t = tickN + (n.kh >>> 9) % per;
+  if (t % per > 3) return null;   // a leg is set at its start, then walked
+  const p = Math.floor(t / per) % 2 ? n.pat : n.home;
+  return { x: p.x, z: p.z };
+}
 function spawnNpc(t, x, z, key, pw) {
   const kh = key ? hashSeed(key) : (Math.random() * 4294967296) | 0;   // dev spawns stay local with a private seed
   let dest = null;
@@ -4621,7 +4664,7 @@ function npcTick(n) {
       retaliate(n);
     }
   } else {
-    const d = n.heldT > tickN || n.still ? null : wanderAt(n.kh, tickN, n.home.x, n.home.z);   // un-aggroed monsters mill about deterministically, unless rooted (or a Gielinor figure that never walks)
+    const d = n.heldT > tickN || n.still ? null : n.pat ? patrolAt(n) : wanderAt(n.kh, tickN, n.home.x, n.home.z, n.wr);   // un-aggroed monsters mill about deterministically, unless rooted (or a Gielinor figure that never walks); a made world's watch walks its beat
     if (d) n.dest = d;
     if (n.heldT > tickN) n.dest = null;
     if (n.dest && (n.dest.x !== n.tx || n.dest.z !== n.tz)) {
@@ -12069,13 +12112,18 @@ function m7Spawn(s, key) {
   const pl = s.plane | 0, size = def.size || 1;
   if (/fishing spot/i.test(name)) return m7Spot(s, key, def, name, pl);
   const t = m7Type(def), [sx, sy] = MAP07.snapWalkable(pl, s.x, s.y, 3), fp = (size - 1) >> 1, x = sx + fp, z = -(sy + fp);
-  const kh = hashSeed(key), mesh = new THREE.Group(), still = def.walkingAnimation === undefined || def.walkingAnimation === def.standingAnimation ? 1 : 0;
+  let still = def.walkingAnimation === undefined || def.walkingAnimation === def.standingAnimation ? 1 : 0, wr = s.wr;
+  /* the made world says how each of its people keeps to its place (synth07): a banker at the booth, a shopkeeper behind the counter,
+     whoever came with a building within it; its spawns carry a wander reach, and the watch a beat (pat) */
+  if (s.tp && !still) { const o = MAP07.opsOf(def).map(q => q.toLowerCase()); if (o.includes('bank') || /banker/i.test(name)) still = 1; else wr = o.includes('trade') ? 1 : 3; }
+  const kh = hashSeed(key), mesh = new THREE.Group();
   scene.add(mesh);
   let dest = null;
-  for (let b = 0; b < 12 && !dest && !still; b++) dest = wanderAt(kh, tickN - b, x, z);   // adopt the leg the room is already walking
+  for (let b = 0; b < 12 && !dest && !still && !s.pat; b++) dest = wanderAt(kh, tickN - b, x, z, wr);   // adopt the leg the room is already walking
   const n = { npc: 1, t, key, name: t.n, tx: x, tz: z, px: x, pz: z, rx: x, rz: z, ry: m7Y(x, z, pl), home: { x, z }, hp: t.hp, maxhp: t.hp, face: (kh & 3) * PI / 2, faceT: (kh & 3) * PI / 2,
     mesh, atkT: 0, atkStyle: 'm', limbs: null, walkPhase: 0, styleIx: 0, styleN: 0, cd: 2 + (hash2(x, z, S) & 3), target: null, dead: 0, mv: 0,
-    pw: m7Wild(x, z) / 26, kh, dest, owner: null, lastNet: 0, netAct: 0, pl, c7: s.id, ops7: MAP07.opsOf(def), vo: size % 2 ? 0 : 0.5, h7: 0, fig: null, still };
+    pw: m7Wild(x, z) / 26, kh, dest, owner: null, lastNet: 0, netAct: 0, pl, c7: s.id, ops7: MAP07.opsOf(def), vo: size % 2 ? 0 : 0.5, h7: 0, fig: null, still,
+    wr, pat: s.pat ? { x: s.pat[0] + fp, z: -(s.pat[1] + fp) } : null };
   npcs.push(n); m7Live.add(key); npcFoot(n);
   MAP07.npcFigure(def).then(fig => {
     if (!fig) return;

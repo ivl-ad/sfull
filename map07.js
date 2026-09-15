@@ -311,7 +311,14 @@ function colorMaps(def, bare) {
 /* ---- the loaded world ---- */
 const regions = new Map();   /* rid -> R: terrain grids, collision, meshes, owners, objects */
 let lastR = null;
-const ridOf = (gx, gy) => ((gx >> 6) << 8) | (gy >> 6);
+/* a square's id: the cache's own (x << 8 | y) while its y fits the byte — every real square's files are named so — and past that
+   range (the made world north of tile 16383 and south of 0) a number of its own, far clear of those. Read back with sqXOf/sqYOf,
+   never with shifts, which these ids outgrow */
+const RID_FAR = 2 ** 40, RID_B = 2 ** 20, RID_H = 2 ** 19;
+const ridSq = (sx, sy) => sy >= 0 && sy <= 255 ? (sx << 8) | sy : RID_FAR + (sx + RID_H) * RID_B + sy + RID_H;
+const sqXOf = rid => rid >= RID_FAR ? Math.floor((rid - RID_FAR) / RID_B) - RID_H : rid >> 8;
+const sqYOf = rid => rid >= RID_FAR ? (rid - RID_FAR) % RID_B - RID_H : rid & 255;
+const ridOf = (gx, gy) => ridSq(gx >> 6, gy >> 6);
 function regionAt(gx, gy) {
   if (lastR && gx >> 6 === lastR.sqX && gy >> 6 === lastR.sqY) return lastR;
   const r = regions.get(ridOf(gx, gy));
@@ -965,7 +972,7 @@ function spentLook(def, pl, spec, g) {
    then it collides solid: regionAt answers only a ready square); its models come last, laid a few milliseconds a frame, one square
    at a time. A square that fails for a passing reason is dropped and asked for again after a growing rest. */
 function newRegion(rid) {
-  return { rid, sqX: rid >> 8, sqY: rid & 255, ready: 0, terr: [null, null, null, null], groups: [], owners: [], objs: [], ext: [], icons: [], scenes: [], anim: null, solid: new Uint8Array(16384),
+  return { rid, sqX: sqXOf(rid), sqY: sqYOf(rid), ready: 0, terr: [null, null, null, null], groups: [], owners: [], objs: [], ext: [], icons: [], scenes: [], anim: null, solid: new Uint8Array(16384),
     clip: new Int32Array(16384), walls: new Uint8Array(16384), box: new THREE.Box3(), pins: null };
 }
 const retryAt = new Map(), tries = new Map();
@@ -1037,7 +1044,7 @@ async function groundStage(R) {
   buildTerrain(R);
   R.groundDone();
   /* the neighbours close their seams on our heights, and their edge blends reach five tiles into us */
-  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const n = (dx || dy) && regions.get(((R.sqX + dx) << 8) | (R.sqY + dy)); if (n && n.H) markTerrain(n); }
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const n = (dx || dy) && regions.get(ridSq(R.sqX + dx, R.sqY + dy)); if (n && n.H) markTerrain(n); }
   return true;
 }
 async function defsStage(R) {
@@ -1131,7 +1138,7 @@ async function sceneryStage(R) {
       if (gone()) return;
     }
     /* the seams: the east, north and north-east neighbours lend the heights our edge pieces stand on */
-    const nb = [[1, 0], [0, 1], [1, 1]].map(([dx, dy]) => regions.get(((R.sqX + dx) << 8) | (R.sqY + dy))).filter(n => n && !n.H);
+    const nb = [[1, 0], [0, 1], [1, 1]].map(([dx, dy]) => regions.get(ridSq(R.sqX + dx, R.sqY + dy))).filter(n => n && !n.H);
     if (nb.length) { await Promise.race([Promise.all(nb.map(n => n.groundP)), sleep(2500)]); if (gone()) return; }
     const run = buildLane.then(() => gone() ? 0 : buildScenery(R));
     buildLane = run.catch(() => {});
@@ -1229,7 +1236,7 @@ let queue = [], busy = 0;
 /* scope: while game.js lays the seed's world round the main map, only the squares of the main map's rectangle stream (the
    others are Gielinor's own places past it: dungeons, the essence mine, reached by their own ladders and spells) */
 let scopeAll = 1, synth = null;
-const inMain = rid => { const x = rid >> 8, y = rid & 255; return x >= 18 && x <= 60 && y >= 39 && y <= 64; };
+const inMain = rid => { const x = sqXOf(rid), y = sqYOf(rid); return x >= 18 && x <= 60 && y >= 39 && y <= 64; };
 const dropOutside = () => { for (const rid of [...regions.keys()]) if (!inMain(rid)) unloadRegion(rid); queue = queue.filter(inMain); };
 function setScope(all) {
   all = all ? 1 : 0;
@@ -1246,15 +1253,15 @@ function setSynth(p) {
   if (!scopeAll) dropOutside();
 }
 /* a square this scope streams: the main map's own inside the rectangle; past it Gielinor's own places, or the made squares */
-const streams = rid => { const y = rid & 255; return inMain(rid) ? manifest.has(rid) : scopeAll ? manifest.has(rid) : !!(synth && synth.has(rid)); };
+const streams = rid => inMain(rid) ? manifest.has(rid) : scopeAll ? manifest.has(rid) : !!(synth && synth.has(rid));
 function update(gx, gy, reach) {
   if (!loaded) return;
-  const dist = rid => { const x0 = (rid >> 8) * 64, y0 = (rid & 255) * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
+  const dist = rid => { const x0 = sqXOf(rid) * 64, y0 = sqYOf(rid) * 64; return Math.max(x0 - gx, 0, gx - x0 - 63, y0 - gy, gy - y0 - 63); };
   for (const rid of [...regions.keys()]) if (dist(rid) > reach + 48 || (!inMain(rid) && (regions.get(rid).syn ? scopeAll || !synth : !scopeAll))) unloadRegion(rid);
   const rx = gx >> 6, ry = gy >> 6, n = Math.ceil(reach / 64) + 1, list = [], now = performance.now();
   for (let dx = -n; dx <= n; dx++) for (let dy = -n; dy <= n; dy++) {
-    if (ry + dy < 0 || ry + dy > 255 || (rx + dx < 0 && !synth)) continue;   // a square's y is its low byte: the made world stops at y 0 and 16383
-    const rid = ((rx + dx) << 8) | (ry + dy);
+    if (!synth && (ry + dy < 0 || ry + dy > 255 || rx + dx < 0)) continue;   // the tree's squares keep to the byte; the made world runs every way
+    const rid = ridSq(rx + dx, ry + dy);
     if (streams(rid) && !regions.has(rid) && dist(rid) <= reach && !(retryAt.get(rid) > now)) list.push(rid);   // a square resting after a failure waits out its rest
   }
   queue = list.sort((a, b) => dist(a) - dist(b));
@@ -1745,6 +1752,6 @@ return {
   pick, transport, climbTarget, toggleDoor, doorPartner, doorPairs,
   npcDefOf, npcFigure, headFigure, animate, figureAct, seqFrames, frameAt, transformVerts, labelGroups, spotanim, animateScenery, defs,
   defSync, itemGeo, itemMesh, itemFor, itemNameIds, itemSpawns: () => itemSpawns,
-  tileRGB, wallBits, worldImage, worldRGB, WORLD_IMG, isLand, squareCanvas, clean, opsOf,
+  tileRGB, wallBits, worldImage, worldRGB, WORLD_IMG, isLand, squareCanvas, clean, opsOf, ridSq, sqXOf, sqYOf,
 };
 })();

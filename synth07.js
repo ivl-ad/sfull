@@ -857,6 +857,24 @@ async function sySettleNear(bx, by) {
 /* the level a made square's monsters are drawn toward: a few near Gielinor, the country's toughest far out, higher in the
    wilderness, and wandering a little either way from place to place */
 const syMonLv = (gx, gy, q) => clamp(4 + 236 * Math.pow(q, 1.1) + wildLvAt(gx, -gy) * 1.2 + noise2(gx * 0.0021, gy * 0.0021, S + 1710) * (5 + 25 * q), 1, 400);
+/* the country's soft growth: of its scenery, what a body walks through — grass, reeds, ferns, plants, flowers, bushes, mushrooms, a
+   swamp's nameless tufts — never a tree (anything with a menu), a rock, a stump, a log or a made thing. A made square scatters it
+   thinly (SY_SOFT_MAX a tile at most) and lays it with no collision */
+const SY_SOFT_MAX = 0.06, SY_HARD = /tree|rock|boulder|stone|cactus|slide|pile|brick|timber|defen|statue|stump|log|branch|wall|fence|post|sign|crate|barrel|skull|bone/i;
+function sySoft(D) {
+  return D.softP || (D.softP = (async () => {
+    const ids = new Set();
+    for (const P of D.bio) if (P.scen) for (const e of P.scen.e) ids.add(e[0]);
+    const dd = ids.size ? await MAP07.defs('loc', [...ids]) : {}, out = new Set();
+    for (const id of ids) {
+      const d = dd[id];
+      if (!d || MAP07.opsOf(d).length) continue;
+      const name = MAP07.clean(d.name || ''), bare = !name || name === 'null';
+      if (bare ? (d.width || 1) * (d.length || 1) <= 1 : !SY_HARD.test(name)) out.add(id);
+    }
+    return out;
+  })());
+}
 /* ---- a square ---- */
 function syRememb(rid, sq) { SY.cache.set(rid, sq); if (SY.cache.size > 24) SY.cache.delete(SY.cache.keys().next().value); return sq; }
 /* the made world's safe floors, a square at a time as each is made: inside a bank or the Exchange (syStamp marks them from its
@@ -975,7 +993,7 @@ async function sySquare(rid, yieldFn) {
       }
     }
   }
-  const qs = synReach(bx + 32, -(by + 32));   // how far out this square lies: the country grows thicker with it
+  const qs = synReach(bx + 32, -(by + 32)), soft = await sySoft(D);   // how far out this square lies: the country grows thicker with it
   for (let x = 0; x < 64; x++) {
     for (let y = 0; y < 64; y++) {
       const i = x * 64 + y, town = inTown[i];
@@ -990,16 +1008,16 @@ async function sySquare(rid, yieldFn) {
          and glades (its mean stays the measured one), and its ground cover a little thinner where the trees stand thick */
       const grove = clamp(0.9 + noise2(gx * 0.021, gy * 0.021, S + 931) * 1.5 + biomeAt(gx, -gy) * 0.3, 0, 2.4) * (1 + 0.35 * qs);
       const slope = Math.abs(H[i] - H[Math.min(4095, i + 65)]);
-      if (P.scen && slope < 160 && syU(gx, gy, 932) < P.dens[0] * grove) {
-        const e = syPick(P.scen, syU(gx, gy, 933));
-        if (e && fits(x, y, e[2], e[3], 1)) {
+      const e = P.scen && slope < 160 ? syPick(P.scen, syU(gx, gy, 933)) : null, sf = e && soft.has(e[0]);
+      if (e && syU(gx, gy, 932) < (sf ? Math.min(SY_SOFT_MAX, P.dens[0] * grove * 0.4) : Math.min(0.22, P.dens[0] * grove))) {   // the soft growth a fraction of the country's measure and never a thicket (a swamp's reeds stood on every tile); the rest never past a thick wood's
+        if (fits(x, y, e[2], e[3], 1)) {
           const rot = (hash2(gx, gy, S + 935) >>> 0) & 3, st = D.stack[e[0]];
-          locs.push({ id: e[0], type: 10, rot, plane: 0, x, y });
+          locs.push(sf ? { id: e[0], type: 10, rot, plane: 0, x, y, nc: 1 } : { id: e[0], type: 10, rot, plane: 0, x, y });   // nc: walked through (map07 lays no collision for it)
           if (st) { if (st[0]) locs.push({ id: st[0], type: 10, rot, plane: 1, x, y }); if (st[1]) locs.push({ id: st[1], type: 10, rot, plane: 2, x, y }); }   // its storeys above: the palm's middle and crown
           claim(x, y, e[2], e[3]); continue;
         }
       }
-      if (P.decor && syU(gx, gy, 938) < P.dens[1] * (1.1 - 0.25 * Math.min(1, grove))) locs.push({ id: syPick(P.decor, syU(gx, gy, 939))[0], type: 22, rot: (hash2(gx, gy, S + 940) >>> 0) & 3, plane: 0, x, y });
+      if (P.decor && syU(gx, gy, 938) < Math.min(0.45, P.dens[1] * (1.1 - 0.25 * Math.min(1, grove)))) locs.push({ id: syPick(P.decor, syU(gx, gy, 939))[0], type: 22, rot: (hash2(gx, gy, S + 940) >>> 0) & 3, plane: 0, x, y });
     }
     if ((x & 15) === 15) await pause();
   }

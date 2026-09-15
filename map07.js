@@ -1147,7 +1147,7 @@ async function defsStage(R) {
       const r2 = regionRaw(gx + dx, gy + dy);
       if (r2 && r2.solid) r2.solid[rp * 4096 + ((gx + dx) & 63) * 64 + ((gy + dy) & 63)] = 1;
     }
-    clipLoc(R, def, p.id, pl, w, l);
+    if (!p.nc) clipLoc(R, def, p.id, pl, w, l);   // a made square's soft growth (nc) is walked through
     /* the minimap's pictures: a map-function icon (bank, shop, altar) and the small scene sprite (a tree, a rock) */
     const base = dd[p.id] || def, icon = base.mapIconId !== undefined ? base.mapIconId : def.mapIconId, scene = base.mapSceneId !== undefined ? base.mapSceneId : def.mapSceneId;
     if (icon !== undefined) R.icons.push(gx, gy, rp, icon);

@@ -3460,6 +3460,7 @@ const STUCK_CLIMB = 8.5;   // stuck mode clears the 6.5-unit ledges; masonry sta
    worst lot the claim allows (2.2 of fall plus the floor's own 0.2) so a door is never a one-way trip. */
 const DOORSTEP = 2.6;
 function canStep(fx, fz, tx, tz, own, pl) {
+  if (OPT.stuck && M7 && SYN && own === undefined && !g7In(fx, fz) && !g7In(tx, tz)) return true;   // stuck past Gielinor: you crawl through whatever stands there (stuckOK)
     const fk = M7 ? ((pl === undefined ? P.plane : pl) | 0) * 68719476736 : 0;   // Gielinor footprints are keyed by floor: a body upstairs never blocks the room below
     if (shut(tk(tx, tz) + fk, own) && !shut(tk(fx, fz) + fk, own)) return false;   // already inside something that isn't ours: walk out through it
   if (M7) {
@@ -7146,23 +7147,35 @@ el('rnd').onclick = () => {   // somewhere else in the same world, judged on mac
   if (!best) return say('Nothing but sea and stone out there — roll again.', 'bad');
   travelTo(best[0], best[1]);
 };
+/* stuck mode: in the seed's own worlds a clamber up any slope; in Gielinor's map, only past it — in the made world, where you crawl
+   up anything and through anything that stands in the way (canStep) — never inside Gielinor's rectangle, where it switches itself off */
+const stuckOK = () => !M7 || (SYN && !g7In(P.tx, P.tz));
 function setStuck(v) {
+  if (v && !stuckOK()) return say('Stuck mode only works past Gielinor, in the lands beyond it.', 'bad');
   OPT.stuck = v;
   P.stuckT = 0; P.span = 1; stopWalk();   // the old route was judged by old rules
   el('stuck').classList.toggle('on', !!v);
-  say(v ? 'Stuck mode on — you can climb almost anything, slowly.' : 'Stuck mode off — back to normal footing.', 'lv');
+  say(v ? (M7 ? 'Stuck mode on — you crawl up and through anything, at a fifth of your pace.' : 'Stuck mode on — you can climb almost anything, slowly.') : 'Stuck mode off — back to normal footing.', 'lv');
   updateZoneTags();
 }
 function openStuck() {
   const on = OPT.stuck;
-  showModal('Stuck?', '<p class="smsg">Some ground turns you back: cliff faces, mountain ledges, the steep sides of a valley. <b>Stuck mode</b> lets you clamber up all of it, so every corner of the map becomes reachable.</p>' +
-    '<p class="smsg">The price is pace — you move <b>five times slower</b> while it is on. Walls, houses and castle keeps still stop you: this is for landscape, not for masonry.</p>' +
-    '<div class="wrow2"><button id="stuckTog">' + (on ? 'Turn stuck mode off' : 'Turn stuck mode on') + '</button></div>', on ? 'Stuck mode is ON — you are crawling.' : 'Stuck mode is off.');
+  const text = M7
+    ? '<p class="smsg">The lands past Gielinor can hem you in: steep hillsides, thickets, a ruin\'s walls. <b>Stuck mode</b> lets you clamber up any slope and crawl straight through whatever stands in your way, so nowhere out there is out of reach.</p>' +
+      '<p class="smsg">The price is pace — you move <b>five times slower</b> until you turn it off. It works only past Gielinor, and switches itself off the moment you step back inside.</p>'
+    : '<p class="smsg">Some ground turns you back: cliff faces, mountain ledges, the steep sides of a valley. <b>Stuck mode</b> lets you clamber up all of it, so every corner of the map becomes reachable.</p>' +
+      '<p class="smsg">The price is pace — you move <b>five times slower</b> while it is on. Walls, houses and castle keeps still stop you: this is for landscape, not for masonry.</p>';
+  showModal('Stuck?', text + '<div class="wrow2"><button id="stuckTog">' + (on ? 'Turn stuck mode off' : 'Turn stuck mode on') + '</button></div>', on ? 'Stuck mode is ON — you are crawling.' : 'Stuck mode is off.');
   el('stuckTog').onclick = () => { setStuck(OPT.stuck ? 0 : 1); closeOverlays(); };
 }
 el('stuck').onclick = () => { if (!OPT.stuck) openStuck(); else setStuck(0); };   // turning it on gets the explanation; off is one click
+el('stuckTag').onclick = () => el('stuck').onclick();   // the tag under the PvP line is its button too: always to hand wherever stuck mode works
 function updateZoneTags() {
-  el('stuckTag').style.display = OPT.stuck ? 'block' : 'none';
+  if (OPT.stuck && !stuckOK()) { setStuck(0); say('Stuck mode switches off inside Gielinor.'); return; }
+  const tg = el('stuckTag'), avail = M7 && stuckOK(), label = OPT.stuck ? 'STUCK MODE — 5× slower' : 'Stuck mode';
+  tg.style.display = OPT.stuck || avail ? 'block' : 'none';
+  tg.classList.toggle('off', !OPT.stuck);
+  if (tg.textContent !== label) tg.textContent = label;
   const law = pvpLaw(P.tx, P.tz), t = el('pvpTag'), txt = law.wild ? 'Wilderness · level ' + law.wild : law.lv ? 'PvP · within ' + law.lv + ' levels' : '';
   t.style.display = txt ? 'flex' : 'none';
   if (txt && t._lv !== txt) { t._lv = txt; t.querySelector('span').textContent = txt; }

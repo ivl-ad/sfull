@@ -42,7 +42,9 @@
   #pvpTag,#stuckTag{position:fixed;left:10px;z-index:6;display:none;font-size:12px;font-weight:700;color:#ff5a3a;
     text-shadow:1px 1px 0 #000;letter-spacing:.04em}
   #pvpTag{top:28px;align-items:center;gap:5px}
-  #stuckTag{top:52px}
+  #stuckTag{top:52px;cursor:pointer;pointer-events:auto}   /* a button as well as a tag (game.js updateZoneTags) */
+  #stuckTag.off{color:#ffb347;font-weight:600;opacity:.8}
+  #stuckTag:hover{opacity:1;color:#fff}
   #pvpTag img{width:20px;height:20px;filter:drop-shadow(1px 1px 0 #000)}
   #budget h1{margin:0 0 5px;font-size:9px;letter-spacing:.2em;color:var(--dim);text-transform:uppercase}
   .bigbytes{display:flex;align-items:baseline;gap:6px;margin:0}

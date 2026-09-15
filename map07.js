@@ -1654,6 +1654,18 @@ function wallBetween(rp, x, y, dx, dy) {
   if (dx < 0) return !!(flagAt(rp, x - 1, y) & F_E);
   return false;
 }
+/* a real square's own data, lent to the made world (synth07's districts and features): its terrain, its placements and its
+   spawns, fetched from the tree exactly as the square itself streams; the last few kept */
+const srcP = new Map(), spawnN = new Map();   /* spawnN: npc id -> how many times the main map spawns it (one is somebody; many are anybody) */
+function sourceSquare(rid) {
+  let p = srcP.get(rid);
+  if (p) return p;
+  p = Promise.all([getBin(OUT + '/t/' + rid + '.bin'), getBin(OUT + '/l/' + rid + '.bin').catch(e => { if (e.status === 404) return null; throw e; })])
+    .then(([tb, lb]) => ({ t: parseTerrain(tb), locs: lb ? parseLocs(lb) : [], spawns: spawnsByRegion.get(rid) || [] }), e => { srcP.delete(rid); throw e; });
+  srcP.set(rid, p);
+  if (srcP.size > 64) srcP.delete(srcP.keys().next().value);
+  return p;
+}
 const squareP = new Map();   /* rid -> canvas (128x128, two pixels a tile, walls on the edges) | null while fetching or absent */
 let squareBusy = 0;
 function squareCanvas(rid) {
@@ -1701,6 +1713,7 @@ function load() {
       let a = spawnsByRegion.get(rid);
       if (!a) spawnsByRegion.set(rid, a = []);
       a.push(Object.assign({ i }, s));
+      spawnN.set(s.id, (spawnN.get(s.id) || 0) + 1);
     });
     itemSpawns = (sp.items || []).map((s, i) => Object.assign({ i }, s));
     transByLoc = tr.byLoc || {};
@@ -1752,6 +1765,6 @@ return {
   pick, transport, climbTarget, toggleDoor, doorPartner, doorPairs,
   npcDefOf, npcFigure, headFigure, animate, figureAct, seqFrames, frameAt, transformVerts, labelGroups, spotanim, animateScenery, defs,
   defSync, itemGeo, itemMesh, itemFor, itemNameIds, itemSpawns: () => itemSpawns,
-  tileRGB, wallBits, worldImage, worldRGB, WORLD_IMG, isLand, squareCanvas, clean, opsOf, ridSq, sqXOf, sqYOf,
+  tileRGB, wallBits, worldImage, worldRGB, WORLD_IMG, isLand, squareCanvas, clean, opsOf, ridSq, sqXOf, sqYOf, sourceSquare, spawnCount: id => spawnN.get(id) || 0,
 };
 })();

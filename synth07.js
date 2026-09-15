@@ -49,7 +49,7 @@ function syLoad() {
     for (const P of bio) P.civ = P.folk && syCum(P.folk.e.filter(e => !watch.has(e[0]))) || P.folk;   // the townsfolk without the watch among them
     const an = j.animals || {};
     SY.data = { bio, ores: j.ores, trees: j.trees, fish: j.fish || [], lava: j.lava || 19, swamp: j.swamp || 7, stack: j.stack || {}, tplKinds: j.tpl, map: j.map || null, icons: j.icons || {},
-      animals: { fowl: syCum(an.fowl), stock: syCum(an.stock), small: syCum(an.small) } };
+      animals: { fowl: syCum(an.fowl), stock: syCum(an.stock), small: syCum(an.small) }, districts: j.districts || {}, features: j.features || {}, markets: j.markets || {} };
     return SY.data;
   }, e => { SY.loading = null; throw e; });
   return SY.loading;
@@ -101,6 +101,91 @@ function syRot(T, r) {
   for (let q = 0; q < I.length; q += 3) { const x = I[q + 1], y = I[q + 2]; I[q + 1] = tx(x, y, 1, 1); I[q + 2] = ty(x, y, 1, 1); }
   return rots[r] = { k: T.k, w: W2, l: L2, p: T.p, g, dv: new DataView(g.buffer), L: Lr, N, I, Z: T.Z, rots: null, turn: r, src: T };
 }
+/* ---- borrowed pieces: a district (36 tiles square) of a real town, or a feature (24) of real country — a farm, a ruin, a camp —
+   cut from the main map's own squares where synth.json says they lie, fetched from the tree through map07 the first time a made
+   city or a stretch of made country takes one. Its heights are pressed as a building's are; a building the cut would halve is
+   cleared to an empty lot (its tiles to the piece's own ground, its pieces and people gone); its people are its keepers and the
+   main map's anybodies, never its somebodies. The same shape as a building template, so everything that lays one lays this ---- */
+const SYP = new Map(), SYP_T = new Map();
+const syPieceKey = d => d[0] + ':' + d[1] + ':' + d[2];
+function syPiece(desc) {
+  const [X0, Y0, D, kind] = desc, key = syPieceKey(desc);
+  let p = SYP.get(key);
+  if (p) return p;
+  p = (async () => {
+    const rids = [];
+    for (let sx = X0 >> 6; sx <= (X0 + D - 1) >> 6; sx++) for (let sy = Y0 >> 6; sy <= (Y0 + D - 1) >> 6; sy++) rids.push((sx << 8) | sy);
+    const got = await Promise.all(rids.map(r => MAP07.sourceSquare(r))), by = new Map(rids.map((r, i) => [r, got[i]]));
+    const sq = (x, y) => by.get(((X0 + x) >> 6 << 8) | ((Y0 + y) >> 6)), ix = (x, y, pl) => pl * 4096 + ((X0 + x) & 63) * 64 + ((Y0 + y) & 63);
+    /* the buildings the cut halves: roofed runs touching the rim, and a tile round them for their walls */
+    const roof = new Uint8Array(D * D), cut = new Uint8Array(D * D), ul = new Map();
+    for (let x = 0; x < D; x++) for (let y = 0; y < D; y++) { const t = sq(x, y).t, i = ix(x, y, 0); if (t.FL[i] & 4) roof[x * D + y] = 1; else if (t.UL[i]) ul.set(t.UL[i], (ul.get(t.UL[i]) || 0) + 1); }
+    const ground = [...ul.entries()].sort((a, b) => b[1] - a[1])[0], seen = new Uint8Array(D * D);
+    for (let s0 = 0; s0 < D * D; s0++) {
+      if (!roof[s0] || seen[s0]) continue;
+      const comp = [s0], st = [s0];
+      let rim = false;
+      seen[s0] = 1;
+      while (st.length) {
+        const c = st.pop(), x = (c / D) | 0, y = c % D;
+        if (x < 2 || y < 2 || x >= D - 2 || y >= D - 2) rim = true;
+        for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const a = x + dx, b = y + dy, n = a * D + b; if (a >= 0 && b >= 0 && a < D && b < D && roof[n] && !seen[n]) { seen[n] = 1; comp.push(n); st.push(n); } }
+      }
+      if (rim) for (const c of comp) { const x = (c / D) | 0, y = c % D; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) if (x + a >= 0 && y + b >= 0 && x + a < D && y + b < D) cut[(x + a) * D + y + b] = 1; }
+    }
+    let P = 1;
+    const H0 = new Int32Array(D * D);
+    for (let x = 0; x < D; x++) for (let y = 0; y < D; y++) {
+      const t = sq(x, y).t;
+      H0[x * D + y] = t.H[ix(x, y, 0)];
+      if (!cut[x * D + y]) for (let pl = 1; pl < 4; pl++) if (t.UL[ix(x, y, pl)] || t.OL[ix(x, y, pl)]) P = Math.max(P, pl + 1);
+    }
+    const sorted = Array.from(H0).sort((a, b) => a - b), bh = sorted[sorted.length >> 1], flat = Math.min(1, 160 / Math.max(1, sorted[sorted.length - 1] - sorted[0]));
+    const g = new Uint8Array(P * D * D * 8), dv = new DataView(g.buffer);
+    for (let pl = 0; pl < P; pl++) for (let x = 0; x < D; x++) for (let y = 0; y < D; y++) {
+      const t = sq(x, y).t, i = ix(x, y, pl), o = ((pl * D + x) * D + y) * 8, g0 = H0[x * D + y] - bh, lift = Math.round(g0 * flat) - g0;
+      dv.setInt16(o + 6, clamp(t.H[i] - bh + lift, -32768, 32767), true);
+      if (cut[x * D + y]) { if (!pl && ground) dv.setUint16(o, ground[0], true); continue; }   // a halved building's lot: the piece's own ground, open
+      dv.setUint16(o, t.UL[i], true); dv.setUint16(o + 2, t.OL[i], true); g[o + 4] = t.SR[i]; g[o + 5] = t.FL[i];
+    }
+    const raw = [], ids = new Set();
+    for (const r of rids) {
+      const s = by.get(r), bx = (r >> 8) * 64, byy = (r & 255) * 64;
+      for (const q of s.locs) { const x = bx + q.x - X0, y = byy + q.y - Y0; if (x >= 0 && y >= 0 && x < D && y < D && !cut[x * D + y]) { raw.push([q, x, y]); ids.add(q.id); } }
+    }
+    const dd = ids.size ? await MAP07.defs('loc', [...ids]) : {}, L = [], Z = [];
+    for (const [q, x, y] of raw) {
+      const d = dd[q.id];
+      if (!d || /trapdoor|portal|manhole|cave|tunnel/i.test(MAP07.clean(d.name))) continue;
+      L.push(q.id, q.type, q.rot, x, y, q.plane);
+      if ((d.width || 1) !== 1 || (d.length || 1) !== 1) Z.push(L.length / 6 - 1, (d.width || 1) * 16 + (d.length || 1));
+    }
+    const rawN = [], nids = new Set();
+    for (const r of rids) for (const s of by.get(r).spawns) {
+      const x = s.x - X0, y = s.y - Y0;
+      if (x >= 0 && y >= 0 && x < D && y < D && !cut[x * D + y] && (s.plane | 0) < 4) { rawN.push(s); nids.add(s.as !== undefined ? s.as : s.id); }
+    }
+    const nd = nids.size ? await MAP07.defs('npc', [...nids]) : {}, N = [];
+    let staff = 0, folk = 0;
+    for (const s of rawN) {
+      const d = nd[s.as !== undefined ? s.as : s.id];
+      if (!d || !d.models) continue;
+      const o = MAP07.opsOf(d).map(x => x.toLowerCase());
+      if (o.includes('trade') || o.includes('bank')) { if (staff++ >= 3) continue; }
+      else if (MAP07.spawnCount(s.id) < 3 || (d.combatLevel | 0) > 40 || folk++ >= Math.round(D * D / 160)) continue;   // anybody, not somebody; nothing that starts a fight in the street
+      N.push(s.id, s.x - X0, s.y - Y0, s.plane | 0);
+    }
+    const I = [], M = typeof c7Get === 'function' ? c7Get('mapicons.json') : null;
+    if (M) for (const e of M.i) if (e[0] >= X0 && e[0] < X0 + D && e[1] >= Y0 && e[1] < Y0 + D && !e[2] && !cut[(e[0] - X0) * D + e[1] - Y0]) I.push(e[3], e[0] - X0, e[1] - Y0);
+    const t = { k: kind, w: D, l: D, p: P, g, dv, L, N, I, Z, rots: null, piece: key };
+    SYP_T.set(key, t);
+    return t;
+  })();
+  p.catch(() => { SYP.delete(key); });
+  SYP.set(key, p);
+  if (SYP.size > 160) { const k = SYP.keys().next().value; SYP.delete(k); SYP_T.delete(k); }
+  return p;
+}
 /* the ground under a tile: the seed's field, levelled where a made city stands, flattened onto its town's table as the seed does */
 function syField(gx, gy) {
   const z = -gy;
@@ -114,16 +199,17 @@ function syField(gx, gy) {
 /* a city levels its ground toward the country smoothed over 32 tiles — its hills roll on under it, its dunes and hummocks go —
    easing back to the country's own over its edge, so its plots and streets lie near flat */
 const SYC_FLAT = new Map();
-function syFlatAt(gx, gy) {
-  const fx = gx / 32, fy = gy / 32, x0 = Math.floor(fx), y0 = Math.floor(fy), tx = fx - x0, ty = fy - y0;
-  const at = (a, b) => { const k = a * 65536 + b; let h = SYC_FLAT.get(k); if (h === undefined) { if (SYC_FLAT.size > 60000) SYC_FLAT.clear(); SYC_FLAT.set(k, h = macroHeight(a * 32, -b * 32)); } return h; };
+function syFlatAt(gx, gy) {   // the country smoothed over 128 tiles: the long rise a city's streets follow
+  const fx = gx / 128, fy = gy / 128, x0 = Math.floor(fx), y0 = Math.floor(fy), tx = smoothstep(0, 1, fx - x0), ty = smoothstep(0, 1, fy - y0);
+  const at = (a, b) => { const k = a * 65536 + b; let h = SYC_FLAT.get(k); if (h === undefined) { if (SYC_FLAT.size > 60000) SYC_FLAT.clear(); SYC_FLAT.set(k, h = macroHeight(a * 128, -b * 128)); } return h; };
   const a0 = at(x0, y0), p = a0 + (at(x0 + 1, y0) - a0) * tx, c0 = at(x0, y0 + 1), q = c0 + (at(x0 + 1, y0 + 1) - c0) * tx;
   return p + (q - p) * ty;
 }
-function syCityLevel(gx, gy, m, list) {
+function syCityLevel(gx, gy, m, list) {   // its own rivers and lakes stay; its dry ground is laid near flat — halfway to its own table, the rest the country's long rise — never down into the sea
+  if (m < SEA) return m;
   for (const v of list) {
     const r = villageDist(v, gx, -gy) / v.sprawl;
-    if (r < 1.2) return m + (syFlatAt(gx, gy) - m) * 0.9 * (1 - smoothstep(0.9, 1.2, r));
+    if (r < 1.2) return m + (Math.max((syFlatAt(gx, gy) + v.y) / 2, SEA + 1.2) - m) * 0.95 * (1 - smoothstep(0.9, 1.2, r));
   }
   return m;
 }
@@ -236,15 +322,33 @@ function syCity(v) {
   const nFar = Math.min(far.length, 1 + (q > 0.45 ? 1 : 0) + (q > 0.8 ? 1 : 0)), fars = [];   // the further out, the more far countries a city has seen
   for (let k = 0; k < nFar; k++) fars.push(far[(h >>> (8 + k * 3)) % far.length]);
   const AV = v.sprawl < 110 ? [30, 32, 34, 36][h & 3] : v.sprawl < 320 ? [36, 40, 44, 44][h & 3] : [40, 44, 48, 52][h & 3];   // a town's blocks are a town's size
-  return v.syc = { v, key: gx + ':' + gy, gx, gy, b, bn, q, h, R: v.sprawl, AV, AW: v.sprawl >= 320 ? 4 : 3,
-    plaza: Math.max(2, Math.min(Math.floor(v.sprawl * 0.22), 3 + v.rank + Math.round(q * 9))), lane: P.paths.includes(10) ? 10 : P.path,
-    dens: 0.6 + 1.4 * q, sets: [...new Set([bn].concat(fall, fars))], nFall: 1 + fall.length, stock: SYC_STOCK.has(bn), T: null, ready: null, crowd: null };
+  /* the districts it borrows whole from the real towns of its country (and its neighbours', when its own are few): a few for a town,
+     more the further out and the greater the city */
+  const DS = SY.data.districts || {};
+  let pool = (DS[bn] || []).slice();
+  for (const k of fall) if (pool.length < 10) pool = pool.concat(DS[k] || []);
+  const nd = v.metro && AV >= 40 ? Math.min(pool.length, 5 + Math.round(8 * q)) : 0, dists = [];
+  for (let k = 0; k < pool.length * 3 && dists.length < nd; k++) { const d = pool[(hash2(gx + k * 17, gy - k * 29, S + 1741) >>> 0) % pool.length]; if (!dists.includes(d)) dists.push(d); }
+  const AW = v.sprawl >= 320 ? 4 : 3, plaza = Math.max(2, Math.min(Math.floor(v.sprawl * 0.22), 3 + v.rank + Math.round(q * 9) + (v.metro ? 4 : 0)));   // a great city's square is a great square
+  /* a great city's square holds a market: a real town's own (Draynor's, Ardougne's, Sophanem's...), its country's when it has one */
+  const MK = SY.data.markets || {}, all = [].concat(...Object.values(MK)), markets = (MK[bn] || []).length ? MK[bn] : all;
+  const market = v.metro && plaza * 2 + AW >= 24 && markets.length ? markets[(h >>> 13) % markets.length] : null;
+  return v.syc = { v, key: gx + ':' + gy, gx, gy, b, bn, q, h, R: v.sprawl, AV, AW, plaza, lane: P.paths.includes(10) ? 10 : P.path,
+    dens: 0.6 + 1.4 * q, sets: [...new Set([bn].concat(fall, fars))], nFall: 1 + fall.length, stock: SYC_STOCK.has(bn), dists, market, T: null, P: null, M: null, ready: null, crowd: null };
 }
-function syCityReady(C) {   // its country's buildings, its neighbours', and its far countries'
-  if (C.T) return Promise.resolve(C);
-  return C.ready || (C.ready = Promise.all(C.sets.map(syTpl)).then(T => { C.T = T; return C; }));
+function syCityReady(C) {   // its country's buildings, its neighbours', its far countries', its districts and its market (a piece that will not come is left out)
+  if (C.T && C.P && (!C.market || C.M !== null)) return Promise.resolve(C);
+  return C.ready || (C.ready = Promise.all([Promise.all(C.sets.map(syTpl)), Promise.all(C.dists.map(d => syPiece(d).catch(() => null))), C.market ? syPiece(C.market).catch(() => 0) : 0])
+    .then(([T, P, M]) => { C.T = T; C.P = P.filter(Boolean); C.M = M ? syRot(M, (C.h >>> 23) & 3) : 0; return C; }));
 }
-const syCityOK = C => !!(C.T || (C.sets.every(k => SY.tpl[k]) && (C.T = C.sets.map(k => SY.tpl[k]))));
+const syCityOK = C => !!((C.T || (C.sets.every(k => SY.tpl[k]) && (C.T = C.sets.map(k => SY.tpl[k])))) && (C.P || (C.dists.every(d => SYP_T.has(syPieceKey(d))) && (C.P = C.dists.map(d => SYP_T.get(syPieceKey(d))))))
+  && (!C.market || C.M !== null || (SYP_T.has(syPieceKey(C.market)) && (C.M = syRot(SYP_T.get(syPieceKey(C.market)), (C.h >>> 23) & 3)))));
+function syMarket(C) {   // the square's market as a laid piece, or null
+  if (!C.M) return null;
+  if (C.MP) return C.MP;
+  const cx = C.gx + (C.AW >> 1), cy = C.gy + (C.AW >> 1), x0 = cx - (C.M.w >> 1), y0 = cy - (C.M.l >> 1);
+  return C.MP = { t: C.M, x0, y0, x1: x0 + C.M.w - 1, y1: y0 + C.M.l - 1, base: syH(syField(cx, cy)) };
+}
 function syCityList(C, k, i, j, u) {   // the buildings a plot of kind k draws from
   const own = C.T[0], nf = C.T.length - C.nFall;
   if (nf > 0 && u < 0.06 + 0.16 * C.q) { const V = C.T[C.nFall + Math.floor(u * 997) % nf]; if (V && V[k] && V[k].length) return V[k]; }   // a far country's, for variety
@@ -267,7 +371,7 @@ function syCityPlot(C, p) {   // may this plot be built on: in the city, not in 
     const yy = syY(m);
     if (yy < lo) lo = yy; if (yy > hi) hi = yy;
   }
-  if (hi - lo > 2.4) return false;   // a hillside plot is left to the country
+  if (hi - lo > 3.2) return false;   // a hillside plot is left to the country (a gentler one stands on its eased footing)
   p.base = syH(syField(cx, cy));
   return true;
 }
@@ -283,7 +387,15 @@ function syCityBlock(C, i, j) {   // needs C.T (syCityOK)
   if (SYC.blocks.size > 6000) for (const k of [...SYC.blocks.keys()].slice(0, 1500)) SYC.blocks.delete(k);
   if (dq > EXT_MAX + 0.25) return B;   // wholly past any outline
   if (!heart && dq > 0.2 && hs % 100 < 5 + dq * 6) { B.park = 1; leaves.push([x0, y0, x1, y1]); }   // a park: the country's own ground, its trees and flowers
-  else {
+  if (!B.park && C.P.length && x1 - x0 + 1 >= 36) {   // a whole district of a real town, turned whichever way, in the heart and the market ring most
+    const pr = (heart ? 0.6 : dq < 0.3 ? 0.85 : dq < 0.6 ? 0.7 : dq < 0.85 ? 0.3 : 0.08) * (0.8 + 0.25 * C.q);
+    if (((hs >>> 3) % 1000) / 1000 < pr) {
+      const t = syRot(C.P[(hs >>> 11) % C.P.length], (hs >>> 21) & 3), off = (x1 - x0 + 1 - t.w) >> 1;
+      const p = { t, x0: x0 + off, y0: y0 + off, x1: x0 + off + t.w - 1, y1: y0 + off + t.l - 1, base: 0 };
+      if (syCityPlot(C, p)) { B.parcels.push(p); B.district = 1; }
+    }
+  }
+  if (!B.park && !B.district) {
     const kinds = SYC_KIND.find(e => (heart ? 0 : dq) <= e[0])[1], deep = heart || dq < 0.16 ? 0 : dq < 0.42 ? 1 : 3;
     const cut = (a, b, c, d, depth, hh) => {   // side streets two tiles wide, each block split along its longer side
       const w = c - a + 1, l = d - b + 1;
@@ -330,6 +442,7 @@ function syCityBlock(C, i, j) {   // needs C.T (syCityOK)
         for (let k = x; k < x + w; k++) top[k] = y + l;
       }
     }
+    if (B.parcels.length < 2 && !heart) B.park = 1;   // a block the ground would hardly build on grows the country's trees instead of standing bare
   }
   /* its people and beasts, each tied to a place (sySquare keeps only those standing where their role allows) */
   const PP = B.people, open = (x, y) => !B.parcels.some(p => x >= p.x0 - 1 && x <= p.x1 + 1 && y >= p.y0 - 1 && y <= p.y1 + 1) && !B.streets.some(r => x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3]);
@@ -386,8 +499,11 @@ function syCityInto(C, bx, by, D, sq) {
   const i0 = Math.floor((bx - 4 - C.gx) / AV), i1 = Math.floor((bx + 67 - C.gx) / AV), j0 = Math.floor((by - 4 - C.gy) / AV), j1 = Math.floor((by + 67 - C.gy) / AV), nj = j1 - j0 + 1;
   const blocks = [];
   for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) blocks.push(syCityBlock(C, i, j));
-  const plot = new Uint8Array(4096);
-  for (const B of blocks) for (const p of B.parcels) {
+  const plot = new Uint8Array(4096), pars = [];
+  for (const B of blocks) for (const p of B.parcels) pars.push(p);
+  const mk = syMarket(C);
+  if (mk && !(mk.x1 + 4 < bx || mk.x0 - 4 >= bx + 64 || mk.y1 + 4 < by || mk.y0 - 4 >= by + 64)) pars.push(mk);   // the square's market, laid last in every square alike
+  for (const p of pars) {
     for (let x = Math.max(p.x0, bx); x <= Math.min(p.x1, bx + 63); x++) for (let y = Math.max(p.y0, by); y <= Math.min(p.y1, by + 63); y++) plot[(x - bx) * 64 + y - by] = 1;
   }
   for (let x = 0; x < 64; x++) for (let y = 0; y < 64; y++) {
@@ -400,7 +516,7 @@ function syCityInto(C, bx, by, D, sq) {
     if (!paved) for (const r of B.streets) if (gx >= r[0] && gx <= r[2] && gy >= r[1] && gy <= r[3]) { paved = true; break; }
     if (paved) { OL[k] = C.lane; inTown[k] = 1; }
   }
-  for (const B of blocks) for (const s of B.parcels) {   // in one order every square agrees on, so a footing shared across a border eases the same
+  for (const s of pars) {   // in one order every square agrees on, so a footing shared across a border eases the same
     if (s.x1 + 4 < bx || s.x0 - 4 >= bx + 64 || s.y1 + 4 < by || s.y0 - 4 >= by + 64) continue;
     for (let gx = Math.max(s.x0 - 3, bx); gx <= Math.min(s.x1 + 3, bx + 63); gx++) for (let gy = Math.max(s.y0 - 3, by); gy <= Math.min(s.y1 + 3, by + 63); gy++) {
       const i = (gx - bx) * 64 + (gy - by);
@@ -427,6 +543,38 @@ function syCityInto(C, bx, by, D, sq) {
   };
   for (const B of blocks) B.people.forEach(person);
   if (bx <= C.gx + C.AW + C.plaza && bx + 63 >= C.gx - C.plaza && by <= C.gy + C.AW + C.plaza && by + 63 >= C.gy - C.plaza) syCrowd(C).forEach(person);
+}
+/* a feature of the country for a cell of SYF_CELL tiles: a farm, a ruin, a graveyard or a camp of the ground's own country (the next
+   country's when its own are few; in the wilds, no farms), more often the further out, placed only where the ground takes it —
+   dry, near level, off the highways, clear of every town and city, short of the wilderness ditch unless it is a wilds piece */
+const SYF_CELL = 100, SYF = new Map();
+function syFeatureAt(cx, cy) {
+  const key = cx + ':' + cy;
+  let f = SYF.get(key);
+  if (f !== undefined) return f;
+  f = null;
+  const D = SY.data, h = hash2(cx * 5 + 11, cy * 7 - 3, S + 1740) >>> 0, gx = cx * SYF_CELL + 8 + h % (SYF_CELL - 40), gy = cy * SYF_CELL + 8 + (h >>> 10) % (SYF_CELL - 40);
+  if (g7Out(gx, -gy) > 320 && (h >>> 20) % 100 < 45 + 35 * synReach(gx, -gy)) {
+    const bn = SY_BIO[syBioAt(gx + 12, gy + 12)], FS = D.features || {};
+    let list = (FS[bn] || []).slice();
+    if (list.length < 8) for (const k of SY_FALL[bn] || ['meadows']) list = list.concat(FS[k] || []);
+    if (bn === 'wilds') list = list.filter(d => d[3] !== 'farm');
+    if (list.length) {
+      const desc = list[(h >>> 3) % list.length], n = desc[2], mx = gx + (n >> 1), my = gy + (n >> 1);
+      let ok = !nearVillage(mx, -my), lo = 1e9, hi = -1e9;
+      for (const [x, y] of [[gx, gy], [gx + n - 1, gy], [gx, gy + n - 1], [gx + n - 1, gy + n - 1], [mx, my]]) {
+        if (!ok) break;
+        if (cityAt(x, -y) || highwayAt(x, -y) > 0.02 || (bn !== 'wilds' && wildD(x, -y) > -20)) { ok = false; break; }
+        const m = syField(x, y);
+        if (m < SEA + 0.3) { ok = false; break; }
+        const yy = syY(m); if (yy < lo) lo = yy; if (yy > hi) hi = yy;
+      }
+      if (ok && hi - lo <= 3.6) f = { desc, r: (h >>> 27) & 3, x0: gx, y0: gy, x1: gx + n - 1, y1: gy + n - 1, base: syH(syField(mx, my)) };
+    }
+  }
+  if (SYF.size > 20000) SYF.clear();
+  SYF.set(key, f);
+  return f;
 }
 /* the settlements a square must lay: the made cities whose outlines may reach it, and the hamlets and villages whose tables do */
 async function sySettleNear(bx, by) {
@@ -512,6 +660,32 @@ async function sySquare(rid, yieldFn) {
     }
   }
   await pause();
+  /* the country's own pieces: farms, ruins, graveyards and camps borrowed whole from the main map (syFeatureAt), eased onto the
+     ground as a building is, their keepers and beasts with them */
+  for (let cx = Math.floor((bx - 30) / SYF_CELL); cx <= Math.floor((bx + 67) / SYF_CELL); cx++) for (let cy = Math.floor((by - 30) / SYF_CELL); cy <= Math.floor((by + 67) / SYF_CELL); cy++) {
+    const f = syFeatureAt(cx, cy);
+    if (!f || f.x1 + 4 < bx || f.x0 - 4 >= bx + 64 || f.y1 + 4 < by || f.y0 - 4 >= by + 64) continue;
+    let t;
+    try { t = syRot(await syPiece(f.desc), f.r); } catch (e) { continue; }   // a piece the tree will not give: the country stays bare there
+    const s = { t, x0: f.x0, y0: f.y0, x1: f.x0 + t.w - 1, y1: f.y0 + t.l - 1, base: f.base };
+    for (let gx = Math.max(s.x0 - 3, bx); gx <= Math.min(s.x1 + 3, bx + 63); gx++) for (let gy = Math.max(s.y0 - 3, by); gy <= Math.min(s.y1 + 3, by + 63); gy++) {
+      const i = (gx - bx) * 64 + (gy - by);
+      if ((gx >= s.x0 && gx <= s.x1 && gy >= s.y0 && gy <= s.y1) || FL[i] & 1 || occ[i]) continue;
+      const k = 1 - Math.max(s.x0 - gx, gx - s.x1, s.y0 - gy, gy - s.y1) / 4;
+      H[i] = Math.round(H[i] + (s.base - H[i]) * k);
+      H[4096 + i] = H[i] - 240; H[8192 + i] = H[i] - 480; H[12288 + i] = H[i] - 720;
+    }
+    syStamp(s, s, bx, by, H, UL, OL, SR, FL, locs, spawns, occ);
+    const A = D.animals || {}, P = D.bio[BI[Math.min(4095, Math.max(0, (f.x0 + 8 - bx) * 64 + f.y0 + 8 - by))]];
+    const hf = hash2(f.x0, f.y0, S + 1745) >>> 0, beasts = t.k === 'farm' ? 2 + hf % 4 : t.k === 'camp' ? 1 + hf % 2 : 0;
+    for (let q = 0; q < beasts; q++) {   // hens and cattle on a farm, a traveller or two at a camp
+      const hq = hash2(hf + q * 13, q, S + 1746) >>> 0, x = f.x0 + 2 + hq % (t.w - 4), y = f.y0 + 2 + (hq >>> 8) % (t.l - 4);
+      if (x < bx || x >= bx + 64 || y < by || y >= by + 64) continue;
+      const e = t.k === 'farm' ? syPick(q & 1 && A.stock ? A.stock : A.fowl, syU(x, y, 1747)) : syPick(P.street || P.civ || P.folk, syU(x, y, 1747));
+      if (e) spawns.push({ id: e[0], x, y, plane: 0, wr: 3 });
+    }
+    await pause();
+  }
   /* what grows and lies about: trees, scenery, ground cover; mines and groves where the seed sites them */
   const fits = (x, y, w, l, park) => { if (x + w > 64 || y + l > 64) return false; for (let a = 0; a < w; a++) for (let c = 0; c < l; c++) { const j = (x + a) * 64 + y + c; if (occ[j] || OL[j] || FL[j] & 1 || (inTown[j] && !(park && inTown[j] === 2))) return false; } return true; };
   const claim = (x, y, w, l) => { for (let a = 0; a < w; a++) for (let c = 0; c < l; c++) occ[(x + a) * 64 + y + c] = 1; };
@@ -701,8 +875,10 @@ function syMapTile(tx, tz, tpp, fine) {
   if (fine) {
     for (let j = 0; j < 64; j++) for (let i = 0; i < 64; i++) { const c = syGroundRGB(ox + i, -(oz + j), 0); SYM_B[j * 64 + i] = _syo[2] & 1; for (let b = 0; b < 2; b++) for (let a = 0; a < 2; a++) put(((j * 2 + b) * N + i * 2 + a) * 4, c, 1); }
     for (const C of cities) if (!syMapCity(C, ox, oz, 1, 2, d, N, (px, py) => SYM_B[py * 64 + px])) cv.prov = 1;
+    if (!syMapFeatures(ox, oz, 1, 2, d, N)) cv.prov = 1;
     g.putImageData(im, 0, 0);
     for (const C of cities) if (C.T) syMapCityWalls(C, ox, oz, g);
+    syMapFeatures(ox, oz, 1, 2, d, N, g);
     return cv;
   }
   const pal = SYM.pal, half = (tpp - 1) / 2, Mh = SYM_M, B = SYM_B;
@@ -751,6 +927,7 @@ function syMapTile(tx, tz, tpp, fine) {
     put(p, col, clamp(1 + sl * 0.9, 0.82, 1.18));
   }
   for (const C of cities) if (tpp <= 2 && !syMapCity(C, ox, oz, tpp, 1, d, N, (px, py) => Mh[(py + 1) * 66 + px + 1] < SEA)) cv.prov = 1;   // closer in, its streets and its buildings' floors
+  if (tpp <= 2 && !syMapFeatures(ox, oz, tpp, 1, d, N)) cv.prov = 1;   // and the country's farms, ruins and camps
   g.putImageData(im, 0, 0);
   const X0 = ox - 0.5, Z0 = oz - 0.5;   // world to pixel: (x - X0) / tpp
   if (tpp <= 16) {   // the highways, a line each, in the paving the country's roads wear on the picture
@@ -783,14 +960,15 @@ function syMapCity(C, ox, oz, tpp, K, d, N, wet) {   // wet(px, py): the piece's
   const v = C.v, AV = C.AV, AW = C.AW, e = C.R * EXT_MAX + 2, span = 64 * tpp, lane = MAP07.tileColor(C.lane, 0);
   const pa = Math.max(0, Math.floor((C.gx - e - ox) / tpp)), pb = Math.min(63, Math.ceil((C.gx + e - ox) / tpp));
   const ra = Math.max(0, Math.floor((-(C.gy + e) - oz) / tpp)), rb = Math.min(63, Math.ceil((-(C.gy - e) - oz) / tpp));
-  let bi = 1e9, bj = 1e9, B = null;
+  let bi = 1e9, bj = 1e9, B = null, list = null;
+  const mk = syMarket(C);
   for (let py = ra; py <= rb; py++) for (let px = pa; px <= pb; px++) {
     const gx = ox + px * tpp, gy = -(oz + py * tpp);
     if (!cityHolds(v, gx, -gy)) continue;
     const i = Math.floor((gx - C.gx) / AV), j = Math.floor((gy - C.gy) / AV);
-    if (i !== bi || j !== bj) { bi = i; bj = j; B = syCityBlock(C, i, j); }
+    if (i !== bi || j !== bj) { bi = i; bj = j; B = syCityBlock(C, i, j); list = mk && i >= -1 && i <= 0 && j >= -1 && j <= 0 ? B.parcels.concat([mk]) : B.parcels; }
     let c = -1;
-    for (const p of B.parcels) {
+    for (const p of list) {
       if (gx < p.x0 || gx > p.x1 || gy < p.y0 || gy > p.y1) continue;
       const T = p.t, x = gx - p.x0, y = gy - p.y0;
       for (let pl = 0; pl < Math.min(2, T.p) && c < 0; pl++) { const r = ((pl * T.w + x) * T.l + y) * 8; c = MAP07.tileColor(T.dv.getUint16(r + 2, true), T.dv.getUint16(r, true)); }
@@ -809,23 +987,47 @@ function syMapCity(C, ox, oz, tpp, K, d, N, wet) {   // wet(px, py): the piece's
 }
 function syMapCityWalls(C, ox, oz, g) {   // a fine piece's walls in white, two pixels a tile
   const AV = C.AV, i0 = Math.floor((ox - 1 - C.gx) / AV), i1 = Math.floor((ox + 64 - C.gx) / AV), j0 = Math.floor((-(oz + 64) - C.gy) / AV), j1 = Math.floor((-oz + 1 - C.gy) / AV), e = Math.ceil(C.R * EXT_MAX / AV) + 1;
+  for (let i = Math.max(i0, -e); i <= Math.min(i1, e); i++) for (let j = Math.max(j0, -e); j <= Math.min(j1, e); j++)
+    for (const p of syCityBlock(C, i, j).parcels) if (!(p.x1 < ox || p.x0 >= ox + 64 || p.y1 < -(oz + 63) || p.y0 > -oz)) syMapWalls(p.t, p.x0, p.y0, ox, oz, g);
+  const mk = syMarket(C);
+  if (mk && !(mk.x1 < ox || mk.x0 >= ox + 64 || mk.y1 < -(oz + 63) || mk.y0 > -oz)) syMapWalls(mk.t, mk.x0, mk.y0, ox, oz, g);
+}
+function syMapWalls(t, x0, y0, ox, oz, g) {   // one laid piece's walls into a fine piece
   g.fillStyle = 'rgba(238,238,238,0.9)';
-  for (let i = Math.max(i0, -e); i <= Math.min(i1, e); i++) for (let j = Math.max(j0, -e); j <= Math.min(j1, e); j++) {
-    for (const p of syCityBlock(C, i, j).parcels) {
-      if (p.x1 < ox || p.x0 >= ox + 64 || p.y1 < -(oz + 63) || p.y0 > -oz) continue;
-      const Ls = p.t.L;
-      for (let q = 0; q < Ls.length; q += 6) {
-        const type = Ls[q + 1];
-        if (Ls[q + 5] !== 0 || (type !== 0 && type !== 2)) continue;
-        const X = (p.x0 + Ls[q + 3] - ox) * 2, Y = (-(p.y0 + Ls[q + 4]) - oz) * 2;
-        if (X < -2 || Y < -2 || X > 128 || Y > 128) continue;
-        const edge = r => r === 0 ? g.fillRect(X, Y, 1, 2) : r === 1 ? g.fillRect(X, Y, 2, 1) : r === 2 ? g.fillRect(X + 1, Y, 1, 2) : g.fillRect(X, Y + 1, 2, 1);
-        edge(Ls[q + 2]); if (type === 2) edge((Ls[q + 2] + 1) & 3);
-      }
-    }
+  const Ls = t.L;
+  for (let q = 0; q < Ls.length; q += 6) {
+    const type = Ls[q + 1];
+    if (Ls[q + 5] !== 0 || (type !== 0 && type !== 2)) continue;
+    const X = (x0 + Ls[q + 3] - ox) * 2, Y = (-(y0 + Ls[q + 4]) - oz) * 2;
+    if (X < -2 || Y < -2 || X > 128 || Y > 128) continue;
+    const edge = r => r === 0 ? g.fillRect(X, Y, 1, 2) : r === 1 ? g.fillRect(X, Y, 2, 1) : r === 2 ? g.fillRect(X + 1, Y, 1, 2) : g.fillRect(X, Y + 1, 2, 1);
+    edge(Ls[q + 2]); if (type === 2) edge((Ls[q + 2] + 1) & 3);
   }
 }
-function syMapFresh() { for (const k of SYM.prov) wmTiles.delete(k); SYM.prov.clear(); wmDirty = 1; }   // a city's buildings came: its pieces painted without them go again
+/* the country's features (syFeatureAt) into a piece's pixels, as the squares lay them; false while one is still on its way */
+function syMapFeatures(ox, oz, tpp, K, d, N, g) {
+  const span = 64 * tpp;
+  let whole = true;
+  for (let cx = Math.floor((ox - 30) / SYF_CELL); cx <= Math.floor((ox + span) / SYF_CELL); cx++)
+    for (let cy = Math.floor((-(oz + span) - 30) / SYF_CELL); cy <= Math.floor(-oz / SYF_CELL); cy++) {
+      const f = syFeatureAt(cx, cy);
+      if (!f || f.x1 < ox || f.x0 >= ox + span || f.y1 < -(oz + span - 1) || f.y0 > -oz) continue;
+      const t0 = SYP_T.get(syPieceKey(f.desc));
+      if (!t0) { whole = false; syPiece(f.desc).then(syMapFresh, () => {}); continue; }
+      const t = syRot(t0, f.r);
+      if (g) { syMapWalls(t, f.x0, f.y0, ox, oz, g); continue; }
+      for (let py = 0; py < 64; py++) for (let px = 0; px < 64; px++) {
+        const x = ox + px * tpp - f.x0, y = -(oz + py * tpp) - f.y0;
+        if (x < 0 || y < 0 || x >= t.w || y >= t.l) continue;
+        let c = -1;
+        for (let pl = 0; pl < Math.min(2, t.p) && c < 0; pl++) { const r = ((pl * t.w + x) * t.l + y) * 8; c = MAP07.tileColor(t.dv.getUint16(r + 2, true), t.dv.getUint16(r, true)); }
+        if (c < 0) continue;
+        for (let b = 0; b < K; b++) for (let a = 0; a < K; a++) { const o = ((py * K + b) * N + px * K + a) * 4; d[o] = c >> 16 & 255; d[o + 1] = c >> 8 & 255; d[o + 2] = c & 255; d[o + 3] = 255; }
+      }
+    }
+  return whole;
+}
+function syMapFresh() { for (const k of SYM.prov) wmTiles.delete(k); SYM.prov.clear(); wmDirty = 1; }   // a city's buildings or a feature came: its pieces painted without them go again
 /* a town's plan for the world map, built once its buildings are laid out (syTown): { cv, x0, y1, W, L, icons } or null */
 function syMapTown(v) {
   const key = Math.round(v.x) + ':' + Math.round(v.z);

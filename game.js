@@ -10720,7 +10720,18 @@ function tpTo(x, z, where, cap, pl) {
 }
 const tpV = (v, what, cap) => { if (!v) return say('There is no ' + what + ' near enough to reach.', 'bad'); const s = safeSpotIn(v); return tpTo(s.x, s.z, 'to ' + villageName(v), cap); };
 const nearCity = R => nearestOf(SETTLE_CELL, R, (a, b) => { const v = villageAt(a, b); return v && v.rank >= 3 ? v : null; });   // nearest settlement of city rank, R cells out
-const tpTown = (city, cap) => { const tw = m7Town(P.tx, P.tz, city); return tw ? tpTo(tw.x, -tw.y, 'to ' + tw.n, cap, 0) : say('There is no ' + (city ? 'city' : 'settlement') + ' near enough to reach.', 'bad'); };   // Gielinor's towns stand where the 2007 map put them
+const tpTown = (city, cap) => {   // Gielinor's towns stand where the 2007 map put them; a city spell out past the rectangle finds the made world's great cities too
+  const tw = m7Town(P.tx, P.tz, city);
+  if (city && SYN && typeof syCity === 'function') {
+    let best = null, bd = tw ? Math.hypot(tw.x - P.tx, -tw.y - P.tz) : Infinity;
+    for (const R of [1500, 5000, 14000]) {   // widening, and only as far as needed: every ring's cities are cached for the next ask
+      for (const v of citiesIn(P.tx - R, P.tz - R, P.tx + R, P.tz + R)) { const d = Math.hypot(v.x - P.tx, v.z - P.tz); if (v.metro && d < bd) { bd = d; best = v; } }
+      if (best || bd < R) break;
+    }
+    if (best) { const C = syCity(best); return tpTo(C.gx + (C.AW >> 1), -(C.gy + (C.AW >> 1)), 'to ' + villageName(best), cap, 0); }   // its heart square
+  }
+  return tw ? tpTo(tw.x, -tw.y, 'to ' + tw.n, cap, 0) : say('There is no ' + (city ? 'city' : 'settlement') + ' near enough to reach.', 'bad');
+};
 function villageTp(cap) { if (M7) return tpTown(0, cap); const f = tpFrom(); return tpV(nearestVillageTo(f.x, f.z, 12), 'settlement', cap); }
 function cityTp(cap) { return M7 ? tpTown(1, cap) : tpV(nearCity(6), 'city', cap); }
 function homeTp() {

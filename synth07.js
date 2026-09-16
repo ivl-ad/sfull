@@ -330,13 +330,30 @@ function syFlatAt(gx, gy) {   // the country smoothed over 128 tiles: the long r
   const a0 = at(x0, y0), p = a0 + (at(x0 + 1, y0) - a0) * tx, c0 = at(x0, y0 + 1), q = c0 + (at(x0 + 1, y0 + 1) - c0) * tx;
   return p + (q - p) * ty;
 }
-function syCityLevel(gx, gy, m, list) {   // its own rivers and lakes stay; its dry ground is laid near flat — halfway to its own table, the rest the country's long rise — never down into the sea
+/* its own rivers and lakes stay; its dry ground is laid near flat — halfway to its own table, the rest the country's long rise — never
+   down into the sea, and coming down to meet its water: the lower the country lies (the nearer a shore or a river's bank, where the
+   seed's field sinks toward the sea), the less it is raised, so the water is met by a bank and never left at the foot of a wall with
+   the ground lifted tiles above it (a coast city on a table of 20 stood five tiles over its own harbour) */
+function syCityLevel(gx, gy, m, list) {
   if (m < SEA) return m;
   for (const v of list) {
     const r = villageDist(v, gx, -gy) / v.sprawl;
-    if (r < 1.2) return m + (Math.max((syFlatAt(gx, gy) + v.y) / 2, SEA + 1.2) - m) * 0.95 * (1 - smoothstep(0.9, 1.2, r));
+    if (r < 1.2) return m + (Math.max((syFlatAt(gx, gy) + v.y) / 2, SEA + 1.2) - m) * 0.95 * (1 - smoothstep(0.9, 1.2, r)) * smoothstep(SEA, SEA + 8, m);
   }
   return m;
+}
+/* the country's own water at a tile as sySquare's first pass lays it — the four-tile lattice between, a town's table, a highway's
+   causeway — for the rows just past a square's edge, which its neighbour makes (a city only ever raises dry ground; its relief
+   rides dry ground too). lat: the lattice's heights, kept for the pass */
+function syWetBase(gx, gy, lat) {
+  const i = Math.floor(gx / 4), j = Math.floor(gy / 4), tx = (gx - i * 4) / 4, ty = (gy - j * 4) / 4;
+  const g = (a, b) => { const k = a * 1048576 + b; let h = lat.get(k); if (h === undefined) lat.set(k, h = Math.fround(macroHeight(a * 4, -(b * 4)))); return h; };   // as the square's own Float32 lattice holds them
+  const a = g(i, j) + (g(i + 1, j) - g(i, j)) * tx, c = g(i, j + 1) + (g(i + 1, j + 1) - g(i, j + 1)) * tx;
+  let m = a + (c - a) * ty;
+  if (m >= SEA) return false;
+  const n = nearVillage(gx, -gy);
+  if (n) m += (n.v.y - m) * (1 - smoothstep(0.98, 1.4, n.d / n.v.r));
+  return m < SEA && !(wildD(gx, -gy) <= 0 && m > -3.5 && highwayAt(gx, -gy) > 0.42);
 }
 const syBioAt = (gx, gy) => wildD(gx, -gy) > 0 ? SY_WILD : Math.max(0, SY_BIO.indexOf(regionAt(gx, -gy).a.k));
 /* one tile's ground: [underlay, overlay, flags] into o (heights and scenery come with the square) */
@@ -973,6 +990,20 @@ async function sySquare(rid, yieldFn) {
     }
     await pause();
   }
+  /* the water lies level: a tile's height is its south-west corner, and its other three are its neighbours', so a tile of water beside
+     raised ground (a bank, a structure's eased footing) tilted its sheet up the slope and the client's flowing texture ran up the wall
+     — water pouring sideways out of nothing. Every corner the country's own water touches stands at the water's height; a corner a
+     building's tile shares keeps the building's, and the tiles past the square's west and south edges answer from the field */
+  {
+    const lat = new Map(), wet = (x, y) => x >= 0 && y >= 0 ? (FL[x * 64 + y] & 1) && !occ[x * 64 + y] : syWetBase(bx + x, by + y, lat);
+    for (let x = 0; x < 64; x++) for (let y = 0; y < 64; y++) {
+      const i = x * 64 + y;
+      if (!H[i] || occ[i] || (x && occ[i - 64]) || (y && occ[i - 1]) || (x && y && occ[i - 65])) continue;
+      if (!wet(x, y) && !wet(x - 1, y) && !wet(x, y - 1) && !wet(x - 1, y - 1)) continue;
+      H[i] = 0; H[4096 + i] = -240; H[8192 + i] = -480; H[12288 + i] = -720;
+    }
+  }
+  await pause();
   /* what grows and lies about: trees, scenery, ground cover; mines and groves where the seed sites them */
   const fits = (x, y, w, l, park) => { if (x + w > 64 || y + l > 64) return false; for (let a = 0; a < w; a++) for (let c = 0; c < l; c++) { const j = (x + a) * 64 + y + c; if (occ[j] || OL[j] || FL[j] & 1 || (inTown[j] && !(park && inTown[j] === 2))) return false; } return true; };
   const claim = (x, y, w, l) => { for (let a = 0; a < w; a++) for (let c = 0; c < l; c++) occ[(x + a) * 64 + y + c] = 1; };

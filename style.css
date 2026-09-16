@@ -109,6 +109,10 @@
   .mini{position:absolute;z-index:2;width:18px;height:16px;display:grid;place-items:center;font-size:13px;line-height:1;font-weight:700;
     color:var(--dim);background:var(--grad);border:1px solid var(--ink);border-radius:2px;cursor:pointer}
   #invmin{top:-19px;right:0}
+  /* 1-click drop (game.js setOneDrop): beside the fold handle, only while the pack's tab is open; lit red while it is on */
+  #invdrop{display:none;top:-19px;right:22px}
+  body.tabinv:not(.invmin) #invdrop{display:grid}
+  #invdrop.on{color:#fff;background:linear-gradient(180deg,#9a3524,#5e1b10);box-shadow:0 0 6px rgba(255,90,50,.65)}
   #chatmin{top:-2px;right:2px}
   .mini:hover{color:var(--amber)}
   body.invmin #tabs,body.invmin #panes,body.chatmin #chat,body.chatmin #chatbar{display:none}
@@ -419,13 +423,25 @@
   body.osui .slot img{width:auto;height:auto}
   body.osui #dghost{opacity:.5}
   body.osui #dghost .osItem{position:relative;transform:scale(var(--oss,1));transform-origin:0 0}
-  #osChat{left:0;bottom:0;width:519px;height:165px;transform:scale(var(--osc,1));transform-origin:bottom left}
+  /* touch-action/user-select: its drags slide the box and scroll the log, and never select its text (game.js osChatGestures) */
+  #osChat{left:0;bottom:0;width:519px;height:165px;transform:scale(var(--osc,1));transform-origin:bottom left;touch-action:none;-webkit-user-select:none;user-select:none}
   #osChat .osHit{pointer-events:auto;cursor:pointer}
+  .osChatShade{top:0;width:30px;height:165px;z-index:3;pointer-events:none}
+  .osChatShade.l{left:0;background:linear-gradient(90deg,rgba(0,0,0,.62),rgba(0,0,0,.25) 40%,rgba(0,0,0,0))}
+  .osChatShade.r{right:0;background:linear-gradient(270deg,rgba(0,0,0,.62),rgba(0,0,0,.25) 40%,rgba(0,0,0,0))}
+  .osChatShade::after{content:'';position:absolute;top:62px;width:9px;height:9px;border:solid #ffe8b0;border-width:3px 3px 0 0;filter:drop-shadow(1px 1px 0 #000)}   /* a chevron: there is more that way */
+  .osChatShade.l::after{left:7px;transform:rotate(-135deg)}
+  .osChatShade.r::after{right:7px;transform:rotate(45deg)}
+  body.chatmin .osChatShade{top:142px;height:23px}
+  body.chatmin .osChatShade::after{top:6px}
+  .osChatHbar{top:138px;height:4px;border-radius:2px;background:#ffe8b0;box-shadow:0 0 0 1px #000;opacity:.8;z-index:3;pointer-events:none}
+  body.chatmin .osChatHbar{top:161px}
   body.osui #chatwrap{display:none}
   body.chatmin #osChat .osChatBody{display:none}
   body.osui #osChat #chatbar{position:absolute;left:7px;top:120px;bottom:auto;width:505px;height:16px;z-index:2;display:block;opacity:0;pointer-events:auto}
   body.osui #osChat #chatin{width:100%;height:16px;padding:0;border:0;cursor:text}
   body.osui #invmin,body.osui.invmin #invmin{position:fixed;top:3px;bottom:auto;left:auto;right:calc(249px * var(--oss,1) + 3px);z-index:26}
+  body.osui #invdrop{position:fixed;top:22px;bottom:auto;left:auto;right:calc(249px * var(--oss,1) + 3px);z-index:26}
   body.osui #chatmin,body.osui.chatmin #chatmin{position:fixed;top:auto;bottom:3px;right:auto;left:calc(519px * var(--osc,1) + 3px);z-index:26}
   #osHover{display:none;position:fixed;left:0;top:0;z-index:6;pointer-events:none;transform:scale(var(--oss,1));transform-origin:0 0}
   body.osui #osHover{display:block}
@@ -464,6 +480,7 @@
   body.osui.osFix #osPanes{left:547px}
   body.osui.osFix #osChat{left:var(--osx,0);top:calc(var(--osy,0px) + 338px * var(--oss,1));bottom:auto;transform:scale(var(--oss,1));transform-origin:top left}
   body.osui.osFix #invmin,body.osui.osFix #chatmin{display:none}
+  body.osui.osFix #invdrop{left:calc(var(--osx,0px) + 524px * var(--oss,1));top:calc(var(--osy,0px) + 209px * var(--oss,1));right:auto;transform:scale(var(--oss,1));transform-origin:0 0}   /* on the stone between the viewport and the pack */
   body.osui.osFix #osHover{left:var(--osvx,0);top:var(--osvy,0)}
   body.osui.osFix #xpd{right:calc(var(--osvr,0px) + 8px);top:calc(var(--osvy,0px) + 20px)}
   body.osui.osFix #modal,body.osui.osFix #tradeWrap{padding:var(--osvy,0) var(--osvr,0) var(--osvb,0) var(--osvx,0)}
@@ -475,6 +492,7 @@
   body.osui.osRz #osTop .osBg{visibility:hidden}
   body.osui.osRz #osChat{width:var(--oscw,519px);overflow:hidden;transform:scale(var(--oss,1))}
   body.osui.osRz #invmin,body.osui.osRz.invmin #invmin{top:auto;bottom:calc(336px * var(--oss,1) - 22px);right:calc(249px * var(--oss,1) + 3px)}
+  body.osui.osRz #invdrop{top:auto;bottom:calc(336px * var(--oss,1) - 42px);right:calc(249px * var(--oss,1) + 3px)}
   body.osui.osRz #chatmin,body.osui.osRz.chatmin #chatmin{left:calc(var(--oscw,519px) * var(--oss,1) + 3px)}
   /* the round minimap (game.js osMapFrame) slid well into the corner with its compass and orbs, and the world map globe set where
      the special attack orb's mirror stands across the map's middle (the orb's ring at 72,145 in the box, the map's middle at 126,80) */

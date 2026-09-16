@@ -4255,7 +4255,7 @@ function showMark(x, z, hostile) {
 }
 function walkTo(wx, wz) {
   const x = Math.round(wx), z = Math.round(wz);
-  closeOverlays();
+  closeOverlays(); setOneDrop(0, 1);
   P.task = null;
   const p = findPath(P.tx, P.tz, x, z, 0);
   if (!p || !p.length) { say("You can't reach that."); P.goal = null; return; }
@@ -5410,7 +5410,7 @@ function paintModal(title, html, foot) {
   modalEl.classList.add('on');
   showTab('inv');
 }
-function openBank() { clearUse(); P.uspell = null; openShop = null; bankOpen = 1; sfx(2021); say('The banker pulls out your vault book.'); drawBank(); }   // one counter at a time: with both open the pack deposited under a visible shop
+function openBank() { clearUse(); setOneDrop(0, 1); P.uspell = null; openShop = null; bankOpen = 1; sfx(2021); say('The banker pulls out your vault book.'); drawBank(); }   // one counter at a time: with both open the pack deposited under a visible shop
 let bankQ = '', bankMode = '1', bankX = 50;   // the 2007 quantity row: 1 / 5 / 10 / X / All drives both directions
 const bankQty = () => bankMode === 'all' ? 1e9 : bankMode === 'x' ? bankX : +bankMode;
 const bankQtyLbl = () => bankMode === 'all' ? 'all' : bankQty();
@@ -5908,7 +5908,7 @@ function synShopStock(o, kind) {
   return sh.list;
 }
 function startShop(o) {
-  clearUse(); P.uspell = null;
+  clearUse(); setOneDrop(0, 1); P.uspell = null;
   bankOpen = 0;
   const n = nearVillage(o.x, o.z), k = SHOP_KINDS[o.k];
   openShop = { kind: k.k, name: o.shopN || k.n, tier: o.tier !== undefined ? o.tier : n ? n.v.tier : 0 };   // a Gielinor shopkeeper carries its own sign and stock tier (46.)
@@ -5959,7 +5959,21 @@ on(modalBody, 'click', e => {
   else { const r = makeRows && makeRows[+row.dataset.mk]; if (r && mkOk(r)) { startMake(r, makeAt); closeOverlays(); } }
 });
 const PANES = ['inv', 'eq', 'sk', 'wd', 'cb', 'mg', 'pr', 'op'], PANE_DRAW = { cb: () => drawStyles(), mg: () => drawSpells(), pr: () => drawPrayers(), op: () => drawOpts() };
+/* 1-CLICK DROP (the handle beside the pack, shown with the pack's tab): on, a click on a slot sheds it at your feet as a shift-click
+   does. Off by default, and anything else you do — another tab, folding the pack, the world, a menu's other option, a counter or a
+   trade — turns it back off, so a stray tap never costs a stack */
+let oneDrop = 0;
+function setOneDrop(v, quiet) {
+  v = v ? 1 : 0;
+  if (v === oneDrop) return;
+  oneDrop = v; el('invdrop').classList.toggle('on', !!v); el('invdrop').title = '1-click drop: ' + (v ? 'on' : 'off');
+  if (!quiet) say(v ? '1-click drop is on: a click on an item in your pack drops it.' : '1-click drop is off.');
+}
+el('invdrop').onclick = () => setOneDrop(!oneDrop);
+document.body.classList.add('tabinv');
 function showTab(k) {
+  document.body.classList.toggle('tabinv', k === 'inv');
+  if (k !== 'inv') setOneDrop(0, 1);
   for (const t of document.querySelectorAll('.tab')) t.classList.toggle('on', t.dataset.p === k);
   for (const p of PANES) el('pane-' + p).classList.toggle('on', p === k);
   if (OS.on) { osTabNow = k; osStones(); }   // the 2007 frame lights its stone (section 48)
@@ -6490,7 +6504,7 @@ function openCtx(x, y, opts) {
   ctxEl.classList.remove('osMenu');
   ctxEl.innerHTML = '<h3>Choose Option</h3>';
   const add = (html, f) => { const a = document.createElement('a'); a.innerHTML = html; a.onclick = f; ctxEl.appendChild(a); };
-  for (const o of opts) add(optLabel(o), () => { closeCtx(); o.f(); });
+  for (const o of opts) add(optLabel(o), () => { closeCtx(); if (o.t !== 'Drop') setOneDrop(0, 1); o.f(); });
   add('Cancel', closeCtx);
   ctxEl.style.display = 'block';
   ctxEl.style.left = Math.min(x, innerWidth - ctxEl.offsetWidth - 4) + 'px';
@@ -6612,6 +6626,7 @@ on(dom, 'pointerup', e => {
   drag = 0;
   if (ctxAte) { ctxAte = 0; return; }
   if (dragged || e.button === 2 || (trade && trade.open)) return;
+  setOneDrop(0, 1);   // a click on the world is another doing
   const ray = rayAt(e.clientX, e.clientY), o = pickObject(ray);
   if (useSel && !o) clearUse();   // bare ground with an item armed puts it away
   if (o) { const opts = optionsFor(o); if (opts.length) { closeOverlays(); opts[0].f(); return; } }
@@ -6750,7 +6765,7 @@ on(invGrid, 'click', e => {
   if (!s) return clearUse();
   const i = +s.dataset.i;
   if (trade && trade.open) return tradeAdd(i);
-  if (e.shiftKey && inv[i] && !bankOpen && !openShop && !useSel) {   // shift-click sheds the stack at your feet, as ever
+  if ((e.shiftKey || oneDrop) && inv[i] && !bankOpen && !openShop && !useSel) {   // shift-click (or 1-click drop) sheds the stack at your feet, as ever
     const s2 = inv[i];
     dropItem(s2.id, s2.n, P.tx, P.tz);
     inv[i] = null; dirty.inv = 1; markDirty();
@@ -6774,7 +6789,7 @@ on(eqWrap, 'click', e => {
 el('orbRun').onclick = () => { P.run = P.run ? 0 : 1; dirty.orb = 1; };
 /* the pack and the chat log fold away to their handles */
 el('chatmin').onclick = () => { const c = document.body.classList.toggle('chatmin'); el('chatmin').textContent = c ? '+' : '–'; if (!c) chatEl.scrollTop = chatEl.scrollHeight; };
-el('invmin').onclick = () => { const c = document.body.classList.toggle('invmin'); el('invmin').textContent = c ? '+' : '–'; el('invmin').title = c ? 'open the pack' : 'minimise the pack'; if (OS.on) osStones(); };
+el('invmin').onclick = () => { const c = document.body.classList.toggle('invmin'); if (c) setOneDrop(0, 1); el('invmin').textContent = c ? '+' : '–'; el('invmin').title = c ? 'open the pack' : 'minimise the pack'; if (OS.on) osStones(); };
 on(chatEl, 'touchstart touchmove wheel', e => e.stopPropagation(), { passive: true });   // the log claims its own scrolls
 const chatIn = el('chatin');
 on(chatIn, 'keydown', e => {   // Enter focuses the bar, Enter again sends
@@ -7040,61 +7055,24 @@ on(wmCv, 'pointerup pointercancel', e => {
   }
 });
 /* DEVELOPER: the map's teleport (the console unlocked — offline, the sandbox, or the password). Arm it, click the map: you land on
-   the nearest ground a body can stand on to the click, in whichever world the map shows there */
+   the very tile clicked, at its own height, in whichever world the map shows there — on water, in your boat; a tile a loc fills
+   steps off to the nearest open one beside it */
 let wmTpArm = 0;
 const wmTpSet = on => { wmTpArm = on ? 1 : 0; el('wmTp').classList.toggle('on', !!wmTpArm); wmCv.classList.toggle('tp', !!wmTpArm); };
 el('wmTp').onclick = () => wmTpSet(!wmTpArm);
-function seedLandNear(x, z) {   // the seed's nearest dry ground: rings of 8 tiles out to 640, then along the line back toward the click
-  const land = (a, b) => !(M7 && g7Out(a, b) < 2) && macroHeight(a, b) > 0.6;
-  if (land(x, z)) return { x, z };
-  for (let r = 8; r <= 640; r += 8) {
-    let best = null, bd = 1e9;
-    for (let i = -r; i <= r; i += 8) for (const [a, b] of [[x + i, z - r], [x + i, z + r], [x - r, z + i], [x + r, z + i]]) {
-      const d = Math.hypot(a - x, b - z);
-      if (d < bd && land(a, b)) { bd = d; best = [a, b]; }
-    }
-    if (!best) continue;
-    const n = Math.ceil(bd);
-    let fx = best[0], fz = best[1];
-    for (let t = 1; t <= n; t++) { const a = Math.round(best[0] + (x - best[0]) * t / n), b = Math.round(best[1] + (z - best[1]) * t / n); if (!land(a, b)) break; fx = a; fz = b; }
-    return { x: fx, z: fz };
-  }
-  return null;
-}
-function m7LandNear(gx, gy) {   // Gielinor's nearest land by its own map picture, four tiles a pixel; the landing square snaps the last few tiles
-  if (MAP07.isLand(gx, gy)) return [gx, gy];
-  for (let r = 4; r <= 480; r += 4) {
-    let best = null, bd = 1e9;
-    for (let i = -r; i <= r; i += 4) for (const [a, b] of [[gx + i, gy - r], [gx + i, gy + r], [gx - r, gy + i], [gx + r, gy + i]]) {
-      const d = Math.hypot(a - gx, b - gy);
-      if (d < bd && g7In(a, -b) && MAP07.isLand(a, b)) { bd = d; best = [a, b]; }
-    }
-    if (best) return best;
-  }
-  return null;
-}
 function devMapTp(x, z) {
   wmTpSet(0);
   if (!started || !devOK()) return;
   if (P.dead) return say('Not while you are dead.', 'bad');
   closeOverlays();
-  if (M7) {
-    const here = !SEAM ? m7WmHere() : null;
-    if (here && x >= here[0] && x < here[2] && -z >= here[1] && -z < here[3]) {   // the Gielinor place past the edge you stand in (its own map shows only there)
-      teleport(x, z, 300, P.plane, 0); P.snapR = 32;
-      return say('Teleported to ' + x + ', ' + -z + '.', 'lv');
-    }
-    if (g7In(x, z)) {
-      const q = m7LandNear(x, -z);
-      if (!q) return say('There is no ground near there.', 'bad');
-      teleport(q[0], -q[1], 300, 0, 1); P.snapR = 32;   // snap7 steps onto the nearest walkable tile once the square is up
-      return say('Teleported to ' + q[0] + ', ' + q[1] + '.', 'lv');
-    }
+  if (M7 && !seedAt(x, z)) {   // the cache's squares (Gielinor's, or the made world's): the square isn't up yet, so snap7 reads its tile once it is
+    const here = !SEAM ? m7WmHere() : null, own = here && x >= here[0] && x < here[2] && -z >= here[1] && -z < here[3];   // the Gielinor place past the edge you stand in (its own map shows only there)
+    teleport(x, z, 300, own ? P.plane : 0, own ? 0 : 1); P.snapR = 6;
+    return say('Teleported to ' + x + ', ' + -z + '.', 'lv');
   }
-  const q = seedLandNear(x, z);
-  if (!q) { teleport(x, z, 300, 0, 1); return say('Open sea as far as the eye can see: you are in your boat.', 'lv'); }
-  teleport(q.x, q.z, 400, 0, 1);
-  const s = openNear(q.x, q.z, 12);
+  teleport(x, z, 400, 0, 1);
+  if (P.afloat) return say('Teleported to ' + x + ', ' + (M7 ? -z : z) + ' — open water: you are in your boat.', 'lv');
+  const s = openNear(x, z, 6);
   if (s && (s.x !== P.tx || s.z !== P.tz)) placePlayer(s.x, s.z);
   say('Teleported to ' + P.tx + ', ' + (M7 ? -P.tz : P.tz) + ' — ' + biomeName(walkY(P.tx, P.tz), P.tx, P.tz) + '.', 'lv');
 }
@@ -8579,7 +8557,7 @@ function tradeRequest(R) {
   say('Sending a trade offer to ' + R.name + '…');
 }
 function tradeOpen() {
-  trade.open = 1;
+  trade.open = 1; setOneDrop(0, 1);
   P.task = null; P.path.length = 0;
   TR().classList.add('on');
   showTab('inv');
@@ -12440,8 +12418,11 @@ function m7Frame(dt) {
   if (P.plane !== m7PlaneWas) { m7PlaneWas = P.plane; mapOX = 1e9; mapRow = MW; }
   if (P.snap7 && MAP07.regionAt(P.tx, -P.tz)) {   // a landing square is up: step off whatever the tile holds
     P.snap7 = 0;
-    const [x, y] = MAP07.snapWalkable(P.plane, P.tx, -P.tz, P.snapR || 8); P.snapR = 0;   // a dev map landing looks further for a floor
-    if (x !== P.tx || y !== -P.tz) placePlayer(x, -y);
+    if (MAP07.waterAt(P.plane, P.tx, -P.tz)) { P.afloat = 1; P.snapR = 0; }   // a landing on open water: you are in your boat
+    else {
+      const [x, y] = MAP07.snapWalkable(P.plane, P.tx, -P.tz, P.snapR || 8); P.snapR = 0;
+      if (x !== P.tx || y !== -P.tz) placePlayer(x, -y);
+    }
   }
   for (const p of m7Props) {
     p.g.visible = !p.dep7 && m7Shown(p.pl);
@@ -12809,7 +12790,7 @@ function osuiApply() {
   document.body.classList.toggle('osui', !!on);
   if (on) {
     osPanes.appendChild(el('panes'));
-    document.body.appendChild(el('invmin')); document.body.appendChild(el('chatmin'));   // the fold handles stand beside the 2007 frame
+    document.body.appendChild(el('invmin')); document.body.appendChild(el('invdrop')); document.body.appendChild(el('chatmin'));   // the fold handles stand beside the 2007 frame
     const had = !!osCh;
     osBuild(); osChatBuild(); osFit();
     if (had) { for (const ln of osCh.lines) if (ln.cv) ln.cv.remove(); osCh.lines = []; for (const d of chatEl.children) osChatAdd(d.textContent, d.className); }   // what was said while the frame was away
@@ -12817,7 +12798,7 @@ function osuiApply() {
     for (const id of [297, 535, 536, 897, 1358, 1359, 2176, 2177]) OSUI.spriteObjURL(id).then(u => document.documentElement.style.setProperty('--os' + id, 'url("' + u + '")'), () => {});   // stone for the plain panes' buttons; the hitsplats (block 1358, damage 1359) and the health bar (2176 over 2177). The sprite's own blob: a url() on the bucket would cache it without CORS
     for (const id of [494, 495, 496, 497]) OSUI.font(id);   // the menu and the mouseover text draw at once, so their fonts must already stand
   } else {
-    el('side').insertBefore(el('invmin'), el('side').firstChild); el('side').appendChild(el('panes'));
+    el('side').insertBefore(el('invdrop'), el('side').firstChild); el('side').insertBefore(el('invmin'), el('side').firstChild); el('side').appendChild(el('panes'));
     el('chatwrap').insertBefore(el('chatmin'), el('chatwrap').firstChild);
     document.body.insertBefore(el('chatbar'), el('chatwrap').nextSibling);
     osFit();   // the world takes the whole window back
@@ -12844,13 +12825,16 @@ function osFit() {
     R.setProperty('--oss', s.toFixed(4)); R.setProperty('--osc', s.toFixed(4)); R.setProperty('--osx', px(ox)); R.setProperty('--osy', px(oy));
     setViewport(ox + 4 * s, oy + 4 * s, 512 * s, 334 * s);
     if (document.body.classList.contains('invmin')) el('invmin').click();
+    OS.chatW = 519; OS.chatK = s;
   } else {
     const s = Math.min(1, H / 503, W * 0.5 / 249);
     R.setProperty('--oss', s.toFixed(4)); R.setProperty('--osc', s.toFixed(4));
     R.setProperty('--osh', px(H / s)); R.setProperty('--osdy', px(H / s - 503));
-    R.setProperty('--oscw', px(Math.max(120, Math.min(519, (W - 249 * s) / s))));
+    OS.chatW = Math.floor(Math.max(120, Math.min(519, (W - 249 * s) / s))); OS.chatK = s;
+    R.setProperty('--oscw', OS.chatW + 'px');
     setViewport(0, 0, W, H);
   }
+  if (osCh) osChatPan(osCh.px);   // the slide keeps within the new width
   R.setProperty('--osvx', px(VP.x)); R.setProperty('--osvy', px(VP.y)); R.setProperty('--osvr', px(W - VP.x - VP.w)); R.setProperty('--osvb', px(H - VP.y - VP.h));
 }
 
@@ -13047,8 +13031,10 @@ const OS_CHAT_TABS = ['All', 'Game', 'Public', 'Private', 'Channel', 'Clan', 'Tr
 const OS_CHAT_COL = { g: 0x000000, lv: 0x000000, bad: 0x7f0000, good: 0x006600 };
 function osChatBuild() {
   if (osCh) return;
-  osCh = { tab: 0, lines: [], scroll: 0, S: 114, stick: 1 };
-  const body = div(osChat, 'osc osChatBody'); body.style.cssText = 'left:0;top:0;width:519px;height:142px';
+  osCh = { tab: 0, lines: [], scroll: 0, S: 114, stick: 1, px: 0 };
+  const pan = div(osChat, 'osc'); pan.style.cssText = 'left:0;top:0;width:519px;height:165px';   // the whole box, slid under a narrow window (osChatPan)
+  osCh.pan = pan;
+  const body = div(pan, 'osc osChatBody'); body.style.cssText = 'left:0;top:0;width:519px;height:142px';
   OSUI.at(body, OSUI.graphic(1017, 519, 142), 0, 0);
   const view = div(body, 'osc osHit'); view.style.cssText = 'left:7px;top:6px;width:489px;height:114px;overflow:hidden';
   osCh.list = div(view, 'osc'); osCh.list.style.cssText = 'left:0;top:0;width:489px;height:114px';
@@ -13061,8 +13047,7 @@ function osChatBuild() {
   osCh.thumb = { el: th, top: OSUI.at(th, OSUI.graphic(789, 16, 5), 0, 0), mid: OSUI.at(th, OSUI.graphic(790, 16, 1), 0, 5), bot: OSUI.at(th, OSUI.graphic(791, 16, 5), 0, 0) };
   up.classList.add('osHit'); down.classList.add('osHit');
   on(up, 'click', () => osChatScroll(-14)); on(down, 'click', () => osChatScroll(14));
-  on(view, 'wheel', e => { e.preventDefault(); e.stopPropagation(); osChatScroll(e.deltaY > 0 ? 42 : -42); }, { passive: false });
-  const bar = div(osChat, 'osc'); bar.style.cssText = 'left:0;top:142px;width:519px;height:23px';
+  const bar = div(pan, 'osc'); bar.style.cssText = 'left:0;top:142px;width:519px;height:23px';
   OSUI.at(bar, OSUI.graphic(1018, 519, 23), 0, 0);
   osCh.btns = OS_CHAT_TABS.map((n, k) => {
     const b = div(bar, 'osc osHit'); b.style.cssText = 'left:' + (5 + 62 * k) + 'px;top:0;width:56px;height:23px';
@@ -13087,10 +13072,47 @@ function osChatBuild() {
     osChatTabs();
   });
   osCh.body = body;
+  osCh.shL = div(osChat, 'osc osChatShade l'); osCh.shR = div(osChat, 'osc osChatShade r'); osCh.hbar = div(osChat, 'osc osChatHbar');
+  osChatGestures();
   const inp = el('chatin'), draw = () => requestAnimationFrame(osChatInput);
   on(inp, 'input keyup focus blur', draw);
   for (const d of chatEl.children) osChatAdd(d.textContent, d.className);   // the log so far
-  osChatTabs(); osChatInput();
+  osChatTabs(); osChatInput(); osChatPan(0);
+}
+/* a chatbox narrower than its 519 pixels (the resizable layout on a narrow window, a phone held upright) is never cut off: it slides.
+   A finger or the mouse dragged sideways slides it, dragged up or down scrolls the log; a sideways or shift- wheel slides it and the
+   plain wheel over the log scrolls it. A drag that moved spends its click, so a slide never presses a tab. */
+function osChatGestures() {
+  let g = null, ate = 0;
+  on(osChat, 'pointerdown', e => { ate = 0; g = e.button === 0 ? { id: e.pointerId, x: e.clientX, y: e.clientY, px: osCh.px, ax: 0, dy: 0 } : null; });
+  on(osChat, 'pointermove', e => {
+    if (!g || e.pointerId !== g.id) return;
+    const k = OS.chatK || 1, dx = (e.clientX - g.x) / k, dy = (e.clientY - g.y) / k;
+    if (!g.ax) {
+      if (Math.abs(dx) + Math.abs(dy) < 7) return;
+      g.ax = Math.abs(dx) > Math.abs(dy) ? 1 : 2; g.dy = dy;   // the first real movement picks the axis, as a phone's scroller does
+      try { osChat.setPointerCapture(e.pointerId); } catch {}
+    }
+    if (g.ax === 1) osChatPan(g.px - dx);
+    else { osChatScroll(g.dy - dy); g.dy = dy; }   // the log follows the finger: dragged down, older lines come into view
+  });
+  const end = e => { if (g && e.pointerId === g.id) { if (g.ax) ate = 1; g = null; } };
+  on(osChat, 'pointerup', end); on(osChat, 'pointercancel', end);
+  on(osChat, 'click', e => { if (ate) { ate = 0; e.stopPropagation(); e.preventDefault(); } }, true);
+  on(osChat, 'wheel', e => {
+    e.preventDefault(); e.stopPropagation();
+    const side = e.shiftKey ? e.deltaY || e.deltaX : Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : 0;
+    if (side) osChatPan(osCh.px + Math.sign(side) * Math.min(80, Math.abs(side)));
+    else if (e.target.closest('.osChatBody')) osChatScroll(e.deltaY > 0 ? 42 : -42);
+  }, { passive: false });
+}
+function osChatPan(x) {
+  if (!osCh) return;
+  const cw = OS.chatW || 519, room = Math.max(0, 519 - cw);
+  osCh.px = clamp(Math.round(x), 0, room);
+  osCh.pan.style.left = -osCh.px + 'px';
+  osCh.shL.hidden = osCh.px <= 0; osCh.shR.hidden = osCh.px >= room; osCh.hbar.hidden = !room;   // shades on the edges with more beyond, a slim bar for where you are
+  if (room) { const w = Math.max(28, Math.round(cw * cw / 519)); osCh.hbar.style.width = w + 'px'; osCh.hbar.style.left = Math.round((cw - w) * osCh.px / room) + 'px'; }
 }
 function osChatTabs() {
   if (!osCh) return;
@@ -14008,7 +14030,7 @@ function osLabel(html) {   // this game's label markup as the client's colour ta
 function osMenu(x, y, opts) {
   const f = OSUI.fontNow(496);
   if (!f) return false;
-  const rows = opts.map(o => ({ s: osLabel(optLabel(o)), f: () => { closeCtx(); o.f(); } })).concat([{ s: 'Cancel', f: closeCtx }]);
+  const rows = opts.map(o => ({ s: osLabel(optLabel(o)), f: () => { closeCtx(); if (o.t !== 'Drop') setOneDrop(0, 1); o.f(); } })).concat([{ s: 'Cancel', f: closeCtx }]);
   let w = OSUI.width(f, 'Choose Option');
   for (const r of rows) w = Math.max(w, OSUI.width(f, r.s));
   w += 8;
